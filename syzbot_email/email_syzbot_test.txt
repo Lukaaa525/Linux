@@ -1,0 +1,17 @@
+From: Junjie Cao <junjie.cao@intel.com>
+To: syzbot+14afda08dc3484d5db82@syzkaller.appspotmail.com
+Cc: syzkaller-bugs@googlegroups.com, linux-hams@vger.kernel.org
+Subject: Re: [syzbot] [hams?] possible deadlock in nr_rt_ioctl (2)
+In-Reply-To: <685d4c2a.a00a0220.2e5631.028c.GAE@google.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+#syz test: https://github.com/Junjie650/linux.git v2-fix-netrom-deadlock
+
+Hi,
+
+Please test the NetROM deadlock fix on the above tree/branch.
+
+Thanks,
+Junjie

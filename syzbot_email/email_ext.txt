@@ -1,0 +1,17 @@
+From: Junjie Cao <junjie.cao@intel.com>
+To: syzbot+619a09223476d86149f7@syzkaller.appspotmail.com
+Cc: syzkaller-android-bugs@googlegroups.com, syzkaller-bugs@googlegroups.com
+Subject: Re: [Android 6.1] UBSAN: shift-out-of-bounds in exfat_fill_super
+In-Reply-To: <67ffbc31.050a0220.5cdb3.0005.GAE@google.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+#syz test: https://github.com/Junjie650/linux.git exfat-ubsan-guard
+
+Hi,
+
+Please test the exfat UBSAN fix on the above tree/branch.
+
+Thanks,
+Junjie
