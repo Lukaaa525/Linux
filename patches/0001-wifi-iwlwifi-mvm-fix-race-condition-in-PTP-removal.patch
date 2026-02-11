@@ -1,0 +1,45 @@
+From 74728b47581149b84963d72da6af81ce844b8316 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 11 Feb 2026 07:20:52 +0000
+Subject: [PATCH v2 1/2] wifi: iwlwifi: mvm: fix race condition in PTP removal
+
+iwl_mvm_ptp_remove() calls cancel_delayed_work_sync() only after
+ptp_clock_unregister() and clearing ptp_data state (ptp_clock,
+ptp_clock_info, last_gp2).
+
+This creates a race where the delayed work iwl_mvm_ptp_work() can
+execute between ptp_clock_unregister() and cancel_delayed_work_sync(),
+observing partially cleared PTP state.
+
+Move cancel_delayed_work_sync() before ptp_clock_unregister() to
+ensure the delayed work is fully stopped before any PTP cleanup
+begins.
+
+Fixes: 1595ecce1cf3 ("wifi: iwlwifi: mvm: add support for PTP HW clock (PHC)")
+Cc: stable@vger.kernel.org
+Reviewed-by: Simon Horman <horms@kernel.org>
+Signed-off-by: Junjie Cao <junjie.cao@intel.com>
+---
+ linux/drivers/net/wireless/intel/iwlwifi/mvm/ptp.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/linux/drivers/net/wireless/intel/iwlwifi/mvm/ptp.c b/linux/drivers/net/wireless/intel/iwlwifi/mvm/ptp.c
+index ad156b82e..efb291ceb 100644
+--- a/linux/drivers/net/wireless/intel/iwlwifi/mvm/ptp.c
++++ b/linux/drivers/net/wireless/intel/iwlwifi/mvm/ptp.c
+@@ -323,11 +323,11 @@ void iwl_mvm_ptp_remove(struct iwl_mvm *mvm)
+ 			       mvm->ptp_data.ptp_clock_info.name,
+ 			       ptp_clock_index(mvm->ptp_data.ptp_clock));
+ 
++		cancel_delayed_work_sync(&mvm->ptp_data.dwork);
+ 		ptp_clock_unregister(mvm->ptp_data.ptp_clock);
+ 		mvm->ptp_data.ptp_clock = NULL;
+ 		memset(&mvm->ptp_data.ptp_clock_info, 0,
+ 		       sizeof(mvm->ptp_data.ptp_clock_info));
+ 		mvm->ptp_data.last_gp2 = 0;
+-		cancel_delayed_work_sync(&mvm->ptp_data.dwork);
+ 	}
+ }
+-- 
+2.43.0
+

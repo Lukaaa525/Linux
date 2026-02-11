@@ -1,0 +1,27 @@
+From 0b5d5287ca71ec6a1d80e843a0689cc7abe25173 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 11 Feb 2026 07:21:25 +0000
+Subject: [PATCH v2 0/2] wifi: iwlwifi: ptp: fix race condition in PTP removal
+
+Fix a race condition in both iwl_mvm_ptp_remove() and
+iwl_mld_ptp_remove() where cancel_delayed_work_sync() is called too
+late, allowing the delayed work to observe partially cleared PTP state
+during teardown.
+
+Changes since v1:
+- Split into two patches, one per sub-driver, as suggested by
+  Simon Horman.
+- Removed incorrect claim about work re-arming making the race worse,
+  as pointed out by Miri Korenblit.
+
+Claude (2):
+  wifi: iwlwifi: mvm: fix race condition in PTP removal
+  wifi: iwlwifi: mld: fix race condition in PTP removal
+
+ linux/drivers/net/wireless/intel/iwlwifi/mld/ptp.c | 2 +-
+ linux/drivers/net/wireless/intel/iwlwifi/mvm/ptp.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+-- 
+2.43.0
+
