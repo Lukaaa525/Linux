@@ -71,6 +71,7 @@
 #include <asm/traps.h>
 #include <asm/sev.h>
 #include <asm/tdx.h>
+#include <asm/virt.h>
 #include <asm/posted_intr.h>
 #include <asm/runtime-const.h>
 
@@ -94,6 +95,9 @@ EXPORT_SYMBOL(__max_dies_per_package);
 
 unsigned int __max_logical_packages __ro_after_init = 1;
 EXPORT_SYMBOL(__max_logical_packages);
+
+unsigned int __num_nodes_per_package __ro_after_init = 1;
+EXPORT_SYMBOL(__num_nodes_per_package);
 
 unsigned int __num_cores_per_package __ro_after_init = 1;
 EXPORT_SYMBOL(__num_cores_per_package);
@@ -415,18 +419,34 @@ static __always_inline void setup_lass(struct cpuinfo_x86 *c)
 	 * Legacy vsyscall page access causes a #GP when LASS is active.
 	 * Disable LASS because the #GP handler doesn't support vsyscall
 	 * emulation.
-	 *
-	 * Also disable LASS when running under EFI, as some runtime and
-	 * boot services rely on 1:1 mappings in the lower half.
 	 */
-	if (IS_ENABLED(CONFIG_X86_VSYSCALL_EMULATION) ||
-	    IS_ENABLED(CONFIG_EFI)) {
+	if (IS_ENABLED(CONFIG_X86_VSYSCALL_EMULATION))
 		setup_clear_cpu_cap(X86_FEATURE_LASS);
-		return;
-	}
-
-	cr4_set_bits(X86_CR4_LASS);
 }
+
+static int enable_lass(unsigned int cpu)
+{
+	cr4_set_bits(X86_CR4_LASS);
+
+	return 0;
+}
+
+/*
+ * Finalize features that need to be enabled just before entering
+ * userspace. Note that this only runs on a single CPU. Use appropriate
+ * callbacks if all the CPUs need to reflect the same change.
+ */
+static int cpu_finalize_pre_userspace(void)
+{
+	if (!cpu_feature_enabled(X86_FEATURE_LASS))
+		return 0;
+
+	/* Runs on all online CPUs and future CPUs that come online. */
+	cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "x86/lass:enable", enable_lass, NULL);
+
+	return 0;
+}
+late_initcall(cpu_finalize_pre_userspace);
 
 /* These bits should not change their value after CPU init is finished. */
 static const unsigned long cr4_pinned_mask = X86_CR4_SMEP | X86_CR4_SMAP | X86_CR4_UMIP |
@@ -2151,6 +2171,7 @@ static __init void identify_boot_cpu(void)
 	cpu_detect_tlb(&boot_cpu_data);
 	setup_cr_pinning();
 
+	x86_virt_init();
 	tsx_init();
 	tdx_init();
 	lkgs_init();

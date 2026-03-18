@@ -37,6 +37,7 @@
 #include <linux/slab.h>
 
 #include <drm/drm_print.h>
+#include <drm/intel/intel_gmd_misc_regs.h>
 
 #include "display/i9xx_plane_regs.h"
 #include "display/intel_display_regs.h"
@@ -1921,7 +1922,7 @@ static int perform_bb_shadow(struct parser_exec_state *s)
 	if (ret)
 		return ret;
 
-	bb = kzalloc(sizeof(*bb), GFP_KERNEL);
+	bb = kzalloc_obj(*bb);
 	if (!bb)
 		return -ENOMEM;
 
@@ -3226,7 +3227,7 @@ static int init_cmd_table(struct intel_gvt *gvt)
 		if (!(cmd_info[i].devices & gen_type))
 			continue;
 
-		e = kzalloc(sizeof(*e), GFP_KERNEL);
+		e = kzalloc_obj(*e);
 		if (!e)
 			return -ENOMEM;
 

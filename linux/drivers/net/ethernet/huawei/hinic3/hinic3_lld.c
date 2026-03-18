@@ -60,7 +60,7 @@ static struct hinic3_adev *hinic3_add_one_adev(struct hinic3_hwdev *hwdev,
 	const char *svc_name;
 	int ret;
 
-	hadev = kzalloc(sizeof(*hadev), GFP_KERNEL);
+	hadev = kzalloc_obj(*hadev);
 	if (!hadev)
 		return NULL;
 
@@ -230,7 +230,6 @@ err_unmap_mgmt_reg_base:
 		iounmap(pci_adapter->mgmt_reg_base);
 err_unmap_intr_reg_base:
 	iounmap(pci_adapter->intr_reg_base);
-
 err_unmap_cfg_reg_base:
 	iounmap(pci_adapter->cfg_reg_base);
 
@@ -251,7 +250,7 @@ static int hinic3_pci_init(struct pci_dev *pdev)
 	struct hinic3_pcidev *pci_adapter;
 	int err;
 
-	pci_adapter = kzalloc(sizeof(*pci_adapter), GFP_KERNEL);
+	pci_adapter = kzalloc_obj(*pci_adapter);
 	if (!pci_adapter)
 		return -ENOMEM;
 
@@ -285,10 +284,8 @@ static int hinic3_pci_init(struct pci_dev *pdev)
 err_release_regions:
 	pci_clear_master(pdev);
 	pci_release_regions(pdev);
-
 err_disable_device:
 	pci_disable_device(pdev);
-
 err_free_pci_adapter:
 	pci_set_drvdata(pdev, NULL);
 	mutex_destroy(&pci_adapter->pdev_mutex);
@@ -382,7 +379,6 @@ err_uninit_func:
 	hinic3_func_uninit(pdev);
 err_unmap_bar:
 	hinic3_unmapping_bar(pci_adapter);
-
 err_out:
 	dev_err(&pdev->dev, "PCIe device probe function failed\n");
 
@@ -415,7 +411,6 @@ static int hinic3_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 err_uninit_pci:
 	hinic3_pci_uninit(pdev);
-
 err_out:
 	dev_err(&pdev->dev, "PCIe device probe failed\n");
 
@@ -431,6 +426,7 @@ static void hinic3_remove(struct pci_dev *pdev)
 }
 
 static const struct pci_device_id hinic3_pci_table[] = {
+	{PCI_VDEVICE(HUAWEI, PCI_DEV_ID_HINIC3_PF), 0},
 	{PCI_VDEVICE(HUAWEI, PCI_DEV_ID_HINIC3_VF), 0},
 	{0, 0}
 

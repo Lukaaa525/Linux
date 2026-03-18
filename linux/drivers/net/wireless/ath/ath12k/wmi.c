@@ -126,6 +126,14 @@ struct wmi_tlv_mgmt_rx_parse {
 	bool frame_buf_done;
 };
 
+struct wmi_pdev_set_obss_bitmap_arg {
+	u32 tlv_tag;
+	u32 pdev_id;
+	u32 cmd_id;
+	const u32 *bitmap;
+	const char *label;
+};
+
 static const struct ath12k_wmi_tlv_policy ath12k_wmi_tlv_policies[] = {
 	[WMI_TAG_ARRAY_BYTE] = { .min_len = 0 },
 	[WMI_TAG_ARRAY_UINT32] = { .min_len = 0 },
@@ -295,7 +303,7 @@ ath12k_wmi_tlv_parse_alloc(struct ath12k_base *ab,
 	const void **tb;
 	int ret;
 
-	tb = kcalloc(WMI_TAG_MAX, sizeof(*tb), gfp);
+	tb = kzalloc_objs(*tb, WMI_TAG_MAX, gfp);
 	if (!tb)
 		return ERR_PTR(-ENOMEM);
 
@@ -3560,6 +3568,140 @@ ath12k_wmi_send_obss_spr_cmd(struct ath12k *ar, u32 vdev_id,
 	return ret;
 }
 
+u32 ath12k_wmi_build_obss_pd(const struct ath12k_wmi_obss_pd_arg *arg)
+{
+	u32 param_val = 0;
+
+	param_val |= u32_encode_bits((u8)arg->srg_th, GENMASK(15, 8));
+	param_val |= u32_encode_bits((u8)arg->non_srg_th, GENMASK(7, 0));
+
+	if (arg->srp_support)
+		param_val |= ATH12K_OBSS_PD_THRESHOLD_IN_DBM;
+
+	if (arg->srg_enabled && arg->srp_support)
+		param_val |= ATH12K_OBSS_PD_SRG_EN;
+
+	if (arg->non_srg_enabled)
+		param_val |= ATH12K_OBSS_PD_NON_SRG_EN;
+
+	return param_val;
+}
+
+static int ath12k_wmi_pdev_set_obss_bitmap(struct ath12k *ar,
+					   const struct wmi_pdev_set_obss_bitmap_arg *arg)
+{
+	struct wmi_pdev_obss_pd_bitmap_cmd *cmd;
+	struct ath12k_wmi_pdev *wmi = ar->wmi;
+	const int len = sizeof(*cmd);
+	struct sk_buff *skb;
+	int ret;
+
+	skb = ath12k_wmi_alloc_skb(wmi->wmi_ab, len);
+	if (!skb)
+		return -ENOMEM;
+
+	cmd = (struct wmi_pdev_obss_pd_bitmap_cmd *)skb->data;
+	cmd->tlv_header = ath12k_wmi_tlv_cmd_hdr(arg->tlv_tag, len);
+	cmd->pdev_id = cpu_to_le32(arg->pdev_id);
+	memcpy(cmd->bitmap, arg->bitmap, sizeof(cmd->bitmap));
+
+	ath12k_dbg(ar->ab, ATH12K_DBG_WMI,
+		   "wmi set pdev %u %s %08x %08x\n",
+		   arg->pdev_id, arg->label, arg->bitmap[0], arg->bitmap[1]);
+
+	ret = ath12k_wmi_cmd_send(wmi, skb, arg->cmd_id);
+	if (ret) {
+		ath12k_warn(ar->ab, "failed to send %s: %d\n", arg->label, ret);
+		dev_kfree_skb(skb);
+	}
+
+	return ret;
+}
+
+int ath12k_wmi_pdev_set_srg_bss_color_bitmap(struct ath12k *ar,
+					     u32 pdev_id, const u32 *bitmap)
+{
+	struct wmi_pdev_set_obss_bitmap_arg arg = {
+		.tlv_tag = WMI_TAG_PDEV_SRG_BSS_COLOR_BITMAP_CMD,
+		.pdev_id = pdev_id,
+		.cmd_id = WMI_PDEV_SET_SRG_BSS_COLOR_BITMAP_CMDID,
+		.bitmap = bitmap,
+		.label = "SRG bss color bitmap",
+	};
+
+	return ath12k_wmi_pdev_set_obss_bitmap(ar, &arg);
+}
+
+int ath12k_wmi_pdev_set_srg_partial_bssid_bitmap(struct ath12k *ar,
+						 u32 pdev_id, const u32 *bitmap)
+{
+	struct wmi_pdev_set_obss_bitmap_arg arg = {
+		.tlv_tag = WMI_TAG_PDEV_SRG_PARTIAL_BSSID_BITMAP_CMD,
+		.pdev_id = pdev_id,
+		.cmd_id = WMI_PDEV_SET_SRG_PARTIAL_BSSID_BITMAP_CMDID,
+		.bitmap = bitmap,
+		.label = "SRG partial bssid bitmap",
+	};
+
+	return ath12k_wmi_pdev_set_obss_bitmap(ar, &arg);
+}
+
+int ath12k_wmi_pdev_srg_obss_color_enable_bitmap(struct ath12k *ar,
+						 u32 pdev_id, const u32 *bitmap)
+{
+	struct wmi_pdev_set_obss_bitmap_arg arg = {
+		.tlv_tag = WMI_TAG_PDEV_SRG_OBSS_COLOR_ENABLE_BITMAP_CMD,
+		.pdev_id = pdev_id,
+		.cmd_id = WMI_PDEV_SET_SRG_OBSS_COLOR_ENABLE_BITMAP_CMDID,
+		.bitmap = bitmap,
+		.label = "SRG obss color enable bitmap",
+	};
+
+	return ath12k_wmi_pdev_set_obss_bitmap(ar, &arg);
+}
+
+int ath12k_wmi_pdev_srg_obss_bssid_enable_bitmap(struct ath12k *ar,
+						 u32 pdev_id, const u32 *bitmap)
+{
+	struct wmi_pdev_set_obss_bitmap_arg arg = {
+		.tlv_tag = WMI_TAG_PDEV_SRG_OBSS_BSSID_ENABLE_BITMAP_CMD,
+		.pdev_id = pdev_id,
+		.cmd_id = WMI_PDEV_SET_SRG_OBSS_BSSID_ENABLE_BITMAP_CMDID,
+		.bitmap = bitmap,
+		.label = "SRG obss bssid enable bitmap",
+	};
+
+	return ath12k_wmi_pdev_set_obss_bitmap(ar, &arg);
+}
+
+int ath12k_wmi_pdev_non_srg_obss_color_enable_bitmap(struct ath12k *ar,
+						     u32 pdev_id, const u32 *bitmap)
+{
+	struct wmi_pdev_set_obss_bitmap_arg arg = {
+		.tlv_tag = WMI_TAG_PDEV_NON_SRG_OBSS_COLOR_ENABLE_BITMAP_CMD,
+		.pdev_id = pdev_id,
+		.cmd_id = WMI_PDEV_SET_NON_SRG_OBSS_COLOR_ENABLE_BITMAP_CMDID,
+		.bitmap = bitmap,
+		.label = "non SRG obss color enable bitmap",
+	};
+
+	return ath12k_wmi_pdev_set_obss_bitmap(ar, &arg);
+}
+
+int ath12k_wmi_pdev_non_srg_obss_bssid_enable_bitmap(struct ath12k *ar,
+						     u32 pdev_id, const u32 *bitmap)
+{
+	struct wmi_pdev_set_obss_bitmap_arg arg = {
+		.tlv_tag = WMI_TAG_PDEV_NON_SRG_OBSS_BSSID_ENABLE_BITMAP_CMD,
+		.pdev_id = pdev_id,
+		.cmd_id = WMI_PDEV_SET_NON_SRG_OBSS_BSSID_ENABLE_BITMAP_CMDID,
+		.bitmap = bitmap,
+		.label = "non SRG obss bssid enable bitmap",
+	};
+
+	return ath12k_wmi_pdev_set_obss_bitmap(ar, &arg);
+}
+
 int ath12k_wmi_obss_color_cfg_cmd(struct ath12k *ar, u32 vdev_id,
 				  u8 bss_color, u32 period,
 				  bool enable)
@@ -6636,31 +6778,6 @@ static int ath12k_pull_peer_assoc_conf_ev(struct ath12k_base *ab, struct sk_buff
 	return 0;
 }
 
-static int
-ath12k_pull_pdev_temp_ev(struct ath12k_base *ab, struct sk_buff *skb,
-			 const struct wmi_pdev_temperature_event *ev)
-{
-	const void **tb;
-	int ret;
-
-	tb = ath12k_wmi_tlv_parse_alloc(ab, skb, GFP_ATOMIC);
-	if (IS_ERR(tb)) {
-		ret = PTR_ERR(tb);
-		ath12k_warn(ab, "failed to parse tlv: %d\n", ret);
-		return ret;
-	}
-
-	ev = tb[WMI_TAG_PDEV_TEMPERATURE_EVENT];
-	if (!ev) {
-		ath12k_warn(ab, "failed to fetch pdev temp ev");
-		kfree(tb);
-		return -EPROTO;
-	}
-
-	kfree(tb);
-	return 0;
-}
-
 static void ath12k_wmi_op_ep_tx_credits(struct ath12k_base *ab)
 {
 	/* try to send pending beacons first. they take priority */
@@ -6725,7 +6842,7 @@ static int ath12k_reg_chan_list_event(struct ath12k_base *ab, struct sk_buff *sk
 	u8 pdev_idx = 255;
 	int ret;
 
-	reg_info = kzalloc(sizeof(*reg_info), GFP_ATOMIC);
+	reg_info = kzalloc_obj(*reg_info, GFP_ATOMIC);
 	if (!reg_info) {
 		ret = -ENOMEM;
 		goto fallback;
@@ -8099,8 +8216,6 @@ static int ath12k_wmi_tlv_fw_stats_data_parse(struct ath12k_base *ab,
 	struct ath12k_fw_stats *stats = parse->stats;
 	struct ath12k *ar;
 	struct ath12k_link_vif *arvif;
-	struct ieee80211_sta *sta;
-	struct ath12k_sta *ahsta;
 	struct ath12k_link_sta *arsta;
 	int i, ret = 0;
 	const void *data = ptr;
@@ -8136,26 +8251,24 @@ static int ath12k_wmi_tlv_fw_stats_data_parse(struct ath12k_base *ab,
 
 		arvif = ath12k_mac_get_arvif(ar, le32_to_cpu(src->vdev_id));
 		if (arvif) {
-			sta = ieee80211_find_sta_by_ifaddr(ath12k_ar_to_hw(ar),
-							   arvif->bssid,
-							   NULL);
-			if (sta) {
-				ahsta = ath12k_sta_to_ahsta(sta);
-				arsta = &ahsta->deflink;
+			spin_lock_bh(&ab->base_lock);
+			arsta = ath12k_link_sta_find_by_addr(ab, arvif->bssid);
+			if (arsta) {
 				arsta->rssi_beacon = le32_to_cpu(src->beacon_snr);
 				ath12k_dbg(ab, ATH12K_DBG_WMI,
 					   "wmi stats vdev id %d snr %d\n",
 					   src->vdev_id, src->beacon_snr);
 			} else {
-				ath12k_dbg(ab, ATH12K_DBG_WMI,
-					   "not found station bssid %pM for vdev stat\n",
-					   arvif->bssid);
+				ath12k_warn(ab,
+					    "not found link sta with bssid %pM for vdev stat\n",
+					    arvif->bssid);
 			}
+			spin_unlock_bh(&ab->base_lock);
 		}
 
 		data += sizeof(*src);
 		len -= sizeof(*src);
-		dst = kzalloc(sizeof(*dst), GFP_ATOMIC);
+		dst = kzalloc_obj(*dst, GFP_ATOMIC);
 		if (!dst)
 			continue;
 		ath12k_wmi_pull_vdev_stats(src, dst);
@@ -8174,7 +8287,7 @@ static int ath12k_wmi_tlv_fw_stats_data_parse(struct ath12k_base *ab,
 
 		data += sizeof(*src);
 		len -= sizeof(*src);
-		dst = kzalloc(sizeof(*dst), GFP_ATOMIC);
+		dst = kzalloc_obj(*dst, GFP_ATOMIC);
 		if (!dst)
 			continue;
 		ath12k_wmi_pull_bcn_stats(src, dst);
@@ -8196,7 +8309,7 @@ static int ath12k_wmi_tlv_fw_stats_data_parse(struct ath12k_base *ab,
 		data += sizeof(*src);
 		len -= sizeof(*src);
 
-		dst = kzalloc(sizeof(*dst), GFP_ATOMIC);
+		dst = kzalloc_obj(*dst, GFP_ATOMIC);
 		if (!dst)
 			continue;
 
@@ -8221,8 +8334,6 @@ static int ath12k_wmi_tlv_rssi_chain_parse(struct ath12k_base *ab,
 	struct ath12k_fw_stats *stats = parse->stats;
 	struct ath12k_link_vif *arvif;
 	struct ath12k_link_sta *arsta;
-	struct ieee80211_sta *sta;
-	struct ath12k_sta *ahsta;
 	struct ath12k *ar;
 	int vdev_id;
 	int j;
@@ -8258,18 +8369,14 @@ static int ath12k_wmi_tlv_rssi_chain_parse(struct ath12k_base *ab,
 		   "stats bssid %pM vif %p\n",
 		   arvif->bssid, arvif->ahvif->vif);
 
-	sta = ieee80211_find_sta_by_ifaddr(ath12k_ar_to_hw(ar),
-					   arvif->bssid,
-					   NULL);
-	if (!sta) {
-		ath12k_dbg(ab, ATH12K_DBG_WMI,
-			   "not found station of bssid %pM for rssi chain\n",
-			   arvif->bssid);
+	guard(spinlock_bh)(&ab->base_lock);
+	arsta = ath12k_link_sta_find_by_addr(ab, arvif->bssid);
+	if (!arsta) {
+		ath12k_warn(ab,
+			    "not found link sta with bssid %pM for rssi chain\n",
+			    arvif->bssid);
 		return -EPROTO;
 	}
-
-	ahsta = ath12k_sta_to_ahsta(sta);
-	arsta = &ahsta->deflink;
 
 	BUILD_BUG_ON(ARRAY_SIZE(arsta->chain_signal) >
 		     ARRAY_SIZE(stats_rssi->rssi_avg_beacon));
@@ -8669,24 +8776,44 @@ static void
 ath12k_wmi_pdev_temperature_event(struct ath12k_base *ab,
 				  struct sk_buff *skb)
 {
+	const struct wmi_pdev_temperature_event *ev;
 	struct ath12k *ar;
-	struct wmi_pdev_temperature_event ev = {};
+	const void **tb;
+	int temp;
+	u32 pdev_id;
 
-	if (ath12k_pull_pdev_temp_ev(ab, skb, &ev) != 0) {
-		ath12k_warn(ab, "failed to extract pdev temperature event");
+	tb = ath12k_wmi_tlv_parse_alloc(ab, skb, GFP_ATOMIC);
+	if (IS_ERR(tb)) {
+		ath12k_warn(ab, "failed to parse tlv: %ld\n", PTR_ERR(tb));
 		return;
 	}
 
+	ev = tb[WMI_TAG_PDEV_TEMPERATURE_EVENT];
+	if (!ev) {
+		ath12k_warn(ab, "failed to fetch pdev temp ev\n");
+		kfree(tb);
+		return;
+	}
+
+	temp = a_sle32_to_cpu(ev->temp);
+	pdev_id = le32_to_cpu(ev->pdev_id);
+
+	kfree(tb);
+
 	ath12k_dbg(ab, ATH12K_DBG_WMI,
-		   "pdev temperature ev temp %d pdev_id %d\n", ev.temp, ev.pdev_id);
+		   "pdev temperature ev temp %d pdev_id %u\n",
+		   temp, pdev_id);
 
 	rcu_read_lock();
 
-	ar = ath12k_mac_get_ar_by_pdev_id(ab, le32_to_cpu(ev.pdev_id));
+	ar = ath12k_mac_get_ar_by_pdev_id(ab, pdev_id);
 	if (!ar) {
-		ath12k_warn(ab, "invalid pdev id in pdev temperature ev %d", ev.pdev_id);
+		ath12k_warn(ab, "invalid pdev id %u in pdev temperature ev\n",
+			    pdev_id);
 		goto exit;
 	}
+
+	ath12k_thermal_event_temperature(ar, temp);
 
 exit:
 	rcu_read_unlock();
@@ -9417,8 +9544,7 @@ static void ath12k_wmi_process_tpc_stats(struct ath12k_base *ab,
 			goto unlock;
 		}
 		ar->debug.tpc_stats =
-			kzalloc(sizeof(struct wmi_tpc_stats_arg),
-				GFP_ATOMIC);
+			kzalloc_obj(struct wmi_tpc_stats_arg, GFP_ATOMIC);
 		if (!ar->debug.tpc_stats) {
 			ath12k_warn(ab,
 				    "Failed to allocate memory for tpc stats\n");
@@ -9891,50 +10017,46 @@ static int ath12k_connect_pdev_htc_service(struct ath12k_base *ab,
 
 static int
 ath12k_wmi_send_unit_test_cmd(struct ath12k *ar,
-			      struct wmi_unit_test_cmd ut_cmd,
-			      u32 *test_args)
+			      const struct wmi_unit_test_arg *ut)
 {
 	struct ath12k_wmi_pdev *wmi = ar->wmi;
 	struct wmi_unit_test_cmd *cmd;
+	int buf_len, arg_len;
 	struct sk_buff *skb;
 	struct wmi_tlv *tlv;
+	__le32 *ut_cmd_args;
 	void *ptr;
-	u32 *ut_cmd_args;
-	int buf_len, arg_len;
 	int ret;
 	int i;
 
-	arg_len = sizeof(u32) * le32_to_cpu(ut_cmd.num_args);
-	buf_len = sizeof(ut_cmd) + arg_len + TLV_HDR_SIZE;
+	arg_len = sizeof(*ut_cmd_args) * ut->num_args;
+	buf_len = sizeof(*cmd) + arg_len + TLV_HDR_SIZE;
 
 	skb = ath12k_wmi_alloc_skb(wmi->wmi_ab, buf_len);
 	if (!skb)
 		return -ENOMEM;
 
-	cmd = (struct wmi_unit_test_cmd *)skb->data;
+	ptr = skb->data;
+	cmd = ptr;
 	cmd->tlv_header = ath12k_wmi_tlv_cmd_hdr(WMI_TAG_UNIT_TEST_CMD,
-						 sizeof(ut_cmd));
+						 sizeof(*cmd));
+	cmd->vdev_id = cpu_to_le32(ut->vdev_id);
+	cmd->module_id = cpu_to_le32(ut->module_id);
+	cmd->num_args = cpu_to_le32(ut->num_args);
+	cmd->diag_token = cpu_to_le32(ut->diag_token);
 
-	cmd->vdev_id = ut_cmd.vdev_id;
-	cmd->module_id = ut_cmd.module_id;
-	cmd->num_args = ut_cmd.num_args;
-	cmd->diag_token = ut_cmd.diag_token;
-
-	ptr = skb->data + sizeof(ut_cmd);
-
+	ptr += sizeof(*cmd);
 	tlv = ptr;
 	tlv->header = ath12k_wmi_tlv_hdr(WMI_TAG_ARRAY_UINT32, arg_len);
 
 	ptr += TLV_HDR_SIZE;
-
 	ut_cmd_args = ptr;
-	for (i = 0; i < le32_to_cpu(ut_cmd.num_args); i++)
-		ut_cmd_args[i] = test_args[i];
+	for (i = 0; i < ut->num_args; i++)
+		ut_cmd_args[i] = cpu_to_le32(ut->args[i]);
 
 	ath12k_dbg(ar->ab, ATH12K_DBG_WMI,
 		   "WMI unit test : module %d vdev %d n_args %d token %d\n",
-		   cmd->module_id, cmd->vdev_id, cmd->num_args,
-		   cmd->diag_token);
+		   ut->module_id, ut->vdev_id, ut->num_args, ut->diag_token);
 
 	ret = ath12k_wmi_cmd_send(wmi, skb, WMI_UNIT_TEST_CMDID);
 
@@ -9950,8 +10072,7 @@ ath12k_wmi_send_unit_test_cmd(struct ath12k *ar,
 int ath12k_wmi_simulate_radar(struct ath12k *ar)
 {
 	struct ath12k_link_vif *arvif;
-	u32 dfs_args[DFS_MAX_TEST_ARGS];
-	struct wmi_unit_test_cmd wmi_ut;
+	struct wmi_unit_test_arg wmi_ut = {};
 	bool arvif_found = false;
 
 	list_for_each_entry(arvif, &ar->arvifs, list) {
@@ -9964,22 +10085,23 @@ int ath12k_wmi_simulate_radar(struct ath12k *ar)
 	if (!arvif_found)
 		return -EINVAL;
 
-	dfs_args[DFS_TEST_CMDID] = 0;
-	dfs_args[DFS_TEST_PDEV_ID] = ar->pdev->pdev_id;
-	/* Currently we could pass segment_id(b0 - b1), chirp(b2)
+	wmi_ut.args[DFS_TEST_CMDID] = 0;
+	wmi_ut.args[DFS_TEST_PDEV_ID] = ar->pdev->pdev_id;
+	/*
+	 * Currently we could pass segment_id(b0 - b1), chirp(b2)
 	 * freq offset (b3 - b10) to unit test. For simulation
 	 * purpose this can be set to 0 which is valid.
 	 */
-	dfs_args[DFS_TEST_RADAR_PARAM] = 0;
+	wmi_ut.args[DFS_TEST_RADAR_PARAM] = 0;
 
-	wmi_ut.vdev_id = cpu_to_le32(arvif->vdev_id);
-	wmi_ut.module_id = cpu_to_le32(DFS_UNIT_TEST_MODULE);
-	wmi_ut.num_args = cpu_to_le32(DFS_MAX_TEST_ARGS);
-	wmi_ut.diag_token = cpu_to_le32(DFS_UNIT_TEST_TOKEN);
+	wmi_ut.vdev_id = arvif->vdev_id;
+	wmi_ut.module_id = DFS_UNIT_TEST_MODULE;
+	wmi_ut.num_args = DFS_MAX_TEST_ARGS;
+	wmi_ut.diag_token = DFS_UNIT_TEST_TOKEN;
 
 	ath12k_dbg(ar->ab, ATH12K_DBG_REG, "Triggering Radar Simulation\n");
 
-	return ath12k_wmi_send_unit_test_cmd(ar, wmi_ut, dfs_args);
+	return ath12k_wmi_send_unit_test_cmd(ar, &wmi_ut);
 }
 
 int ath12k_wmi_send_tpc_stats_request(struct ath12k *ar,

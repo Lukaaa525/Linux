@@ -92,7 +92,7 @@
  */
 #ifdef CONFIG_EXT4_DEBUG
 #define ext_debug(ino, fmt, ...)					\
-	pr_debug("[%s/%d] EXT4-fs (%s): ino %lu: (%s, %d): %s:" fmt,	\
+	pr_debug("[%s/%d] EXT4-fs (%s): ino %llu: (%s, %d): %s:" fmt,	\
 		 current->comm, task_pid_nr(current),			\
 		 ino->i_sb->s_id, ino->i_ino, __FILE__, __LINE__,	\
 		 __func__, ##__VA_ARGS__)
@@ -1195,10 +1195,6 @@ struct ext4_inode_info {
 
 #ifdef CONFIG_FS_ENCRYPTION
 	struct fscrypt_inode_info *i_crypt_info;
-#endif
-
-#ifdef CONFIG_FS_VERITY
-	struct fsverity_info *i_verity_info;
 #endif
 };
 
@@ -3233,7 +3229,7 @@ extern void __dump_mmp_msg(struct super_block *, struct mmp_struct *mmp,
 extern __printf(7, 8)
 void __ext4_grp_locked_error(const char *, unsigned int,
 			     struct super_block *, ext4_group_t,
-			     unsigned long, ext4_fsblk_t,
+			     u64, ext4_fsblk_t,
 			     const char *, ...);
 
 #define EXT4_ERROR_INODE(inode, fmt, a...) \
@@ -3744,8 +3740,8 @@ static inline void ext4_set_de_type(struct super_block *sb,
 }
 
 /* readpages.c */
-extern int ext4_mpage_readpages(struct inode *inode,
-		struct readahead_control *rac, struct folio *folio);
+int ext4_read_folio(struct file *file, struct folio *folio);
+void ext4_readahead(struct readahead_control *rac);
 extern int __init ext4_init_post_read_processing(void);
 extern void ext4_exit_post_read_processing(void);
 

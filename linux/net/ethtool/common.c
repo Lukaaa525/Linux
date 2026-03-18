@@ -637,21 +637,11 @@ int __ethtool_get_link(struct net_device *dev)
 int ethtool_get_rx_ring_count(struct net_device *dev)
 {
 	const struct ethtool_ops *ops = dev->ethtool_ops;
-	struct ethtool_rxnfc rx_rings = {};
-	int ret;
 
-	if (ops->get_rx_ring_count)
-		return ops->get_rx_ring_count(dev);
-
-	if (!ops->get_rxnfc)
+	if (!ops->get_rx_ring_count)
 		return -EOPNOTSUPP;
 
-	rx_rings.cmd = ETHTOOL_GRXRINGS;
-	ret = ops->get_rxnfc(dev, &rx_rings, NULL);
-	if (ret < 0)
-		return ret;
-
-	return rx_rings.data;
+	return ops->get_rx_ring_count(dev);
 }
 
 static int ethtool_get_rxnfc_rule_count(struct net_device *dev)
@@ -697,7 +687,7 @@ static int ethtool_get_max_rxnfc_channel(struct net_device *dev, u64 *max)
 	if (rule_cnt <= 0)
 		return -EINVAL;
 
-	info = kvzalloc(struct_size(info, rule_locs, rule_cnt), GFP_KERNEL);
+	info = kvzalloc_flex(*info, rule_locs, rule_cnt);
 	if (!info)
 		return -ENOMEM;
 
@@ -780,7 +770,7 @@ static u32 ethtool_get_max_rxfh_channel(struct net_device *dev)
 	if (dev_size == 0)
 		return current_max;
 
-	rxfh.indir = kcalloc(dev_size, sizeof(rxfh.indir[0]), GFP_USER);
+	rxfh.indir = kzalloc_objs(rxfh.indir[0], dev_size, GFP_USER);
 	if (!rxfh.indir)
 		return U32_MAX;
 
@@ -851,7 +841,7 @@ int ethtool_check_rss_ctx_busy(struct net_device *dev, u32 rss_context)
 	if (rule_cnt < 0)
 		return -EINVAL;
 
-	info = kvzalloc(struct_size(info, rule_locs, rule_cnt), GFP_KERNEL);
+	info = kvzalloc_flex(*info, rule_locs, rule_cnt);
 	if (!info)
 		return -ENOMEM;
 
@@ -910,9 +900,6 @@ ethtool_rxfh_ctx_alloc(const struct ethtool_ops *ops,
 	ctx->key_size = key_size;
 	ctx->key_off = key_off;
 	ctx->priv_size = ops->rxfh_priv_size;
-
-	ctx->hfunc = ETH_RSS_HASH_NO_CHANGE;
-	ctx->input_xfrm = RXH_XFRM_NO_CHANGE;
 
 	return ctx;
 }

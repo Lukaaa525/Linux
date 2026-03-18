@@ -8,9 +8,7 @@
 #include <linux/bitfield.h>
 #include <linux/bitmap.h>
 #include <linux/circ_buf.h>
-#include <linux/delay.h>
 #include <linux/dma-fence-array.h>
-#include <linux/math64.h>
 
 #include <drm/drm_managed.h>
 
@@ -42,11 +40,14 @@
 #include "xe_pm.h"
 #include "xe_ring_ops_types.h"
 #include "xe_sched_job.h"
+#include "xe_sleep.h"
 #include "xe_trace.h"
 #include "xe_uc_fw.h"
 #include "xe_vm.h"
 
 #define XE_GUC_EXEC_QUEUE_CGP_CONTEXT_ERROR_LEN		6
+
+static int guc_submit_reset_prepare(struct xe_guc *guc);
 
 static struct xe_guc *
 exec_queue_to_guc(struct xe_exec_queue *q)
@@ -239,7 +240,7 @@ static bool exec_queue_killed_or_banned_or_wedged(struct xe_exec_queue *q)
 		 EXEC_QUEUE_STATE_BANNED));
 }
 
-static void guc_submit_fini(struct drm_device *drm, void *arg)
+static void guc_submit_sw_fini(struct drm_device *drm, void *arg)
 {
 	struct xe_guc *guc = arg;
 	struct xe_device *xe = guc_to_xe(guc);
@@ -255,6 +256,19 @@ static void guc_submit_fini(struct drm_device *drm, void *arg)
 	xe_gt_assert(gt, ret);
 
 	xa_destroy(&guc->submission_state.exec_queue_lookup);
+}
+
+static void guc_submit_fini(void *arg)
+{
+	struct xe_guc *guc = arg;
+
+	/* Forcefully kill any remaining exec queues */
+	xe_guc_ct_stop(&guc->ct);
+	guc_submit_reset_prepare(guc);
+	xe_guc_softreset(guc);
+	xe_guc_submit_stop(guc);
+	xe_uc_fw_sanitize(&guc->fw);
+	xe_guc_submit_pause_abort(guc);
 }
 
 static void guc_submit_wedged_fini(void *arg)
@@ -326,7 +340,11 @@ int xe_guc_submit_init(struct xe_guc *guc, unsigned int num_ids)
 
 	guc->submission_state.initialized = true;
 
-	return drmm_add_action_or_reset(&xe->drm, guc_submit_fini, guc);
+	err = drmm_add_action_or_reset(&xe->drm, guc_submit_sw_fini, guc);
+	if (err)
+		return err;
+
+	return devm_add_action_or_reset(xe->drm.dev, guc_submit_fini, guc);
 }
 
 /*
@@ -804,6 +822,7 @@ static void xe_guc_exec_queue_group_cgp_sync(struct xe_guc *guc,
 {
 	struct xe_exec_queue_group *group = q->multi_queue.group;
 	struct xe_device *xe = guc_to_xe(guc);
+	enum xe_multi_queue_priority priority;
 	long ret;
 
 	/*
@@ -827,7 +846,10 @@ static void xe_guc_exec_queue_group_cgp_sync(struct xe_guc *guc,
 		return;
 	}
 
-	xe_lrc_set_multi_queue_priority(q->lrc[0], q->multi_queue.priority);
+	scoped_guard(spinlock, &q->multi_queue.lock)
+		priority = q->multi_queue.priority;
+
+	xe_lrc_set_multi_queue_priority(q->lrc[0], priority);
 	xe_guc_exec_queue_group_cgp_update(xe, q);
 
 	WRITE_ONCE(group->sync_pending, true);
@@ -1028,24 +1050,6 @@ static u32 wq_space_until_wrap(struct xe_exec_queue *q)
 	return (WQ_SIZE - q->guc->wqi_tail);
 }
 
-static inline void relaxed_ms_sleep(unsigned int delay_ms)
-{
-	unsigned long min_us, max_us;
-
-	if (!delay_ms)
-		return;
-
-	if (delay_ms > 20) {
-		msleep(delay_ms);
-		return;
-	}
-
-	min_us = mul_u32_u32(delay_ms, 1000);
-	max_us = min_us + 500;
-
-	usleep_range(min_us, max_us);
-}
-
 static int wq_wait_for_space(struct xe_exec_queue *q, u32 wqi_size)
 {
 	struct xe_guc *guc = exec_queue_to_guc(q);
@@ -1064,10 +1068,7 @@ try_again:
 				return -ENODEV;
 			}
 
-			msleep(sleep_period_ms);
-			sleep_total_ms += sleep_period_ms;
-			if (sleep_period_ms < 64)
-				sleep_period_ms <<= 1;
+			sleep_total_ms += xe_sleep_exponential_ms(&sleep_period_ms, 64);
 			goto try_again;
 		}
 	}
@@ -1318,6 +1319,7 @@ static void disable_scheduling_deregister(struct xe_guc *guc,
  */
 void xe_guc_submit_wedge(struct xe_guc *guc)
 {
+	struct xe_device *xe = guc_to_xe(guc);
 	struct xe_gt *gt = guc_to_gt(guc);
 	struct xe_exec_queue *q;
 	unsigned long index;
@@ -1332,20 +1334,29 @@ void xe_guc_submit_wedge(struct xe_guc *guc)
 	if (!guc->submission_state.initialized)
 		return;
 
-	err = devm_add_action_or_reset(guc_to_xe(guc)->drm.dev,
-				       guc_submit_wedged_fini, guc);
-	if (err) {
-		xe_gt_err(gt, "Failed to register clean-up in wedged.mode=%s; "
-			  "Although device is wedged.\n",
-			  xe_wedged_mode_to_string(XE_WEDGED_MODE_UPON_ANY_HANG_NO_RESET));
-		return;
-	}
+	if (xe->wedged.mode == XE_WEDGED_MODE_UPON_ANY_HANG_NO_RESET) {
+		err = devm_add_action_or_reset(guc_to_xe(guc)->drm.dev,
+					       guc_submit_wedged_fini, guc);
+		if (err) {
+			xe_gt_err(gt, "Failed to register clean-up on wedged.mode=%s; "
+				  "Although device is wedged.\n",
+				  xe_wedged_mode_to_string(XE_WEDGED_MODE_UPON_ANY_HANG_NO_RESET));
+			return;
+		}
 
-	mutex_lock(&guc->submission_state.lock);
-	xa_for_each(&guc->submission_state.exec_queue_lookup, index, q)
-		if (xe_exec_queue_get_unless_zero(q))
-			set_exec_queue_wedged(q);
-	mutex_unlock(&guc->submission_state.lock);
+		mutex_lock(&guc->submission_state.lock);
+		xa_for_each(&guc->submission_state.exec_queue_lookup, index, q)
+			if (xe_exec_queue_get_unless_zero(q))
+				set_exec_queue_wedged(q);
+		mutex_unlock(&guc->submission_state.lock);
+	} else {
+		/* Forcefully kill any remaining exec queues, signal fences */
+		guc_submit_reset_prepare(guc);
+		xe_guc_submit_stop(guc);
+		xe_guc_softreset(guc);
+		xe_uc_fw_sanitize(&guc->fw);
+		xe_guc_submit_pause_abort(guc);
+	}
 }
 
 static bool guc_submit_hint_wedged(struct xe_guc *guc)
@@ -1830,7 +1841,7 @@ static void __guc_exec_queue_process_msg_suspend(struct xe_sched_msg *msg)
 				since_resume_ms;
 
 			if (wait_ms > 0 && q->guc->resume_time)
-				relaxed_ms_sleep(wait_ms);
+				xe_sleep_relaxed_ms(wait_ms);
 
 			set_exec_queue_suspended(q);
 			disable_scheduling(q, false);
@@ -1971,7 +1982,7 @@ static int guc_exec_queue_init(struct xe_exec_queue *q)
 
 	xe_gt_assert(guc_to_gt(guc), xe_device_uc_enabled(guc_to_xe(guc)));
 
-	ge = kzalloc(sizeof(*ge), GFP_KERNEL);
+	ge = kzalloc_obj(*ge);
 	if (!ge)
 		return -ENOMEM;
 
@@ -2127,7 +2138,7 @@ static int guc_exec_queue_set_priority(struct xe_exec_queue *q,
 	    exec_queue_killed_or_banned_or_wedged(q))
 		return 0;
 
-	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
+	msg = kmalloc_obj(*msg);
 	if (!msg)
 		return -ENOMEM;
 
@@ -2145,7 +2156,7 @@ static int guc_exec_queue_set_timeslice(struct xe_exec_queue *q, u32 timeslice_u
 	    exec_queue_killed_or_banned_or_wedged(q))
 		return 0;
 
-	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
+	msg = kmalloc_obj(*msg);
 	if (!msg)
 		return -ENOMEM;
 
@@ -2164,7 +2175,7 @@ static int guc_exec_queue_set_preempt_timeout(struct xe_exec_queue *q,
 	    exec_queue_killed_or_banned_or_wedged(q))
 		return 0;
 
-	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
+	msg = kmalloc_obj(*msg);
 	if (!msg)
 		return -ENOMEM;
 
@@ -2181,15 +2192,22 @@ static int guc_exec_queue_set_multi_queue_priority(struct xe_exec_queue *q,
 
 	xe_gt_assert(guc_to_gt(exec_queue_to_guc(q)), xe_exec_queue_is_multi_queue(q));
 
-	if (q->multi_queue.priority == priority ||
-	    exec_queue_killed_or_banned_or_wedged(q))
+	if (exec_queue_killed_or_banned_or_wedged(q))
 		return 0;
 
-	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
+	msg = kmalloc_obj(*msg);
 	if (!msg)
 		return -ENOMEM;
 
-	q->multi_queue.priority = priority;
+	scoped_guard(spinlock, &q->multi_queue.lock) {
+		if (q->multi_queue.priority == priority) {
+			kfree(msg);
+			return 0;
+		}
+
+		q->multi_queue.priority = priority;
+	}
+
 	guc_exec_queue_add_msg(q, msg, SET_MULTI_QUEUE_PRIORITY);
 
 	return 0;
@@ -2309,6 +2327,7 @@ static const struct xe_exec_queue_ops guc_exec_queue_ops = {
 static void guc_exec_queue_stop(struct xe_guc *guc, struct xe_exec_queue *q)
 {
 	struct xe_gpu_scheduler *sched = &q->guc->sched;
+	bool do_destroy = false;
 
 	/* Stop scheduling + flush any DRM scheduler operations */
 	xe_sched_submission_stop(sched);
@@ -2316,7 +2335,7 @@ static void guc_exec_queue_stop(struct xe_guc *guc, struct xe_exec_queue *q)
 	/* Clean up lost G2H + reset engine state */
 	if (exec_queue_registered(q)) {
 		if (exec_queue_destroyed(q))
-			__guc_exec_queue_destroy(guc, q);
+			do_destroy = true;
 	}
 	if (q->guc->suspend_pending) {
 		set_exec_queue_suspended(q);
@@ -2352,17 +2371,14 @@ static void guc_exec_queue_stop(struct xe_guc *guc, struct xe_exec_queue *q)
 			xe_guc_exec_queue_trigger_cleanup(q);
 		}
 	}
+
+	if (do_destroy)
+		__guc_exec_queue_destroy(guc, q);
 }
 
-int xe_guc_submit_reset_prepare(struct xe_guc *guc)
+static int guc_submit_reset_prepare(struct xe_guc *guc)
 {
 	int ret;
-
-	if (xe_gt_WARN_ON(guc_to_gt(guc), vf_recovery(guc)))
-		return 0;
-
-	if (!guc->submission_state.initialized)
-		return 0;
 
 	/*
 	 * Using an atomic here rather than submission_state.lock as this
@@ -2376,6 +2392,17 @@ int xe_guc_submit_reset_prepare(struct xe_guc *guc)
 	wake_up_all(&guc->ct.wq);
 
 	return ret;
+}
+
+int xe_guc_submit_reset_prepare(struct xe_guc *guc)
+{
+	if (xe_gt_WARN_ON(guc_to_gt(guc), vf_recovery(guc)))
+		return 0;
+
+	if (!guc->submission_state.initialized)
+		return 0;
+
+	return guc_submit_reset_prepare(guc);
 }
 
 void xe_guc_submit_reset_wait(struct xe_guc *guc)
@@ -2774,8 +2801,7 @@ void xe_guc_submit_pause_abort(struct xe_guc *guc)
 			continue;
 
 		xe_sched_submission_start(sched);
-		if (exec_queue_killed_or_banned_or_wedged(q))
-			xe_guc_exec_queue_trigger_cleanup(q);
+		guc_exec_queue_kill(q);
 	}
 	mutex_unlock(&guc->submission_state.lock);
 }
@@ -3207,7 +3233,7 @@ xe_guc_exec_queue_snapshot_capture(struct xe_exec_queue *q)
 	struct xe_guc_submit_exec_queue_snapshot *snapshot;
 	int i;
 
-	snapshot = kzalloc(sizeof(*snapshot), GFP_ATOMIC);
+	snapshot = kzalloc_obj(*snapshot, GFP_ATOMIC);
 
 	if (!snapshot)
 		return NULL;
@@ -3223,8 +3249,8 @@ xe_guc_exec_queue_snapshot_capture(struct xe_exec_queue *q)
 	snapshot->sched_props.preempt_timeout_us =
 		q->sched_props.preempt_timeout_us;
 
-	snapshot->lrc = kmalloc_array(q->width, sizeof(struct xe_lrc_snapshot *),
-				      GFP_ATOMIC);
+	snapshot->lrc = kmalloc_objs(struct xe_lrc_snapshot *, q->width,
+				     GFP_ATOMIC);
 
 	if (snapshot->lrc) {
 		for (i = 0; i < q->width; ++i) {

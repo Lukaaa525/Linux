@@ -7,6 +7,7 @@
 #include <linux/kernel.h>
 
 #include <drm/drm_print.h>
+#include <drm/intel/intel_gmd_interrupt_regs.h>
 
 #include "gt/intel_gt_regs.h"
 
@@ -464,8 +465,7 @@ int vlv_suspend_init(struct drm_i915_private *i915)
 		return 0;
 
 	/* we write all the values in the struct, so no need to zero it out */
-	i915->vlv_s0ix_state = kmalloc(sizeof(*i915->vlv_s0ix_state),
-				       GFP_KERNEL);
+	i915->vlv_s0ix_state = kmalloc_obj(*i915->vlv_s0ix_state);
 	if (!i915->vlv_s0ix_state)
 		return -ENOMEM;
 

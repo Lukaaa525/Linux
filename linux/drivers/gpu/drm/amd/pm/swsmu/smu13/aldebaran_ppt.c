@@ -61,15 +61,18 @@
 	[smu_feature] = {1, (aldebaran_feature)}
 
 #define FEATURE_MASK(feature) (1ULL << feature)
-#define SMC_DPM_FEATURE ( \
-			  FEATURE_MASK(FEATURE_DATA_CALCULATIONS) | \
-			  FEATURE_MASK(FEATURE_DPM_GFXCLK_BIT)	| \
-			  FEATURE_MASK(FEATURE_DPM_UCLK_BIT)	| \
-			  FEATURE_MASK(FEATURE_DPM_SOCCLK_BIT)	| \
-			  FEATURE_MASK(FEATURE_DPM_FCLK_BIT)	| \
-			  FEATURE_MASK(FEATURE_DPM_LCLK_BIT)	| \
-			  FEATURE_MASK(FEATURE_DPM_XGMI_BIT)	| \
-			  FEATURE_MASK(FEATURE_DPM_VCN_BIT))
+static const struct smu_feature_bits aldebaran_dpm_features = {
+	.bits = {
+		SMU_FEATURE_BIT_INIT(FEATURE_DATA_CALCULATIONS),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_GFXCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_UCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_SOCCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_FCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_LCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_XGMI_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_VCN_BIT)
+	}
+};
 
 #define smnPCIE_ESM_CTRL			0x111003D0
 
@@ -242,7 +245,7 @@ static int aldebaran_tables_init(struct smu_context *smu)
 	SMU_TABLE_INIT(tables, SMU_TABLE_ECCINFO, sizeof(EccInfoTable_t),
 		       PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM);
 
-	smu_table->metrics_table = kzalloc(sizeof(SmuMetrics_t), GFP_KERNEL);
+	smu_table->metrics_table = kzalloc_obj(SmuMetrics_t);
 	if (!smu_table->metrics_table)
 		return -ENOMEM;
 	smu_table->metrics_time = 0;
@@ -291,14 +294,13 @@ static int aldebaran_allocate_dpm_context(struct smu_context *smu)
 	struct smu_dpm_context *smu_dpm = &smu->smu_dpm;
 	struct smu_dpm_policy *policy;
 
-	smu_dpm->dpm_context = kzalloc(sizeof(struct smu_13_0_dpm_context),
-				       GFP_KERNEL);
+	smu_dpm->dpm_context = kzalloc_obj(struct smu_13_0_dpm_context);
 	if (!smu_dpm->dpm_context)
 		return -ENOMEM;
 	smu_dpm->dpm_context_size = sizeof(struct smu_13_0_dpm_context);
 
 	smu_dpm->dpm_policies =
-		kzalloc(sizeof(struct smu_dpm_policy_ctxt), GFP_KERNEL);
+		kzalloc_obj(struct smu_dpm_policy_ctxt);
 
 	if (!smu_dpm->dpm_policies)
 		return -ENOMEM;
@@ -329,14 +331,9 @@ static int aldebaran_init_smc_tables(struct smu_context *smu)
 	return smu_v13_0_init_smc_tables(smu);
 }
 
-static int aldebaran_get_allowed_feature_mask(struct smu_context *smu,
-					      uint32_t *feature_mask, uint32_t num)
+static int aldebaran_init_allowed_features(struct smu_context *smu)
 {
-	if (num > 2)
-		return -EINVAL;
-
-	/* pptable will handle the features to enable */
-	memset(feature_mask, 0xFF, sizeof(uint32_t) * num);
+	smu_feature_list_set_all(smu, SMU_FEATURE_LIST_ALLOWED);
 
 	return 0;
 }
@@ -1400,12 +1397,13 @@ static int aldebaran_usr_edit_dpm_table(struct smu_context *smu, enum PP_OD_DPM_
 static bool aldebaran_is_dpm_running(struct smu_context *smu)
 {
 	int ret;
-	uint64_t feature_enabled;
+	struct smu_feature_bits feature_enabled;
 
 	ret = smu_cmn_get_enabled_mask(smu, &feature_enabled);
 	if (ret)
 		return false;
-	return !!(feature_enabled & SMC_DPM_FEATURE);
+	return smu_feature_bits_test_mask(&feature_enabled,
+					  aldebaran_dpm_features.bits);
 }
 
 static int aldebaran_i2c_xfer(struct i2c_adapter *i2c_adap,
@@ -1423,7 +1421,7 @@ static int aldebaran_i2c_xfer(struct i2c_adapter *i2c_adap,
 	if (!adev->pm.dpm_enabled)
 		return -EBUSY;
 
-	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	req = kzalloc_obj(*req);
 	if (!req)
 		return -ENOMEM;
 
@@ -1967,7 +1965,7 @@ static int aldebaran_send_hbm_bad_channel_flag(struct smu_context *smu,
 
 static const struct pptable_funcs aldebaran_ppt_funcs = {
 	/* init dpm */
-	.get_allowed_feature_mask = aldebaran_get_allowed_feature_mask,
+	.init_allowed_features = aldebaran_init_allowed_features,
 	/* dpm/clk tables */
 	.set_default_dpm_table = aldebaran_set_default_dpm_table,
 	.populate_umd_state_clk = aldebaran_populate_umd_state_clk,
@@ -1990,7 +1988,7 @@ static const struct pptable_funcs aldebaran_ppt_funcs = {
 	/* pptable related */
 	.setup_pptable = aldebaran_setup_pptable,
 	.get_vbios_bootup_values = smu_v13_0_get_vbios_bootup_values,
-	.check_fw_version = smu_v13_0_check_fw_version,
+	.check_fw_version = smu_cmn_check_fw_version,
 	.write_pptable = smu_cmn_write_pptable,
 	.set_driver_table_location = smu_v13_0_set_driver_table_location,
 	.set_tool_table_location = smu_v13_0_set_tool_table_location,

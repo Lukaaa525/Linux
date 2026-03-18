@@ -23,7 +23,7 @@ void __lockfunc _raw_write_lock_bh(rwlock_t *lock)	__acquires(lock);
 void __lockfunc _raw_read_lock_irq(rwlock_t *lock)	__acquires_shared(lock);
 void __lockfunc _raw_write_lock_irq(rwlock_t *lock)	__acquires(lock);
 unsigned long __lockfunc _raw_read_lock_irqsave(rwlock_t *lock)
-							__acquires(lock);
+							__acquires_shared(lock);
 unsigned long __lockfunc _raw_write_lock_irqsave(rwlock_t *lock)
 							__acquires(lock);
 int __lockfunc _raw_read_trylock(rwlock_t *lock)	__cond_acquires_shared(true, lock);
@@ -36,20 +36,10 @@ void __lockfunc _raw_read_unlock_irq(rwlock_t *lock)	__releases_shared(lock);
 void __lockfunc _raw_write_unlock_irq(rwlock_t *lock)	__releases(lock);
 void __lockfunc
 _raw_read_unlock_irqrestore(rwlock_t *lock, unsigned long flags)
-							__releases(lock);
+							__releases_shared(lock);
 void __lockfunc
 _raw_write_unlock_irqrestore(rwlock_t *lock, unsigned long flags)
 							__releases(lock);
-
-static inline bool _raw_write_trylock_irqsave(rwlock_t *lock, unsigned long *flags)
-	__cond_acquires(true, lock)
-{
-	local_irq_save(*flags);
-	if (_raw_write_trylock(lock))
-		return true;
-	local_irq_restore(*flags);
-	return false;
-}
 
 #ifdef CONFIG_INLINE_READ_LOCK
 #define _raw_read_lock(lock) __raw_read_lock(lock)
@@ -126,6 +116,7 @@ static inline bool _raw_write_trylock_irqsave(rwlock_t *lock, unsigned long *fla
 #endif
 
 static inline int __raw_read_trylock(rwlock_t *lock)
+	__cond_acquires_shared(true, lock)
 {
 	preempt_disable();
 	if (do_raw_read_trylock(lock)) {
@@ -137,6 +128,7 @@ static inline int __raw_read_trylock(rwlock_t *lock)
 }
 
 static inline int __raw_write_trylock(rwlock_t *lock)
+	__cond_acquires(true, lock)
 {
 	preempt_disable();
 	if (do_raw_write_trylock(lock)) {
@@ -145,6 +137,16 @@ static inline int __raw_write_trylock(rwlock_t *lock)
 	}
 	preempt_enable();
 	return 0;
+}
+
+static inline bool _raw_write_trylock_irqsave(rwlock_t *lock, unsigned long *flags)
+	__cond_acquires(true, lock) __no_context_analysis
+{
+	local_irq_save(*flags);
+	if (_raw_write_trylock(lock))
+		return true;
+	local_irq_restore(*flags);
+	return false;
 }
 
 /*

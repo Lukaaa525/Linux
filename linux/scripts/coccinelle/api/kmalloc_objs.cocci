@@ -33,15 +33,18 @@ def alloc_array(name):
 typedef u8, u16, u32, u64;
 typedef __u8, __u16, __u32, __u64;
 typedef uint8_t, uint16_t, uint32_t, uint64_t;
+typedef uchar, ushort, uint, ulong;
 typedef __le16, __le32, __le64;
 typedef __be16, __be32, __be64;
-type INTEGRAL = {u8,__u8,uint8_t,char,unsigned char,
-		 u16,__u16,uint16_t,unsigned short,
-		 u32,__u32,uint32_t,unsigned int,
-		 u64,__u64,uint64_t,unsigned long,
+typedef wchar_t;
+type INTEGRAL = {u8,__u8,uint8_t,char,unsigned char,uchar,wchar_t,
+		 u16,__u16,uint16_t,unsigned short,ushort,
+		 u32,__u32,uint32_t,unsigned int,uint,
+		 u64,__u64,uint64_t,unsigned long,ulong,
 		 __le16,__le32,__le64,__be16,__be32,__be64};
 char [] STRING;
 INTEGRAL *BYTES;
+INTEGRAL **BYTES_PTRS;
 type TYPE;
 expression VAR;
 expression GFP;
@@ -65,6 +68,10 @@ fresh identifier ALLOC_OBJS = script:python(ALLOC_ARRAY) { alloc_array(ALLOC_ARR
 |
 	BYTES = ALLOC((sizeof(TYPE)), GFP)
 |
+	BYTES_PTRS = ALLOC((sizeof(E)), GFP)
+|
+	BYTES_PTRS = ALLOC((sizeof(TYPE)), GFP)
+|
 	ALLOC((sizeof(void *)), GFP)
 |
 -	ALLOC((sizeof(E)), GFP)
@@ -79,11 +86,19 @@ fresh identifier ALLOC_OBJS = script:python(ALLOC_ARRAY) { alloc_array(ALLOC_ARR
 |
 	BYTES = ALLOC_ARRAY(COUNT, (sizeof(TYPE)), GFP)
 |
+	BYTES_PTRS = ALLOC_ARRAY(COUNT, (sizeof(E)), GFP)
+|
+	BYTES_PTRS = ALLOC_ARRAY(COUNT, (sizeof(TYPE)), GFP)
+|
 	ALLOC_ARRAY((\(sizeof(STRING)\|sizeof(INTEGRAL)\|sizeof(INTEGRAL *)\)), COUNT, GFP)
 |
 	BYTES = ALLOC_ARRAY((sizeof(E)), COUNT, GFP)
 |
 	BYTES = ALLOC_ARRAY((sizeof(TYPE)), COUNT, GFP)
+|
+	BYTES_PTRS = ALLOC_ARRAY((sizeof(E)), COUNT, GFP)
+|
+	BYTES_PTRS = ALLOC_ARRAY((sizeof(TYPE)), COUNT, GFP)
 |
 	ALLOC_ARRAY(COUNT, (sizeof(void *)), GFP)
 |

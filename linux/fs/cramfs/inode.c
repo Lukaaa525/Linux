@@ -125,7 +125,7 @@ static struct inode *get_cramfs_inode(struct super_block *sb,
 				old_decode_dev(cramfs_inode->size));
 		break;
 	default:
-		printk(KERN_DEBUG "CRAMFS: Invalid file type 0%04o for inode %lu.\n",
+		printk(KERN_DEBUG "CRAMFS: Invalid file type 0%04o for inode %llu.\n",
 		       inode->i_mode, inode->i_ino);
 		iget_failed(inode);
 		return ERR_PTR(-EIO);
@@ -619,7 +619,7 @@ static int cramfs_blkdev_fill_super(struct super_block *sb, struct fs_context *f
 	struct cramfs_super super;
 	int i, err;
 
-	sbi = kzalloc(sizeof(struct cramfs_sb_info), GFP_KERNEL);
+	sbi = kzalloc_obj(struct cramfs_sb_info);
 	if (!sbi)
 		return -ENOMEM;
 	sb->s_fs_info = sbi;
@@ -640,7 +640,7 @@ static int cramfs_mtd_fill_super(struct super_block *sb, struct fs_context *fc)
 	struct cramfs_super super;
 	int err;
 
-	sbi = kzalloc(sizeof(struct cramfs_sb_info), GFP_KERNEL);
+	sbi = kzalloc_obj(struct cramfs_sb_info);
 	if (!sbi)
 		return -ENOMEM;
 	sb->s_fs_info = sbi;

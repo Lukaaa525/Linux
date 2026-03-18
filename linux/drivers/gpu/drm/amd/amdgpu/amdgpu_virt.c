@@ -294,15 +294,15 @@ static int amdgpu_virt_init_ras_err_handler_data(struct amdgpu_device *adev)
 	void *bps = NULL;
 	struct amdgpu_bo **bps_bo = NULL;
 
-	*data = kmalloc(sizeof(struct amdgpu_virt_ras_err_handler_data), GFP_KERNEL);
+	*data = kmalloc_obj(struct amdgpu_virt_ras_err_handler_data);
 	if (!*data)
 		goto data_failure;
 
-	bps = kmalloc_array(align_space, sizeof(*(*data)->bps), GFP_KERNEL);
+	bps = kmalloc_objs(*(*data)->bps, align_space);
 	if (!bps)
 		goto bps_failure;
 
-	bps_bo = kmalloc_array(align_space, sizeof(*(*data)->bps_bo), GFP_KERNEL);
+	bps_bo = kmalloc_objs(*(*data)->bps_bo, align_space);
 	if (!bps_bo)
 		goto bps_bo_failure;
 
@@ -605,10 +605,10 @@ static int amdgpu_virt_write_vf2pf_data(struct amdgpu_device *adev)
 
 #ifdef MODULE
 	if (THIS_MODULE->version != NULL)
-		strcpy(vf2pf_info->driver_version, THIS_MODULE->version);
+		strscpy(vf2pf_info->driver_version, THIS_MODULE->version);
 	else
 #endif
-		strcpy(vf2pf_info->driver_version, "N/A");
+		strscpy(vf2pf_info->driver_version, "N/A");
 
 	vf2pf_info->pf2vf_version_required = 0; // no requirement, guest understands all
 	vf2pf_info->driver_cert = 0;
@@ -950,11 +950,6 @@ int amdgpu_virt_init_critical_region(struct amdgpu_device *adev)
 	if (adev->virt.req_init_data_ver != GPU_CRIT_REGION_V2)
 		return 0;
 
-	if (init_hdr_offset < 0) {
-		dev_err(adev->dev, "Invalid init header offset\n");
-		return -EINVAL;
-	}
-
 	vram_size = RREG32(mmRCC_CONFIG_MEMSIZE);
 	if (!vram_size || vram_size == U32_MAX)
 		return -EINVAL;
@@ -966,7 +961,7 @@ int amdgpu_virt_init_critical_region(struct amdgpu_device *adev)
 	}
 
 	/* Allocate for init_data_hdr */
-	init_data_hdr = kzalloc(sizeof(struct amd_sriov_msg_init_data_header), GFP_KERNEL);
+	init_data_hdr = kzalloc_obj(struct amd_sriov_msg_init_data_header);
 	if (!init_data_hdr)
 		return -ENOMEM;
 

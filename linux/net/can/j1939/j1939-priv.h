@@ -91,7 +91,6 @@ struct j1939_priv {
 
 	struct kref rx_kref;
 	u32 rx_tskey;
-	atomic_t trace_seq;
 };
 
 void j1939_ecu_put(struct j1939_ecu *ecu);
@@ -342,11 +341,5 @@ void j1939_session_timers_cancel(struct j1939_session *session);
 
 /* CAN protocol */
 extern const struct can_proto j1939_can_proto;
-
-#ifdef CONFIG_NET_DEV_REFCNT_TRACKER
-void save_priv_trace_buffer(struct j1939_priv *priv, int delta);
-#else
-static inline void save_priv_trace_buffer(struct j1939_priv *priv, int delta) { };
-#endif
 
 #endif /* _J1939_PRIV_H_ */

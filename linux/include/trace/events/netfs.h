@@ -57,6 +57,7 @@
 	EM(netfs_rreq_trace_done,		"DONE   ")	\
 	EM(netfs_rreq_trace_end_copy_to_cache,	"END-C2C")	\
 	EM(netfs_rreq_trace_free,		"FREE   ")	\
+	EM(netfs_rreq_trace_intr,		"INTR   ")	\
 	EM(netfs_rreq_trace_ki_complete,	"KI-CMPL")	\
 	EM(netfs_rreq_trace_recollect,		"RECLLCT")	\
 	EM(netfs_rreq_trace_redirty,		"REDIRTY")	\
@@ -169,7 +170,8 @@
 	EM(netfs_sreq_trace_put_oom,		"PUT OOM    ")	\
 	EM(netfs_sreq_trace_put_wip,		"PUT WIP    ")	\
 	EM(netfs_sreq_trace_put_work,		"PUT WORK   ")	\
-	E_(netfs_sreq_trace_put_terminated,	"PUT TERM   ")
+	EM(netfs_sreq_trace_put_terminated,	"PUT TERM   ")	\
+	E_(netfs_sreq_trace_see_failed,		"SEE FAILED ")
 
 #define netfs_folio_traces					\
 	EM(netfs_folio_is_uptodate,		"mod-uptodate")	\
@@ -298,7 +300,7 @@ TRACE_EVENT(netfs_read,
 		    __field(loff_t,			start)
 		    __field(size_t,			len)
 		    __field(enum netfs_read_trace,	what)
-		    __field(unsigned int,		netfs_inode)
+		    __field(u64,			netfs_inode)
 			     ),
 
 	    TP_fast_assign(
@@ -311,7 +313,7 @@ TRACE_EVENT(netfs_read,
 		    __entry->netfs_inode = rreq->inode->i_ino;
 			   ),
 
-	    TP_printk("R=%08x %s c=%08x ni=%x s=%llx l=%zx sz=%llx",
+	    TP_printk("R=%08x %s c=%08x ni=%llx s=%llx l=%zx sz=%llx",
 		      __entry->rreq,
 		      __print_symbolic(__entry->what, netfs_read_traces),
 		      __entry->cookie,
@@ -484,7 +486,7 @@ TRACE_EVENT(netfs_folio,
 	    TP_ARGS(folio, why),
 
 	    TP_STRUCT__entry(
-		    __field(ino_t,			ino)
+		    __field(u64,			ino)
 		    __field(pgoff_t,			index)
 		    __field(unsigned int,		nr)
 		    __field(enum netfs_folio_trace,	why)
@@ -498,7 +500,7 @@ TRACE_EVENT(netfs_folio,
 		    __entry->nr = folio_nr_pages(folio);
 			   ),
 
-	    TP_printk("i=%05lx ix=%05lx-%05lx %s",
+	    TP_printk("i=%05llx ix=%05lx-%05lx %s",
 		      __entry->ino, __entry->index, __entry->index + __entry->nr - 1,
 		      __print_symbolic(__entry->why, netfs_folio_traces))
 	    );

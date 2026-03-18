@@ -13,6 +13,7 @@
 #include <linux/io.h>
 #include <linux/libfdt.h>
 #include <linux/mm.h>
+#include <linux/kho/abi/kexec_handover.h>
 #include "kexec_handover_internal.h"
 
 static struct dentry *debugfs_root;
@@ -29,7 +30,7 @@ static int __kho_debugfs_fdt_add(struct list_head *list, struct dentry *dir,
 	struct fdt_debugfs *f;
 	struct dentry *file;
 
-	f = kmalloc(sizeof(*f), GFP_KERNEL);
+	f = kmalloc_obj(*f);
 	if (!f)
 		return -ENOMEM;
 
@@ -74,24 +75,6 @@ void kho_debugfs_fdt_remove(struct kho_debugfs *dbg, void *fdt)
 		}
 	}
 }
-
-static int kho_out_finalize_get(void *data, u64 *val)
-{
-	*val = kho_finalized();
-
-	return 0;
-}
-
-static int kho_out_finalize_set(void *data, u64 val)
-{
-	if (val)
-		return kho_finalize();
-	else
-		return -EINVAL;
-}
-
-DEFINE_DEBUGFS_ATTRIBUTE(kho_out_finalize_fops, kho_out_finalize_get,
-			 kho_out_finalize_set, "%llu\n");
 
 static int scratch_phys_show(struct seq_file *m, void *v)
 {
@@ -139,7 +122,7 @@ __init void kho_in_debugfs_init(struct kho_debugfs *dbg, const void *fdt)
 		const char *name = fdt_get_name(fdt, child, NULL);
 		const u64 *fdt_phys;
 
-		fdt_phys = fdt_getprop(fdt, child, "fdt", &len);
+		fdt_phys = fdt_getprop(fdt, child, KHO_FDT_SUB_TREE_PROP_NAME, &len);
 		if (!fdt_phys)
 			continue;
 		if (len != sizeof(*fdt_phys)) {
@@ -195,11 +178,6 @@ __init int kho_out_debugfs_init(struct kho_debugfs *dbg)
 
 	f = debugfs_create_file("scratch_len", 0400, dir, NULL,
 				&scratch_len_fops);
-	if (IS_ERR(f))
-		goto err_rmdir;
-
-	f = debugfs_create_file("finalize", 0600, dir, NULL,
-				&kho_out_finalize_fops);
 	if (IS_ERR(f))
 		goto err_rmdir;
 

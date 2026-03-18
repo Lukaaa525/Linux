@@ -55,6 +55,7 @@
 #define SMUQ10_TO_UINT(x) ((x) >> 10)
 #define SMUQ10_FRAC(x) ((x) & 0x3ff)
 #define SMUQ10_ROUND(x) ((SMUQ10_TO_UINT(x)) + ((SMUQ10_FRAC(x)) >= 0x200))
+#define SMU_V13_SOFT_FREQ_ROUND(x)	((x) + 1)
 
 extern const int pmfw_decoded_link_speed[5];
 extern const int pmfw_decoded_link_width[7];
@@ -130,8 +131,6 @@ int smu_v13_0_check_fw_status(struct smu_context *smu);
 int smu_v13_0_setup_pptable(struct smu_context *smu);
 
 int smu_v13_0_get_vbios_bootup_values(struct smu_context *smu);
-
-int smu_v13_0_check_fw_version(struct smu_context *smu);
 
 int smu_v13_0_set_driver_table_location(struct smu_context *smu);
 

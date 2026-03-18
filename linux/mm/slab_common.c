@@ -174,24 +174,31 @@ int slab_unmergeable(struct kmem_cache *s)
 	return 0;
 }
 
+bool slab_args_unmergeable(struct kmem_cache_args *args, slab_flags_t flags)
+{
+	if (slab_nomerge)
+		return true;
+
+	if (args->ctor)
+		return true;
+
+	if (IS_ENABLED(CONFIG_HARDENED_USERCOPY) && args->usersize)
+		return true;
+
+	if (flags & SLAB_NEVER_MERGE)
+		return true;
+
+	return false;
+}
+
 static struct kmem_cache *find_mergeable(unsigned int size, slab_flags_t flags,
 		const char *name, struct kmem_cache_args *args)
 {
 	struct kmem_cache *s;
 	unsigned int align;
 
-	if (slab_nomerge)
-		return NULL;
-
-	if (args->ctor)
-		return NULL;
-
-	if (IS_ENABLED(CONFIG_HARDENED_USERCOPY) && args->usersize)
-		return NULL;
-
 	flags = kmem_cache_flags(flags, name);
-
-	if (flags & SLAB_NEVER_MERGE)
+	if (slab_args_unmergeable(args, flags))
 		return NULL;
 
 	size = ALIGN(size, sizeof(void *));
@@ -1597,11 +1604,8 @@ static bool kfree_rcu_sheaf(void *obj)
 		return false;
 
 	s = slab->slab_cache;
-	if (s->cpu_sheaves) {
-		if (likely(!IS_ENABLED(CONFIG_NUMA) ||
-			   slab_nid(slab) == numa_mem_id()))
-			return __kfree_rcu_sheaf(s, obj);
-	}
+	if (likely(!IS_ENABLED(CONFIG_NUMA) || slab_nid(slab) == numa_mem_id()))
+		return __kfree_rcu_sheaf(s, obj);
 
 	return false;
 }

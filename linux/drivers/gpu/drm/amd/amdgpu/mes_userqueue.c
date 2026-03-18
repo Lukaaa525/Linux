@@ -283,13 +283,14 @@ static int mes_userq_mqd_create(struct amdgpu_usermode_queue *queue,
 	int r;
 
 	/* Structure to initialize MQD for userqueue using generic MQD init function */
-	userq_props = kzalloc(sizeof(struct amdgpu_mqd_prop), GFP_KERNEL);
+	userq_props = kzalloc_obj(struct amdgpu_mqd_prop);
 	if (!userq_props) {
 		DRM_ERROR("Failed to allocate memory for userq_props\n");
 		return -ENOMEM;
 	}
 
-	r = amdgpu_userq_create_object(uq_mgr, &queue->mqd, mqd_hw_default->mqd_size);
+	r = amdgpu_userq_create_object(uq_mgr, &queue->mqd,
+			AMDGPU_MQD_SIZE_ALIGN(mqd_hw_default->mqd_size));
 	if (r) {
 		DRM_ERROR("Failed to create MQD object for userqueue\n");
 		goto free_props;

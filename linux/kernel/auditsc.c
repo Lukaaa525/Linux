@@ -255,7 +255,7 @@ static int grow_tree_refs(struct audit_context *ctx)
 {
 	struct audit_tree_refs *p = ctx->trees;
 
-	ctx->trees = kzalloc(sizeof(struct audit_tree_refs), GFP_KERNEL);
+	ctx->trees = kzalloc_obj(struct audit_tree_refs);
 	if (!ctx->trees) {
 		ctx->trees = p;
 		return 0;
@@ -886,7 +886,7 @@ static int audit_filter_inode_name(struct task_struct *tsk,
 				   struct audit_names *n,
 				   struct audit_context *ctx)
 {
-	int h = audit_hash_ino((u32)n->ino);
+	int h = audit_hash_ino(n->ino);
 	struct list_head *list = &audit_inode_hash[h];
 
 	return __audit_filter_op(tsk, ctx, list, n, ctx->major);
@@ -931,6 +931,9 @@ static inline void audit_free_names(struct audit_context *context)
 {
 	struct audit_names *n, *next;
 
+	if (!context->name_count)
+		return;	/* audit_alloc_name() has not been called */
+
 	list_for_each_entry_safe(n, next, &context->names_list, list) {
 		list_del(&n->list);
 		if (n->name)
@@ -939,7 +942,7 @@ static inline void audit_free_names(struct audit_context *context)
 			kfree(n);
 	}
 	context->name_count = 0;
-	path_put(&context->pwd);
+	put_fs_pwd_pool(current->fs, &context->pwd);
 	context->pwd.dentry = NULL;
 	context->pwd.mnt = NULL;
 }
@@ -1032,7 +1035,7 @@ static inline struct audit_context *audit_alloc_context(enum audit_state state)
 {
 	struct audit_context *context;
 
-	context = kzalloc(sizeof(*context), GFP_KERNEL);
+	context = kzalloc_obj(*context);
 	if (!context)
 		return NULL;
 	context->context = AUDIT_CTX_UNUSED;
@@ -1534,7 +1537,7 @@ static void audit_log_name(struct audit_context *context, struct audit_names *n,
 		audit_log_format(ab, " name=(null)");
 
 	if (n->ino != AUDIT_INO_UNSET)
-		audit_log_format(ab, " inode=%lu dev=%02x:%02x mode=%#ho ouid=%u ogid=%u rdev=%02x:%02x",
+		audit_log_format(ab, " inode=%llu dev=%02x:%02x mode=%#ho ouid=%u ogid=%u rdev=%02x:%02x",
 				 n->ino,
 				 MAJOR(n->dev),
 				 MINOR(n->dev),
@@ -2153,7 +2156,7 @@ static struct audit_names *audit_alloc_name(struct audit_context *context,
 		aname = &context->preallocated_names[context->name_count];
 		memset(aname, 0, sizeof(*aname));
 	} else {
-		aname = kzalloc(sizeof(*aname), GFP_NOFS);
+		aname = kzalloc_obj(*aname, GFP_NOFS);
 		if (!aname)
 			return NULL;
 		aname->should_free = true;
@@ -2165,7 +2168,7 @@ static struct audit_names *audit_alloc_name(struct audit_context *context,
 
 	context->name_count++;
 	if (!context->pwd.dentry)
-		get_fs_pwd(current->fs, &context->pwd);
+		get_fs_pwd_pool(current->fs, &context->pwd);
 	return aname;
 }
 
@@ -2650,7 +2653,7 @@ int __audit_sockaddr(int len, void *a)
 	struct audit_context *context = audit_context();
 
 	if (!context->sockaddr) {
-		void *p = kmalloc(sizeof(struct sockaddr_storage), GFP_KERNEL);
+		void *p = kmalloc_obj(struct sockaddr_storage);
 
 		if (!p)
 			return -ENOMEM;
@@ -2704,7 +2707,7 @@ int audit_signal_info_syscall(struct task_struct *t)
 
 	axp = (void *)ctx->aux_pids;
 	if (!axp || axp->pid_count == AUDIT_AUX_PIDS) {
-		axp = kzalloc(sizeof(*axp), GFP_ATOMIC);
+		axp = kzalloc_obj(*axp, GFP_ATOMIC);
 		if (!axp)
 			return -ENOMEM;
 
@@ -2743,7 +2746,7 @@ int __audit_log_bprm_fcaps(struct linux_binprm *bprm,
 	struct audit_context *context = audit_context();
 	struct cpu_vfs_cap_data vcaps;
 
-	ax = kmalloc(sizeof(*ax), GFP_KERNEL);
+	ax = kmalloc_obj(*ax);
 	if (!ax)
 		return -ENOMEM;
 

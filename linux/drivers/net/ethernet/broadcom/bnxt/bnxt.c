@@ -517,9 +517,6 @@ static netdev_tx_t bnxt_start_xmit(struct sk_buff *skb, struct net_device *dev)
 			return NETDEV_TX_BUSY;
 	}
 
-	if (unlikely(ipv6_hopopt_jumbo_remove(skb)))
-		goto tx_free;
-
 	length = skb->len;
 	len = skb_headlen(skb);
 	last_frag = skb_shinfo(skb)->nr_frags;
@@ -1804,7 +1801,8 @@ static inline struct sk_buff *bnxt_gro_skb(struct bnxt *bp,
 					   struct bnxt_tpa_info *tpa_info,
 					   struct rx_tpa_end_cmp *tpa_end,
 					   struct rx_tpa_end_cmp_ext *tpa_end1,
-					   struct sk_buff *skb)
+					   struct sk_buff *skb,
+					   struct bnxt_rx_sw_stats *rx_stats)
 {
 #ifdef CONFIG_INET
 	int payload_off;
@@ -1813,6 +1811,9 @@ static inline struct sk_buff *bnxt_gro_skb(struct bnxt *bp,
 	segs = TPA_END_TPA_SEGS(tpa_end);
 	if (segs == 1)
 		return skb;
+
+	rx_stats->rx_hw_gro_packets++;
+	rx_stats->rx_hw_gro_wire_packets += segs;
 
 	NAPI_GRO_CB(skb)->count = segs;
 	skb_shinfo(skb)->gso_size =
@@ -1987,7 +1988,8 @@ static inline struct sk_buff *bnxt_tpa_end(struct bnxt *bp,
 	}
 
 	if (gro)
-		skb = bnxt_gro_skb(bp, tpa_info, tpa_end, tpa_end1, skb);
+		skb = bnxt_gro_skb(bp, tpa_info, tpa_end, tpa_end1, skb,
+				   &cpr->sw_stats->rx);
 
 	return skb;
 }
@@ -2927,6 +2929,8 @@ static int bnxt_async_event_process(struct bnxt *bp,
 		u16 type = (u16)BNXT_EVENT_BUF_PRODUCER_TYPE(data1);
 		u32 offset =  BNXT_EVENT_BUF_PRODUCER_OFFSET(data2);
 
+		if (type >= ARRAY_SIZE(bp->bs_trace))
+			goto async_event_process_exit;
 		bnxt_bs_trace_check_wrap(&bp->bs_trace[type], offset);
 		goto async_event_process_exit;
 	}
@@ -3750,21 +3754,19 @@ static int bnxt_alloc_one_tpa_info(struct bnxt *bp,
 	struct rx_agg_cmp *agg;
 	int i;
 
-	rxr->rx_tpa = kcalloc(bp->max_tpa, sizeof(struct bnxt_tpa_info),
-			      GFP_KERNEL);
+	rxr->rx_tpa = kzalloc_objs(struct bnxt_tpa_info, bp->max_tpa);
 	if (!rxr->rx_tpa)
 		return -ENOMEM;
 
 	if (!(bp->flags & BNXT_FLAG_CHIP_P5_PLUS))
 		return 0;
 	for (i = 0; i < bp->max_tpa; i++) {
-		agg = kcalloc(MAX_SKB_FRAGS, sizeof(*agg), GFP_KERNEL);
+		agg = kzalloc_objs(*agg, MAX_SKB_FRAGS);
 		if (!agg)
 			return -ENOMEM;
 		rxr->rx_tpa[i].agg_arr = agg;
 	}
-	rxr->rx_tpa_idx_map = kzalloc(sizeof(*rxr->rx_tpa_idx_map),
-				      GFP_KERNEL);
+	rxr->rx_tpa_idx_map = kzalloc_obj(*rxr->rx_tpa_idx_map);
 	if (!rxr->rx_tpa_idx_map)
 		return -ENOMEM;
 
@@ -4079,11 +4081,10 @@ static void bnxt_free_cp_arrays(struct bnxt_cp_ring_info *cpr)
 
 static int bnxt_alloc_cp_arrays(struct bnxt_cp_ring_info *cpr, int n)
 {
-	cpr->cp_desc_ring = kcalloc(n, sizeof(*cpr->cp_desc_ring), GFP_KERNEL);
+	cpr->cp_desc_ring = kzalloc_objs(*cpr->cp_desc_ring, n);
 	if (!cpr->cp_desc_ring)
 		return -ENOMEM;
-	cpr->cp_desc_mapping = kcalloc(n, sizeof(*cpr->cp_desc_mapping),
-				       GFP_KERNEL);
+	cpr->cp_desc_mapping = kzalloc_objs(*cpr->cp_desc_mapping, n);
 	if (!cpr->cp_desc_mapping)
 		return -ENOMEM;
 	return 0;
@@ -4230,8 +4231,7 @@ static int bnxt_alloc_cp_rings(struct bnxt *bp)
 			tx = 1;
 		}
 
-		cpr->cp_ring_arr = kcalloc(cp_count, sizeof(*cpr),
-					   GFP_KERNEL);
+		cpr->cp_ring_arr = kzalloc_objs(*cpr, cp_count);
 		if (!cpr->cp_ring_arr)
 			return -ENOMEM;
 		cpr->cp_ring_count = cp_count;
@@ -4326,12 +4326,12 @@ static void bnxt_init_ring_struct(struct bnxt *bp)
 
 	for (i = 0; i < bp->cp_nr_rings; i++) {
 		struct bnxt_napi *bnapi = bp->bnapi[i];
+		struct netdev_queue_config qcfg;
 		struct bnxt_ring_mem_info *rmem;
 		struct bnxt_cp_ring_info *cpr;
 		struct bnxt_rx_ring_info *rxr;
 		struct bnxt_tx_ring_info *txr;
 		struct bnxt_ring_struct *ring;
-		struct netdev_rx_queue *rxq;
 
 		if (!bnapi)
 			continue;
@@ -4349,8 +4349,8 @@ static void bnxt_init_ring_struct(struct bnxt *bp)
 		if (!rxr)
 			goto skip_rx;
 
-		rxq = __netif_get_rx_queue(bp->dev, i);
-		rxr->rx_page_size = rxq->qcfg.rx_page_size;
+		netdev_queue_config(bp->dev, i, &qcfg);
+		rxr->rx_page_size = qcfg.rx_page_size;
 
 		ring = &rxr->rx_ring_struct;
 		rmem = &ring->ring_mem;
@@ -4625,9 +4625,8 @@ static int bnxt_init_ring_grps(struct bnxt *bp, bool irq_re_init)
 	int i;
 
 	if (irq_re_init) {
-		bp->grp_info = kcalloc(bp->cp_nr_rings,
-				       sizeof(struct bnxt_ring_grp_info),
-				       GFP_KERNEL);
+		bp->grp_info = kzalloc_objs(struct bnxt_ring_grp_info,
+					    bp->cp_nr_rings);
 		if (!bp->grp_info)
 			return -ENOMEM;
 	}
@@ -4665,8 +4664,7 @@ static int bnxt_alloc_vnics(struct bnxt *bp)
 	if (BNXT_CHIP_TYPE_NITRO_A0(bp))
 		num_vnics++;
 
-	bp->vnic_info = kcalloc(num_vnics, sizeof(struct bnxt_vnic_info),
-				GFP_KERNEL);
+	bp->vnic_info = kzalloc_objs(struct bnxt_vnic_info, num_vnics);
 	if (!bp->vnic_info)
 		return -ENOMEM;
 
@@ -5246,7 +5244,7 @@ static int bnxt_alloc_stats(struct bnxt *bp)
 		struct bnxt_napi *bnapi = bp->bnapi[i];
 		struct bnxt_cp_ring_info *cpr = &bnapi->cp_ring;
 
-		cpr->sw_stats = kzalloc(sizeof(*cpr->sw_stats), GFP_KERNEL);
+		cpr->sw_stats = kzalloc_obj(*cpr->sw_stats);
 		if (!cpr->sw_stats)
 			return -ENOMEM;
 
@@ -5514,9 +5512,8 @@ static int bnxt_alloc_mem(struct bnxt *bp, bool irq_re_init)
 			}
 		}
 
-		bp->rx_ring = kcalloc(bp->rx_nr_rings,
-				      sizeof(struct bnxt_rx_ring_info),
-				      GFP_KERNEL);
+		bp->rx_ring = kzalloc_objs(struct bnxt_rx_ring_info,
+					   bp->rx_nr_rings);
 		if (!bp->rx_ring)
 			return -ENOMEM;
 
@@ -5535,9 +5532,8 @@ static int bnxt_alloc_mem(struct bnxt *bp, bool irq_re_init)
 			bp->bnapi[i]->rx_ring = &bp->rx_ring[i];
 		}
 
-		bp->tx_ring = kcalloc(bp->tx_nr_rings,
-				      sizeof(struct bnxt_tx_ring_info),
-				      GFP_KERNEL);
+		bp->tx_ring = kzalloc_objs(struct bnxt_tx_ring_info,
+					   bp->tx_nr_rings);
 		if (!bp->tx_ring)
 			return -ENOMEM;
 
@@ -6094,7 +6090,7 @@ static struct bnxt_l2_filter *bnxt_alloc_l2_filter(struct bnxt *bp,
 	if (fltr)
 		return fltr;
 
-	fltr = kzalloc(sizeof(*fltr), gfp);
+	fltr = kzalloc_obj(*fltr, gfp);
 	if (!fltr)
 		return ERR_PTR(-ENOMEM);
 	spin_lock_bh(&bp->ntp_fltr_lock);
@@ -6123,7 +6119,7 @@ struct bnxt_l2_filter *bnxt_alloc_new_l2_filter(struct bnxt *bp,
 		fltr = ERR_PTR(-EEXIST);
 		goto l2_filter_exit;
 	}
-	fltr = kzalloc(sizeof(*fltr), GFP_ATOMIC);
+	fltr = kzalloc_obj(*fltr, GFP_ATOMIC);
 	if (!fltr) {
 		fltr = ERR_PTR(-ENOMEM);
 		goto l2_filter_exit;
@@ -6238,6 +6234,9 @@ int bnxt_hwrm_cfa_ntuple_filter_free(struct bnxt *bp,
 	int rc;
 
 	set_bit(BNXT_FLTR_FW_DELETED, &fltr->base.state);
+	if (!test_bit(BNXT_STATE_OPEN, &bp->state))
+		return 0;
+
 	rc = hwrm_req_init(bp, req, HWRM_CFA_NTUPLE_FILTER_FREE);
 	if (rc)
 		return rc;
@@ -7949,13 +7948,28 @@ static int bnxt_get_total_vnics(struct bnxt *bp, int rx_rings)
 	return 1;
 }
 
+static void bnxt_get_total_resources(struct bnxt *bp, struct bnxt_hw_rings *hwr)
+{
+	hwr->cp = bnxt_nq_rings_in_use(bp);
+	hwr->cp_p5 = 0;
+	if (bp->flags & BNXT_FLAG_CHIP_P5_PLUS)
+		hwr->cp_p5 = bnxt_cp_rings_in_use(bp);
+	hwr->tx = bp->tx_nr_rings;
+	hwr->rx = bp->rx_nr_rings;
+	hwr->grp = hwr->rx;
+	hwr->vnic = bnxt_get_total_vnics(bp, hwr->rx);
+	hwr->rss_ctx = bnxt_get_total_rss_ctxs(bp, hwr);
+	if (bp->flags & BNXT_FLAG_AGG_RINGS)
+		hwr->rx <<= 1;
+	hwr->stat = bnxt_get_func_stat_ctxs(bp);
+}
+
 static bool bnxt_need_reserve_rings(struct bnxt *bp)
 {
 	struct bnxt_hw_resc *hw_resc = &bp->hw_resc;
-	int cp = bnxt_cp_rings_in_use(bp);
-	int nq = bnxt_nq_rings_in_use(bp);
-	int rx = bp->rx_nr_rings, stat;
-	int vnic, grp = rx;
+	struct bnxt_hw_rings hwr;
+
+	bnxt_get_total_resources(bp, &hwr);
 
 	/* Old firmware does not need RX ring reservations but we still
 	 * need to setup a default RSS map when needed.  With new firmware
@@ -7965,25 +7979,27 @@ static bool bnxt_need_reserve_rings(struct bnxt *bp)
 	if (!BNXT_NEW_RM(bp))
 		bnxt_check_rss_tbl_no_rmgr(bp);
 
-	if (hw_resc->resv_tx_rings != bp->tx_nr_rings &&
-	    bp->hwrm_spec_code >= 0x10601)
+	if (hw_resc->resv_tx_rings != hwr.tx && bp->hwrm_spec_code >= 0x10601)
 		return true;
 
 	if (!BNXT_NEW_RM(bp))
 		return false;
 
-	vnic = bnxt_get_total_vnics(bp, rx);
-
-	if (bp->flags & BNXT_FLAG_AGG_RINGS)
-		rx <<= 1;
-	stat = bnxt_get_func_stat_ctxs(bp);
-	if (hw_resc->resv_rx_rings != rx || hw_resc->resv_cp_rings != cp ||
-	    hw_resc->resv_vnics != vnic || hw_resc->resv_stat_ctxs != stat ||
-	    (hw_resc->resv_hw_ring_grps != grp &&
+	if (hw_resc->resv_rx_rings != hwr.rx ||
+	    hw_resc->resv_vnics != hwr.vnic ||
+	    hw_resc->resv_stat_ctxs != hwr.stat ||
+	    hw_resc->resv_rsscos_ctxs != hwr.rss_ctx ||
+	    (hw_resc->resv_hw_ring_grps != hwr.grp &&
 	     !(bp->flags & BNXT_FLAG_CHIP_P5_PLUS)))
 		return true;
+	if (bp->flags & BNXT_FLAG_CHIP_P5_PLUS) {
+		if (hw_resc->resv_cp_rings != hwr.cp_p5)
+			return true;
+	} else if (hw_resc->resv_cp_rings != hwr.cp) {
+		return true;
+	}
 	if ((bp->flags & BNXT_FLAG_CHIP_P5_PLUS) && BNXT_PF(bp) &&
-	    hw_resc->resv_irqs != nq)
+	    hw_resc->resv_irqs != hwr.cp)
 		return true;
 	return false;
 }
@@ -8636,7 +8652,7 @@ static int bnxt_alloc_all_ctx_pg_info(struct bnxt *bp, int ctx_max)
 
 		if (ctxm->instance_bmap)
 			n = hweight32(ctxm->instance_bmap);
-		ctxm->pg_info = kcalloc(n, sizeof(*ctxm->pg_info), GFP_KERNEL);
+		ctxm->pg_info = kzalloc_objs(*ctxm->pg_info, n);
 		if (!ctxm->pg_info)
 			return -ENOMEM;
 	}
@@ -8663,7 +8679,7 @@ static int bnxt_hwrm_func_backing_store_qcaps_v2(struct bnxt *bp)
 		return rc;
 
 	if (!ctx) {
-		ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+		ctx = kzalloc_obj(*ctx);
 		if (!ctx)
 			return -ENOMEM;
 		bp->ctx = ctx;
@@ -8750,7 +8766,7 @@ static int bnxt_hwrm_func_backing_store_qcaps(struct bnxt *bp)
 
 		ctx = bp->ctx;
 		if (!ctx) {
-			ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+			ctx = kzalloc_obj(*ctx);
 			if (!ctx) {
 				rc = -ENOMEM;
 				goto ctx_err;
@@ -9029,8 +9045,7 @@ static int bnxt_alloc_ctx_pg_tbls(struct bnxt *bp,
 		int nr_tbls, i;
 
 		rmem->depth = 2;
-		ctx_pg->ctx_pg_tbl = kcalloc(MAX_CTX_PAGES, sizeof(ctx_pg),
-					     GFP_KERNEL);
+		ctx_pg->ctx_pg_tbl = kzalloc_objs(ctx_pg, MAX_CTX_PAGES);
 		if (!ctx_pg->ctx_pg_tbl)
 			return -ENOMEM;
 		nr_tbls = DIV_ROUND_UP(ctx_pg->nr_pages, MAX_CTX_PAGES);
@@ -9041,7 +9056,7 @@ static int bnxt_alloc_ctx_pg_tbls(struct bnxt *bp,
 		for (i = 0; i < nr_tbls; i++) {
 			struct bnxt_ctx_pg_info *pg_tbl;
 
-			pg_tbl = kzalloc(sizeof(*pg_tbl), GFP_KERNEL);
+			pg_tbl = kzalloc_obj(*pg_tbl);
 			if (!pg_tbl)
 				return -ENOMEM;
 			ctx_pg->ctx_pg_tbl[i] = pg_tbl;
@@ -9550,8 +9565,7 @@ static int bnxt_alloc_crash_dump_mem(struct bnxt *bp)
 	if (bp->fw_crash_mem)
 		bnxt_free_ctx_pg_tbls(bp, bp->fw_crash_mem);
 	else
-		bp->fw_crash_mem = kzalloc(sizeof(*bp->fw_crash_mem),
-					   GFP_KERNEL);
+		bp->fw_crash_mem = kzalloc_obj(*bp->fw_crash_mem);
 	if (!bp->fw_crash_mem)
 		return -ENOMEM;
 
@@ -9658,7 +9672,7 @@ static int __bnxt_hwrm_ptp_qcfg(struct bnxt *bp)
 		goto exit;
 	}
 	if (!ptp) {
-		ptp = kzalloc(sizeof(*ptp), GFP_KERNEL);
+		ptp = kzalloc_obj(*ptp);
 		if (!ptp) {
 			rc = -ENOMEM;
 			goto exit;
@@ -9930,7 +9944,7 @@ static int __bnxt_alloc_fw_health(struct bnxt *bp)
 	if (bp->fw_health)
 		return 0;
 
-	bp->fw_health = kzalloc(sizeof(*bp->fw_health), GFP_KERNEL);
+	bp->fw_health = kzalloc_obj(*bp->fw_health);
 	if (!bp->fw_health)
 		return -ENOMEM;
 
@@ -10870,12 +10884,10 @@ void bnxt_del_one_rss_ctx(struct bnxt *bp, struct bnxt_rss_ctx *rss_ctx,
 	struct bnxt_ntuple_filter *ntp_fltr;
 	int i;
 
-	if (netif_running(bp->dev)) {
-		bnxt_hwrm_vnic_free_one(bp, &rss_ctx->vnic);
-		for (i = 0; i < BNXT_MAX_CTX_PER_VNIC; i++) {
-			if (vnic->fw_rss_cos_lb_ctx[i] != INVALID_HW_RING_ID)
-				bnxt_hwrm_vnic_ctx_free_one(bp, vnic, i);
-		}
+	bnxt_hwrm_vnic_free_one(bp, &rss_ctx->vnic);
+	for (i = 0; i < BNXT_MAX_CTX_PER_VNIC; i++) {
+		if (vnic->fw_rss_cos_lb_ctx[i] != INVALID_HW_RING_ID)
+			bnxt_hwrm_vnic_ctx_free_one(bp, vnic, i);
 	}
 	if (!all)
 		return;
@@ -11441,7 +11453,7 @@ static int bnxt_init_int_mode(struct bnxt *bp)
 	tbl_size = total_vecs;
 	if (pci_msix_can_alloc_dyn(bp->pdev))
 		tbl_size = max;
-	bp->irq_tbl = kcalloc(tbl_size, sizeof(*bp->irq_tbl), GFP_KERNEL);
+	bp->irq_tbl = kzalloc_objs(*bp->irq_tbl, tbl_size);
 	if (bp->irq_tbl) {
 		for (i = 0; i < total_vecs; i++)
 			bp->irq_tbl[i].vector = pci_irq_vector(bp->pdev, i);
@@ -12938,7 +12950,7 @@ static int bnxt_set_xps_mapping(struct bnxt *bp)
 	cpumask_t *q_map;
 	int rc = 0;
 
-	q_map = kcalloc(bp->tx_nr_rings_per_tc, sizeof(*q_map), GFP_KERNEL);
+	q_map = kzalloc_objs(*q_map, bp->tx_nr_rings_per_tc);
 	if (!q_map)
 		return -ENOMEM;
 
@@ -13233,7 +13245,7 @@ static void __bnxt_close_nic(struct bnxt *bp, bool irq_re_init,
 	/* Save ring stats before shutdown */
 	if (bp->bnapi && irq_re_init) {
 		bnxt_get_ring_stats(bp, &bp->net_stats_prev);
-		bnxt_get_ring_err_stats(bp, &bp->ring_err_stats_prev);
+		bnxt_get_ring_drv_stats(bp, &bp->ring_drv_stats_prev);
 	}
 	if (irq_re_init) {
 		bnxt_free_irq(bp);
@@ -13478,8 +13490,8 @@ bnxt_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *stats)
 	clear_bit(BNXT_STATE_READ_STATS, &bp->state);
 }
 
-static void bnxt_get_one_ring_err_stats(struct bnxt *bp,
-					struct bnxt_total_ring_err_stats *stats,
+static void bnxt_get_one_ring_drv_stats(struct bnxt *bp,
+					struct bnxt_total_ring_drv_stats *stats,
 					struct bnxt_cp_ring_info *cpr)
 {
 	struct bnxt_sw_stats *sw_stats = cpr->sw_stats;
@@ -13492,19 +13504,21 @@ static void bnxt_get_one_ring_err_stats(struct bnxt *bp,
 	stats->rx_total_netpoll_discards += sw_stats->rx.rx_netpoll_discards;
 	stats->rx_total_ring_discards +=
 		BNXT_GET_RING_STATS64(hw_stats, rx_discard_pkts);
+	stats->rx_total_hw_gro_packets += sw_stats->rx.rx_hw_gro_packets;
+	stats->rx_total_hw_gro_wire_packets += sw_stats->rx.rx_hw_gro_wire_packets;
 	stats->tx_total_resets += sw_stats->tx.tx_resets;
 	stats->tx_total_ring_discards +=
 		BNXT_GET_RING_STATS64(hw_stats, tx_discard_pkts);
 	stats->total_missed_irqs += sw_stats->cmn.missed_irqs;
 }
 
-void bnxt_get_ring_err_stats(struct bnxt *bp,
-			     struct bnxt_total_ring_err_stats *stats)
+void bnxt_get_ring_drv_stats(struct bnxt *bp,
+			     struct bnxt_total_ring_drv_stats *stats)
 {
 	int i;
 
 	for (i = 0; i < bp->cp_nr_rings; i++)
-		bnxt_get_one_ring_err_stats(bp, stats, &bp->bnapi[i]->cp_ring);
+		bnxt_get_one_ring_drv_stats(bp, stats, &bp->bnapi[i]->cp_ring);
 }
 
 static bool bnxt_mc_list_updated(struct bnxt *bp, u32 *rx_mask)
@@ -13881,7 +13895,6 @@ static bool bnxt_exthdr_check(struct bnxt *bp, struct sk_buff *skb, int nw_off,
 			      u8 **nextp)
 {
 	struct ipv6hdr *ip6h = (struct ipv6hdr *)(skb->data + nw_off);
-	struct hop_jumbo_hdr *jhdr;
 	int hdr_count = 0;
 	u8 *nexthdr;
 	int start;
@@ -13910,24 +13923,7 @@ static bool bnxt_exthdr_check(struct bnxt *bp, struct sk_buff *skb, int nw_off,
 		if (hdrlen > 64)
 			return false;
 
-		/* The ext header may be a hop-by-hop header inserted for
-		 * big TCP purposes. This will be removed before sending
-		 * from NIC, so do not count it.
-		 */
-		if (*nexthdr == NEXTHDR_HOP) {
-			if (likely(skb->len <= GRO_LEGACY_MAX_SIZE))
-				goto increment_hdr;
-
-			jhdr = (struct hop_jumbo_hdr *)hp;
-			if (jhdr->tlv_type != IPV6_TLV_JUMBO || jhdr->hdrlen != 0 ||
-			    jhdr->nexthdr != IPPROTO_TCP)
-				goto increment_hdr;
-
-			goto next_hdr;
-		}
-increment_hdr:
 		hdr_count++;
-next_hdr:
 		nexthdr = &hp->nexthdr;
 		start += hdrlen;
 	}
@@ -15647,7 +15643,7 @@ static int bnxt_rx_flow_steer(struct net_device *dev, const struct sk_buff *skb,
 			return -EINVAL;
 		}
 	}
-	new_fltr = kzalloc(sizeof(*new_fltr), GFP_ATOMIC);
+	new_fltr = kzalloc_obj(*new_fltr, GFP_ATOMIC);
 	if (!new_fltr) {
 		bnxt_del_l2_filter(bp, l2_fltr);
 		return -ENOMEM;
@@ -15931,6 +15927,8 @@ static void bnxt_get_queue_stats_rx(struct net_device *dev, int i,
 	stats->bytes += BNXT_GET_RING_STATS64(sw, rx_bcast_bytes);
 
 	stats->alloc_fail = cpr->sw_stats->rx.rx_oom_discards;
+	stats->hw_gro_packets = cpr->sw_stats->rx.rx_hw_gro_packets;
+	stats->hw_gro_wire_packets = cpr->sw_stats->rx.rx_hw_gro_wire_packets;
 }
 
 static void bnxt_get_queue_stats_tx(struct net_device *dev, int i,
@@ -15965,7 +15963,9 @@ static void bnxt_get_base_stats(struct net_device *dev,
 
 	rx->packets = bp->net_stats_prev.rx_packets;
 	rx->bytes = bp->net_stats_prev.rx_bytes;
-	rx->alloc_fail = bp->ring_err_stats_prev.rx_total_oom_discards;
+	rx->alloc_fail = bp->ring_drv_stats_prev.rx_total_oom_discards;
+	rx->hw_gro_packets = bp->ring_drv_stats_prev.rx_total_hw_gro_packets;
+	rx->hw_gro_wire_packets = bp->ring_drv_stats_prev.rx_total_hw_gro_wire_packets;
 
 	tx->packets = bp->net_stats_prev.tx_packets;
 	tx->bytes = bp->net_stats_prev.tx_bytes;
@@ -15983,8 +15983,12 @@ static void bnxt_queue_default_qcfg(struct net_device *dev,
 	qcfg->rx_page_size = BNXT_RX_PAGE_SIZE;
 }
 
-static int bnxt_validate_qcfg(struct bnxt *bp, struct netdev_queue_config *qcfg)
+static int bnxt_validate_qcfg(struct net_device *dev,
+			      struct netdev_queue_config *qcfg,
+			      struct netlink_ext_ack *extack)
 {
+	struct bnxt *bp = netdev_priv(dev);
+
 	/* Older chips need MSS calc so rx_page_size is not supported */
 	if (!(bp->flags & BNXT_FLAG_CHIP_P5_PLUS) &&
 	    qcfg->rx_page_size != BNXT_RX_PAGE_SIZE)
@@ -16011,10 +16015,6 @@ static int bnxt_queue_mem_alloc(struct net_device *dev,
 
 	if (!bp->rx_ring)
 		return -ENETDOWN;
-
-	rc = bnxt_validate_qcfg(bp, qcfg);
-	if (rc < 0)
-		return rc;
 
 	rxr = &bp->rx_ring[idx];
 	clone = qmem;
@@ -16311,7 +16311,12 @@ static const struct netdev_queue_mgmt_ops bnxt_queue_mgmt_ops = {
 	.ndo_queue_start	= bnxt_queue_start,
 	.ndo_queue_stop		= bnxt_queue_stop,
 	.ndo_default_qcfg	= bnxt_queue_default_qcfg,
+	.ndo_validate_qcfg	= bnxt_validate_qcfg,
 	.supported_params	= QCFG_RX_PAGE_SIZE,
+};
+
+static const struct netdev_queue_mgmt_ops bnxt_queue_mgmt_ops_unsupp = {
+	.ndo_default_qcfg	= bnxt_queue_default_qcfg,
 };
 
 static void bnxt_remove_one(struct pci_dev *pdev)
@@ -16966,9 +16971,10 @@ static int bnxt_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	if (BNXT_SUPPORTS_NTUPLE_VNIC(bp))
 		bp->rss_cap |= BNXT_RSS_CAP_MULTI_RSS_CTX;
+
+	dev->queue_mgmt_ops = &bnxt_queue_mgmt_ops_unsupp;
 	if (BNXT_SUPPORTS_QUEUE_API(bp))
 		dev->queue_mgmt_ops = &bnxt_queue_mgmt_ops;
-	dev->request_ops_lock = true;
 	dev->netmem_tx = true;
 
 	rc = register_netdev(dev);

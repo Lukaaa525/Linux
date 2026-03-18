@@ -6,6 +6,7 @@
 #include <linux/percpu-defs.h>
 #include <linux/irqflags.h>
 #include <linux/lockdep.h>
+#include <linux/debug_locks.h>
 #include <asm/current.h>
 
 #ifndef CONFIG_PREEMPT_RT
@@ -86,13 +87,11 @@ do {								\
 			      0, LD_WAIT_CONFIG, LD_WAIT_INV,	\
 			      LD_LOCK_PERCPU);			\
 	local_lock_debug_init(lock);				\
-	__assume_ctx_lock(lock);				\
 } while (0)
 
 #define __local_trylock_init(lock)				\
 do {								\
 	__local_lock_init((local_lock_t *)lock);		\
-	__assume_ctx_lock(lock);				\
 } while (0)
 
 #define __spinlock_nested_bh_init(lock)				\
@@ -104,7 +103,6 @@ do {								\
 			      0, LD_WAIT_CONFIG, LD_WAIT_INV,	\
 			      LD_LOCK_NORMAL);			\
 	local_lock_debug_init(lock);				\
-	__assume_ctx_lock(lock);				\
 } while (0)
 
 #define __local_lock_acquire(lock)					\
@@ -317,7 +315,7 @@ do {								\
 
 #endif /* CONFIG_PREEMPT_RT */
 
-#if defined(WARN_CONTEXT_ANALYSIS)
+#if defined(WARN_CONTEXT_ANALYSIS) && !defined(__CHECKER__)
 /*
  * Because the compiler only knows about the base per-CPU variable, use this
  * helper function to make the compiler think we lock/unlock the @base variable,

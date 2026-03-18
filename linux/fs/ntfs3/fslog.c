@@ -2473,7 +2473,7 @@ static int read_log_rec_lcb(struct ntfs_log *log, u64 lsn, u32 ctx_mode,
 	if (!verify_client_lsn(log, cr, lsn))
 		return -EINVAL;
 
-	lcb = kzalloc(sizeof(struct lcb), GFP_NOFS);
+	lcb = kzalloc_obj(struct lcb, GFP_NOFS);
 	if (!lcb)
 		return -ENOMEM;
 	lcb->client = log->client_id;
@@ -3117,8 +3117,7 @@ static int do_action(struct ntfs_log *log, struct OPEN_ATTR_ENRTY *oe,
 			/* Read from disk. */
 			err = mi_get(sbi, rno, &mi);
 			if (err && op == InitializeFileRecordSegment) {
-				mi = kzalloc(sizeof(struct mft_inode),
-					     GFP_NOFS);
+				mi = kzalloc_obj(struct mft_inode, GFP_NOFS);
 				if (!mi)
 					return -ENOMEM;
 				err = mi_format_new(mi, sbi, rno, 0, false);
@@ -3431,6 +3430,9 @@ move_data:
 
 		e1 = Add2Ptr(attr, le16_to_cpu(lrh->attr_off));
 		esize = le16_to_cpu(e1->size);
+		if (PtrOffset(e1, Add2Ptr(hdr, used)) < esize)
+			goto dirty_vol;
+
 		e2 = Add2Ptr(e1, esize);
 
 		memmove(e1, e2, PtrOffset(e2, Add2Ptr(hdr, used)));
@@ -3776,7 +3778,7 @@ int log_replay(struct ntfs_inode *ni, bool *initialized)
 	u16 t16;
 	u32 t32;
 
-	log = kzalloc(sizeof(struct ntfs_log), GFP_NOFS);
+	log = kzalloc_obj(struct ntfs_log, GFP_NOFS);
 	if (!log)
 		return -ENOMEM;
 
@@ -4722,7 +4724,7 @@ next_open_attribute:
 		goto next_dirty_page;
 	}
 
-	oa = kzalloc(sizeof(struct OpenAttr), GFP_NOFS);
+	oa = kzalloc_obj(struct OpenAttr, GFP_NOFS);
 	if (!oa) {
 		err = -ENOMEM;
 		goto out;

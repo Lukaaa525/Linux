@@ -12,6 +12,7 @@
 #include "io_uring.h"
 #include "bpf_filter.h"
 #include "net.h"
+#include "openclose.h"
 
 struct io_bpf_filter {
 	refcount_t		refs;
@@ -25,19 +26,22 @@ static const struct io_bpf_filter dummy_filter;
 static void io_uring_populate_bpf_ctx(struct io_uring_bpf_ctx *bctx,
 				      struct io_kiocb *req)
 {
-	memset(bctx, 0, sizeof(*bctx));
+	const struct io_issue_def *def = &io_issue_defs[req->opcode];
+
 	bctx->opcode = req->opcode;
 	bctx->sqe_flags = (__force int) req->flags & SQE_VALID_FLAGS;
 	bctx->user_data = req->cqe.user_data;
+	/* clear residual, anything from pdu_size and below */
+	memset((void *) bctx + offsetof(struct io_uring_bpf_ctx, pdu_size), 0,
+		sizeof(*bctx) - offsetof(struct io_uring_bpf_ctx, pdu_size));
 
 	/*
-	 * Opcodes can provide a handler fo populating more data into bctx,
+	 * Opcodes can provide a handler for populating more data into bctx,
 	 * for filters to use.
 	 */
-	switch (req->opcode) {
-	case IORING_OP_SOCKET:
-		io_socket_bpf_populate(bctx, req);
-		break;
+	if (def->filter_pdu_size) {
+		bctx->pdu_size = def->filter_pdu_size;
+		def->filter_populate(bctx, req);
 	}
 }
 
@@ -65,15 +69,12 @@ int __io_uring_run_bpf_filters(struct io_bpf_filter __rcu **filters,
 	 * req->opcode has already been validated to be within the range
 	 * of what we expect, io_init_req() does this.
 	 */
-	rcu_read_lock();
+	guard(rcu)();
 	filter = rcu_dereference(filters[req->opcode]);
-	if (!filter) {
-		ret = 1;
-		goto out;
-	} else if (filter == &dummy_filter) {
-		ret = 0;
-		goto out;
-	}
+	if (!filter)
+		return 0;
+	else if (filter == &dummy_filter)
+		return -EACCES;
 
 	io_uring_populate_bpf_ctx(&bpf_ctx, req);
 
@@ -83,16 +84,14 @@ int __io_uring_run_bpf_filters(struct io_bpf_filter __rcu **filters,
 	 */
 	do {
 		if (filter == &dummy_filter)
-			ret = 0;
-		else
-			ret = bpf_prog_run(filter->prog, &bpf_ctx);
+			return -EACCES;
+		ret = bpf_prog_run_pin_on_cpu(filter->prog, &bpf_ctx);
 		if (!ret)
-			break;
+			return -EACCES;
 		filter = filter->next;
 	} while (filter);
-out:
-	rcu_read_unlock();
-	return ret ? 0 : -EACCES;
+
+	return 0;
 }
 
 static void io_free_bpf_filters(struct rcu_head *head)
@@ -102,13 +101,11 @@ static void io_free_bpf_filters(struct rcu_head *head)
 	int i;
 
 	filters = container_of(head, struct io_bpf_filters, rcu_head);
-	spin_lock(&filters->lock);
-	filter = filters->filters;
-	if (!filter) {
-		spin_unlock(&filters->lock);
-		return;
+	scoped_guard(spinlock, &filters->lock) {
+		filter = filters->filters;
+		if (!filter)
+			return;
 	}
-	spin_unlock(&filters->lock);
 
 	for (i = 0; i < IORING_OP_LAST; i++) {
 		struct io_bpf_filter *f;
@@ -153,23 +150,20 @@ void io_put_bpf_filters(struct io_restriction *res)
 
 static struct io_bpf_filters *io_new_bpf_filters(void)
 {
-	struct io_bpf_filters *filters;
+	struct io_bpf_filters *filters __free(kfree) = NULL;
 
-	filters = kzalloc(sizeof(*filters), GFP_KERNEL_ACCOUNT);
+	filters = kzalloc_obj(*filters, GFP_KERNEL_ACCOUNT);
 	if (!filters)
 		return ERR_PTR(-ENOMEM);
 
-	filters->filters = kcalloc(IORING_OP_LAST,
-				   sizeof(struct io_bpf_filter *),
-				   GFP_KERNEL_ACCOUNT);
-	if (!filters->filters) {
-		kfree(filters);
+	filters->filters = kzalloc_objs(struct io_bpf_filter *, IORING_OP_LAST,
+					GFP_KERNEL_ACCOUNT);
+	if (!filters->filters)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	refcount_set(&filters->refs, 1);
 	spin_lock_init(&filters->lock);
-	return filters;
+	return no_free_ptr(filters);
 }
 
 /*
@@ -313,7 +307,54 @@ err:
 	return ERR_PTR(-EBUSY);
 }
 
-#define IO_URING_BPF_FILTER_FLAGS	IO_URING_BPF_FILTER_DENY_REST
+#define IO_URING_BPF_FILTER_FLAGS	(IO_URING_BPF_FILTER_DENY_REST | \
+					 IO_URING_BPF_FILTER_SZ_STRICT)
+
+static int io_bpf_filter_import(struct io_uring_bpf *reg,
+				struct io_uring_bpf __user *arg)
+{
+	const struct io_issue_def *def;
+	int ret;
+
+	if (copy_from_user(reg, arg, sizeof(*reg)))
+		return -EFAULT;
+	if (reg->cmd_type != IO_URING_BPF_CMD_FILTER)
+		return -EINVAL;
+	if (reg->cmd_flags || reg->resv)
+		return -EINVAL;
+
+	if (reg->filter.opcode >= IORING_OP_LAST)
+		return -EINVAL;
+	if (reg->filter.flags & ~IO_URING_BPF_FILTER_FLAGS)
+		return -EINVAL;
+	if (!mem_is_zero(reg->filter.resv, sizeof(reg->filter.resv)))
+		return -EINVAL;
+	if (!mem_is_zero(reg->filter.resv2, sizeof(reg->filter.resv2)))
+		return -EINVAL;
+	if (!reg->filter.filter_len || reg->filter.filter_len > BPF_MAXINSNS)
+		return -EINVAL;
+
+	/* Verify filter size */
+	def = &io_issue_defs[array_index_nospec(reg->filter.opcode, IORING_OP_LAST)];
+
+	/* same size, always ok */
+	ret = 0;
+	if (reg->filter.pdu_size == def->filter_pdu_size)
+		;
+	/* size differs, fail in strict mode */
+	else if (reg->filter.flags & IO_URING_BPF_FILTER_SZ_STRICT)
+		ret = -EMSGSIZE;
+	/* userspace filter is bigger, always disallow */
+	else if (reg->filter.pdu_size > def->filter_pdu_size)
+		ret = -EMSGSIZE;
+
+	/* copy back kernel filter size */
+	reg->filter.pdu_size = def->filter_pdu_size;
+	if (copy_to_user(&arg->filter, &reg->filter, sizeof(reg->filter)))
+		return -EFAULT;
+
+	return ret;
+}
 
 int io_register_bpf_filter(struct io_restriction *res,
 			   struct io_uring_bpf __user *arg)
@@ -325,23 +366,9 @@ int io_register_bpf_filter(struct io_restriction *res,
 	struct sock_fprog fprog;
 	int ret;
 
-	if (copy_from_user(&reg, arg, sizeof(reg)))
-		return -EFAULT;
-	if (reg.cmd_type != IO_URING_BPF_CMD_FILTER)
-		return -EINVAL;
-	if (reg.cmd_flags || reg.resv)
-		return -EINVAL;
-
-	if (reg.filter.opcode >= IORING_OP_LAST)
-		return -EINVAL;
-	if (reg.filter.flags & ~IO_URING_BPF_FILTER_FLAGS)
-		return -EINVAL;
-	if (reg.filter.resv)
-		return -EINVAL;
-	if (!mem_is_zero(reg.filter.resv2, sizeof(reg.filter.resv2)))
-		return -EINVAL;
-	if (!reg.filter.filter_len || reg.filter.filter_len > BPF_MAXINSNS)
-		return -EINVAL;
+	ret = io_bpf_filter_import(&reg, arg);
+	if (ret)
+		return ret;
 
 	fprog.len = reg.filter.filter_len;
 	fprog.filter = u64_to_user_ptr(reg.filter.filter_ptr);
@@ -374,7 +401,7 @@ int io_register_bpf_filter(struct io_restriction *res,
 		old_filters = res->bpf_filters;
 	}
 
-	filter = kzalloc(sizeof(*filter), GFP_KERNEL_ACCOUNT);
+	filter = kzalloc_obj(*filter, GFP_KERNEL_ACCOUNT);
 	if (!filter) {
 		ret = -ENOMEM;
 		goto err;

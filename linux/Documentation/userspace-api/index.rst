@@ -69,10 +69,3 @@ Everything else
    futex2
    perf_ring_buffer
    ntsync
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

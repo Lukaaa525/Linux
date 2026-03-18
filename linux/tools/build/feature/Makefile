@@ -73,6 +73,7 @@ FILES=                                          \
          test-clang-bpf-co-re.bin		\
          test-file-handle.bin			\
          test-libpfm4.bin			\
+         test-rust.bin				\
          test-libopenssl.bin
 
 FILES := $(addprefix $(OUTPUT),$(FILES))
@@ -388,6 +389,15 @@ $(OUTPUT)test-libopenssl.bin:
 $(OUTPUT)test-bpftool-skeletons.bin:
 	$(SYSTEM_BPFTOOL) version | grep '^features:.*skeletons' \
 		> $(@:.bin=.make.output) 2>&1
+
+# Testing Rust is special: we don't compile anything, it's enough to check the
+# compiler presence. Compiling a test code for this purposes is problematic,
+# because Rust will emit a dependency file without any external references,
+# meaning that if rustc will be removed the build process will still think it's
+# there.
+$(OUTPUT)test-rust.bin:
+	$(RUSTC) --version > /dev/null 2>&1
+
 ###############################
 
 clean:

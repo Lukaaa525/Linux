@@ -29,7 +29,6 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-#define pr_fmt(fmt) "infiniband: " fmt
 
 #include "core_priv.h"
 
@@ -353,7 +352,7 @@ static void enum_netdev_ipv4_ips(struct ib_device *ib_dev,
 	}
 
 	in_dev_for_each_ifa_rcu(ifa, in_dev) {
-		struct sin_list *entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+		struct sin_list *entry = kzalloc_obj(*entry, GFP_ATOMIC);
 
 		if (!entry)
 			continue;
@@ -396,7 +395,7 @@ static void enum_netdev_ipv6_ips(struct ib_device *ib_dev,
 
 	read_lock_bh(&in6_dev->lock);
 	list_for_each_entry(ifp, &in6_dev->addr_list, if_list) {
-		struct sin6_list *entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
+		struct sin6_list *entry = kzalloc_obj(*entry, GFP_ATOMIC);
 
 		if (!entry)
 			continue;
@@ -437,28 +436,6 @@ static void del_netdev_ips(struct ib_device *ib_dev, u32 port,
 			   struct net_device *rdma_ndev, void *cookie)
 {
 	ib_cache_gid_del_all_netdev_gids(ib_dev, port, cookie);
-}
-
-static void del_netdev_ips0(struct ib_device *ib_dev, u32 port,
-			    struct net_device *rdma_ndev, void *cookie)
-{
-	struct net_device *ndev = cookie;
-
-	if (IS_ENABLED(CONFIG_NET_DEV_REFCNT_TRACKER))
-		pr_info("netdevice_event(NETDEV_UNREGISTER) ib_dev=%p (%d)(%s) rdma_ndev=%p (%d)(%s) cookie=%p (%d)(%s) start\n",
-			ib_dev, ib_dev ? refcount_read(&ib_dev->refcount) : 0,
-			ib_dev ? ib_dev->name : "",
-			rdma_ndev, rdma_ndev ? netdev_refcnt_read(rdma_ndev) : 0,
-			rdma_ndev ? rdma_ndev->name : "",
-			ndev, ndev ? netdev_refcnt_read(ndev) : 0, ndev ? ndev->name : "");
-	ib_cache_gid_del_all_netdev_gids(ib_dev, port, ndev);
-	if (IS_ENABLED(CONFIG_NET_DEV_REFCNT_TRACKER))
-		pr_info("netdevice_event(NETDEV_UNREGISTER) ib_dev=%p (%d)(%s) rdma_ndev=%p (%d)(%s) cookie=%p (%d)(%s) end\n",
-			ib_dev, ib_dev ? refcount_read(&ib_dev->refcount) : 0,
-			ib_dev ? ib_dev->name : "",
-			rdma_ndev, rdma_ndev ? netdev_refcnt_read(rdma_ndev) : 0,
-			rdma_ndev ? rdma_ndev->name : "",
-			ndev, ndev ? netdev_refcnt_read(ndev) : 0, ndev ? ndev->name : "");
 }
 
 /**
@@ -579,7 +556,7 @@ struct upper_list {
 static int netdev_upper_walk(struct net_device *upper,
 			     struct netdev_nested_priv *priv)
 {
-	struct upper_list *entry = kmalloc(sizeof(*entry), GFP_ATOMIC);
+	struct upper_list *entry = kmalloc_obj(*entry, GFP_ATOMIC);
 	struct list_head *upper_list = (struct list_head *)priv->data;
 
 	if (!entry)
@@ -683,8 +660,7 @@ static int netdevice_queue_work(struct netdev_event_work_cmd *cmds,
 				struct net_device *ndev)
 {
 	unsigned int i;
-	struct netdev_event_work *ndev_work =
-		kmalloc(sizeof(*ndev_work), GFP_KERNEL);
+	struct netdev_event_work *ndev_work = kmalloc_obj(*ndev_work);
 
 	if (!ndev_work)
 		return NOTIFY_DONE;
@@ -783,7 +759,7 @@ static int netdevice_event(struct notifier_block *this, unsigned long event,
 			   void *ptr)
 {
 	static const struct netdev_event_work_cmd del_cmd = {
-		.cb = del_netdev_ips0, .filter = pass_all_filter};
+		.cb = del_netdev_ips, .filter = pass_all_filter};
 	static const struct netdev_event_work_cmd
 			bonding_default_del_cmd_join = {
 				.cb	= del_netdev_default_ips_join,
@@ -798,9 +774,6 @@ static int netdevice_event(struct notifier_block *this, unsigned long event,
 		.cb = del_netdev_upper_ips, .filter = upper_device_filter};
 	struct net_device *ndev = netdev_notifier_info_to_dev(ptr);
 	struct netdev_event_work_cmd cmds[ROCE_NETDEV_CALLBACK_SZ] = { {NULL} };
-
-	if (event == NETDEV_DEBUG_UNREGISTER)
-		dump_ib_gid_table_entry_trace_buffer(ndev);
 
 	if (ndev->type != ARPHRD_ETHER)
 		return NOTIFY_DONE;
@@ -884,7 +857,7 @@ static int addr_event(struct notifier_block *this, unsigned long event,
 		return NOTIFY_DONE;
 	}
 
-	work = kmalloc(sizeof(*work), GFP_ATOMIC);
+	work = kmalloc_obj(*work, GFP_ATOMIC);
 	if (!work)
 		return NOTIFY_DONE;
 

@@ -232,6 +232,7 @@ static int amdgpu_gem_object_open(struct drm_gem_object *obj,
 	struct amdgpu_vm *vm = &fpriv->vm;
 	struct amdgpu_bo_va *bo_va;
 	struct mm_struct *mm;
+	struct drm_exec exec;
 	int r;
 
 	mm = amdgpu_ttm_tt_get_usermm(abo->tbo.ttm);
@@ -242,26 +243,31 @@ static int amdgpu_gem_object_open(struct drm_gem_object *obj,
 	    !amdgpu_vm_is_bo_always_valid(vm, abo))
 		return -EPERM;
 
-	r = amdgpu_bo_reserve(abo, false);
-	if (r)
-		return r;
+	drm_exec_init(&exec, DRM_EXEC_IGNORE_DUPLICATES, 0);
+	drm_exec_until_all_locked(&exec) {
+		r = drm_exec_prepare_obj(&exec, &abo->tbo.base, 1);
+		drm_exec_retry_on_contention(&exec);
+		if (unlikely(r))
+			goto out_unlock;
+
+		r = amdgpu_vm_lock_pd(vm, &exec, 0);
+		drm_exec_retry_on_contention(&exec);
+		if (unlikely(r))
+			goto out_unlock;
+	}
 
 	amdgpu_vm_bo_update_shared(abo);
 	bo_va = amdgpu_vm_bo_find(vm, abo);
-	if (!bo_va)
+	if (!bo_va) {
 		bo_va = amdgpu_vm_bo_add(adev, vm, abo);
-	else
+		r = amdgpu_evf_mgr_attach_fence(&fpriv->evf_mgr, abo);
+		if (r)
+			goto out_unlock;
+	} else {
 		++bo_va->ref_count;
-
-	/* attach gfx eviction fence */
-	r = amdgpu_eviction_fence_attach(&fpriv->evf_mgr, abo);
-	if (r) {
-		DRM_DEBUG_DRIVER("Failed to attach eviction fence to BO\n");
-		amdgpu_bo_unreserve(abo);
-		return r;
 	}
 
-	amdgpu_bo_unreserve(abo);
+	drm_exec_fini(&exec);
 
 	/* Validate and add eviction fence to DMABuf imports with dynamic
 	 * attachment in compute VMs. Re-validation will be done by
@@ -294,7 +300,10 @@ static int amdgpu_gem_object_open(struct drm_gem_object *obj,
 		}
 	}
 	mutex_unlock(&vm->process_info->lock);
+	return r;
 
+out_unlock:
+	drm_exec_fini(&exec);
 	return r;
 }
 
@@ -325,7 +334,7 @@ static void amdgpu_gem_object_close(struct drm_gem_object *obj,
 	}
 
 	if (!amdgpu_vm_is_bo_always_valid(vm, bo))
-		amdgpu_eviction_fence_detach(&fpriv->evf_mgr, bo);
+		amdgpu_evf_mgr_detach_fence(&fpriv->evf_mgr, bo);
 
 	bo_va = amdgpu_vm_bo_find(vm, bo);
 	if (!bo_va || --bo_va->ref_count)
@@ -1171,7 +1180,7 @@ int amdgpu_gem_list_handles_ioctl(struct drm_device *dev, void *data,
 		return 0;
 	}
 
-	bo_entries = kvcalloc(num_bos, sizeof(*bo_entries), GFP_KERNEL);
+	bo_entries = kvzalloc_objs(*bo_entries, num_bos);
 	if (!bo_entries)
 		return -ENOMEM;
 

@@ -49,13 +49,23 @@
 #undef pr_info
 #undef pr_debug
 
+#define hbm_stack_mask_valid(umc_mask) \
+	(((umc_mask) & 0x3) == 0x3)
+
+#define for_each_hbm_stack(stack_idx, umc_mask) \
+	for ((stack_idx) = 0; (umc_mask); \
+	     (umc_mask) >>= 2, (stack_idx)++) \
+
 #define SMU_13_0_12_FEA_MAP(smu_feature, smu_13_0_12_feature)                    \
 	[smu_feature] = { 1, (smu_13_0_12_feature) }
 
-#define FEATURE_MASK(feature) (1ULL << feature)
-#define SMC_DPM_FEATURE                                                        \
-	(FEATURE_MASK(FEATURE_DATA_CALCULATION) |                              \
-	 FEATURE_MASK(FEATURE_DPM_GFXCLK) | FEATURE_MASK(FEATURE_DPM_FCLK))
+static const struct smu_feature_bits smu_v13_0_12_dpm_features = {
+	.bits = {
+		SMU_FEATURE_BIT_INIT(FEATURE_DATA_CALCULATION),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_GFXCLK),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_FCLK)
+	}
+};
 
 #define NUM_JPEG_RINGS_FW	10
 #define NUM_JPEG_RINGS_GPU_METRICS(gpu_metrics) \
@@ -199,14 +209,14 @@ void smu_v13_0_12_tables_fini(struct smu_context *smu)
 }
 
 static int smu_v13_0_12_get_enabled_mask(struct smu_context *smu,
-					 uint64_t *feature_mask)
+					 struct smu_feature_bits *feature_mask)
 {
 	int ret;
 
 	ret = smu_cmn_get_enabled_mask(smu, feature_mask);
 
 	if (ret == -EIO) {
-		*feature_mask = 0;
+		smu_feature_bits_clearall(feature_mask);
 		ret = 0;
 	}
 
@@ -220,7 +230,7 @@ static int smu_v13_0_12_fru_get_product_info(struct smu_context *smu,
 	struct amdgpu_device *adev = smu->adev;
 
 	if (!adev->fru_info) {
-		adev->fru_info = kzalloc(sizeof(*adev->fru_info), GFP_KERNEL);
+		adev->fru_info = kzalloc_obj(*adev->fru_info);
 		if (!adev->fru_info)
 			return -ENOMEM;
 	}
@@ -259,8 +269,9 @@ static void smu_v13_0_12_init_xgmi_data(struct smu_context *smu,
 	int ret;
 
 	if (smu_table->tables[SMU_TABLE_SMU_METRICS].version >= 0x13) {
-		max_width = (uint8_t)static_metrics->MaxXgmiWidth;
-		max_speed = (uint16_t)static_metrics->MaxXgmiBitrate;
+		max_width = (uint8_t)SMUQ10_ROUND(static_metrics->MaxXgmiWidth);
+		max_speed =
+			(uint16_t)SMUQ10_ROUND(static_metrics->MaxXgmiBitrate);
 		ret = 0;
 	} else {
 		MetricsTable_t *metrics = (MetricsTable_t *)smu_table->metrics_table;
@@ -372,14 +383,15 @@ int smu_v13_0_12_setup_driver_pptable(struct smu_context *smu)
 bool smu_v13_0_12_is_dpm_running(struct smu_context *smu)
 {
 	int ret;
-	uint64_t feature_enabled;
+	struct smu_feature_bits feature_enabled;
 
 	ret = smu_v13_0_12_get_enabled_mask(smu, &feature_enabled);
 
 	if (ret)
 		return false;
 
-	return !!(feature_enabled & SMC_DPM_FEATURE);
+	return smu_feature_bits_test_mask(&feature_enabled,
+					  smu_v13_0_12_dpm_features.bits);
 }
 
 int smu_v13_0_12_get_smu_metrics_data(struct smu_context *smu,
@@ -819,6 +831,9 @@ ssize_t smu_v13_0_12_get_xcp_metrics(struct smu_context *smu, struct amdgpu_xcp 
 		idx++;
 	}
 
+	xcp_metrics->accumulation_counter = metrics->AccumulationCounter;
+	xcp_metrics->firmware_timestamp = metrics->Timestamp;
+
 	return sizeof(*xcp_metrics);
 }
 
@@ -827,7 +842,7 @@ void smu_v13_0_12_get_gpu_metrics(struct smu_context *smu, void **table,
 				  struct smu_v13_0_6_gpu_metrics *gpu_metrics)
 {
 	struct amdgpu_device *adev = smu->adev;
-	int ret = 0, xcc_id, inst, i, j;
+	int ret = 0, xcc_id, inst, i, j, idx;
 	u8 num_jpeg_rings_gpu_metrics;
 	MetricsTable_t *metrics;
 
@@ -841,6 +856,31 @@ void smu_v13_0_12_get_gpu_metrics(struct smu_context *smu, void **table,
 	/* Reports max temperature of all voltage rails */
 	gpu_metrics->temperature_vrsoc =
 		SMUQ10_ROUND(metrics->MaxVrTemperature);
+
+	if (smu_v13_0_6_cap_supported(smu,
+				      SMU_CAP(TEMP_AID_XCD_HBM))) {
+		if (adev->umc.active_mask) {
+			u64 mask = adev->umc.active_mask;
+			int out_idx = 0;
+			int stack_idx;
+
+			if (unlikely(hweight64(mask) / 2 > SMU_13_0_6_MAX_HBM_STACKS)) {
+				dev_warn(adev->dev, "Invalid umc mask %lld\n", mask);
+			} else  {
+				for_each_hbm_stack(stack_idx, mask) {
+					if (!hbm_stack_mask_valid(mask))
+						continue;
+					gpu_metrics->temperature_hbm[out_idx++] =
+						metrics->HbmTemperature[stack_idx];
+				}
+			}
+		}
+		idx = 0;
+		for_each_inst(i, adev->aid_mask) {
+			gpu_metrics->temperature_aid[idx] = metrics->AidTemperature[i];
+			idx++;
+		}
+	}
 
 	gpu_metrics->average_gfx_activity =
 		SMUQ10_ROUND(metrics->SocketGfxBusy);
@@ -957,6 +997,9 @@ void smu_v13_0_12_get_gpu_metrics(struct smu_context *smu, void **table,
 				[i] = SMUQ10_ROUND(
 				metrics->GfxclkBelowHostLimitTotalAcc[inst]);
 		}
+		if (smu_v13_0_6_cap_supported(smu,
+					      SMU_CAP(TEMP_AID_XCD_HBM)))
+			gpu_metrics->temperature_xcd[i] = metrics->XcdTemperature[inst];
 	}
 
 	gpu_metrics->xgmi_link_width = metrics->XgmiWidth;

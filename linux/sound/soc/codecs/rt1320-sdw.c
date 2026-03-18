@@ -203,6 +203,7 @@ static const struct reg_sequence rt1320_vc_blind_write[] = {
 	{ 0x3fc2bfc2, 0x00 },
 	{ 0x3fc2bfc1, 0x00 },
 	{ 0x3fc2bfc0, 0x07 },
+	{ 0x1000cc46, 0x00 },
 	{ 0x0000d486, 0x43 },
 	{ SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, RT1320_SDCA_CTL_REQ_POWER_STATE, 0), 0x00 },
 	{ 0x1000db00, 0x07 },
@@ -354,6 +355,7 @@ static const struct reg_sequence rt1321_blind_write[] = {
 	{ 0x0000d73d, 0xd7 },
 	{ 0x0000d73e, 0x00 },
 	{ 0x0000d73f, 0x10 },
+	{ 0x1000cd56, 0x00 },
 	{ 0x3fc2dfc3, 0x00 },
 	{ 0x3fc2dfc2, 0x00 },
 	{ 0x3fc2dfc1, 0x00 },
@@ -1429,8 +1431,7 @@ static int rt1320_rae_load(struct rt1320_sdw_priv *rt1320)
 	unsigned int addr, size;
 	unsigned int func, value;
 	const char *dmi_vendor, *dmi_product, *dmi_sku;
-	char vendor[128], product[128], sku[128];
-	char *ptr_vendor, *ptr_product, *ptr_sku;
+	int len_vendor, len_product, len_sku;
 	char rae_filename[512];
 	char tag[5];
 	int ret = 0;
@@ -1441,21 +1442,13 @@ static int rt1320_rae_load(struct rt1320_sdw_priv *rt1320)
 	dmi_sku = dmi_get_system_info(DMI_PRODUCT_SKU);
 
 	if (dmi_vendor && dmi_product && dmi_sku) {
-		strscpy(vendor, dmi_vendor);
-		strscpy(product, dmi_product);
-		strscpy(sku, dmi_sku);
-		ptr_vendor = &vendor[0];
-		ptr_product = &product[0];
-		ptr_sku = &sku[0];
-		ptr_vendor = strsep(&ptr_vendor, " ");
-		ptr_product = strsep(&ptr_product, " ");
-		ptr_sku = strsep(&ptr_sku, " ");
-
-		dev_dbg(dev, "%s: DMI vendor=%s, product=%s, sku=%s\n", __func__,
-			vendor, product, sku);
+		len_vendor = strchrnul(dmi_vendor, ' ') - dmi_vendor;
+		len_product = strchrnul(dmi_product, ' ') - dmi_product;
+		len_sku = strchrnul(dmi_sku, ' ') - dmi_sku;
 
 		snprintf(rae_filename, sizeof(rae_filename),
-			 "realtek/rt1320/rt1320_RAE_%s_%s_%s.dat", vendor, product, sku);
+			 "realtek/rt1320/rt1320_RAE_%.*s_%.*s_%.*s.dat",
+			 len_vendor, dmi_vendor, len_product, dmi_product, len_sku, dmi_sku);
 		dev_dbg(dev, "%s: try to load RAE file %s\n", __func__, rae_filename);
 	} else {
 		dev_warn(dev, "%s: Can't find proper RAE file name\n", __func__);
@@ -1595,8 +1588,7 @@ struct rt1320_dspfwheader {
 	static const char hdr_sig[] = "AFX";
 	unsigned int hdr_size = 0;
 	const char *dmi_vendor, *dmi_product, *dmi_sku;
-	char vendor[128], product[128], sku[128];
-	char *ptr_vendor, *ptr_product, *ptr_sku;
+	int len_vendor, len_product, len_sku;
 	char filename[512];
 
 	switch (rt1320->dev_id) {
@@ -1616,21 +1608,14 @@ struct rt1320_dspfwheader {
 	dmi_sku = dmi_get_system_info(DMI_PRODUCT_SKU);
 
 	if (dmi_vendor && dmi_product && dmi_sku) {
-		strscpy(vendor, dmi_vendor);
-		strscpy(product, dmi_product);
-		strscpy(sku, dmi_sku);
-		ptr_vendor = &vendor[0];
-		ptr_product = &product[0];
-		ptr_sku = &sku[0];
-		ptr_vendor = strsep(&ptr_vendor, " ");
-		ptr_product = strsep(&ptr_product, " ");
-		ptr_sku = strsep(&ptr_sku, " ");
-
-		dev_dbg(dev, "%s: DMI vendor=%s, product=%s, sku=%s\n", __func__,
-			vendor, product, sku);
+		len_vendor = strchrnul(dmi_vendor, ' ') - dmi_vendor;
+		len_product = strchrnul(dmi_product, ' ') - dmi_product;
+		len_sku = strchrnul(dmi_sku, ' ') - dmi_sku;
 
 		snprintf(filename, sizeof(filename),
-			 "realtek/rt1320/rt1320_%s_%s_%s.dat", vendor, product, sku);
+			 "realtek/rt1320/rt1320_%.*s_%.*s_%.*s.dat",
+			 len_vendor, dmi_vendor, len_product, dmi_product, len_sku, dmi_sku);
+
 		dev_dbg(dev, "%s: try to load FW file %s\n", __func__, filename);
 	} else if (rt1320->dspfw_name) {
 		snprintf(filename, sizeof(filename), "rt1320_%s.dat",
@@ -2644,7 +2629,7 @@ static int rt1320_sdw_hw_params(struct snd_pcm_substream *substream,
 	struct sdw_port_config port_config;
 	struct sdw_port_config dmic_port_config[2];
 	struct sdw_stream_runtime *sdw_stream;
-	int retval;
+	int retval, num_channels;
 	unsigned int sampling_rate;
 
 	dev_dbg(dai->dev, "%s %s", __func__, dai->name);
@@ -2676,7 +2661,8 @@ static int rt1320_sdw_hw_params(struct snd_pcm_substream *substream,
 				dmic_port_config[1].num = 10;
 				break;
 			case RT1321_DEV_ID:
-				dmic_port_config[0].ch_mask = BIT(0) | BIT(1);
+				num_channels = params_channels(params);
+				dmic_port_config[0].ch_mask = GENMASK(num_channels - 1, 0);
 				dmic_port_config[0].num = 8;
 				break;
 			default:

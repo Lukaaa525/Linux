@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use core::mem::size_of_val;
-
 use kernel::{
     device,
     dma::{
@@ -34,11 +32,11 @@ use crate::{
 /// that scheme before nova-core becomes stable, which means this module will eventually be
 /// removed.
 mod elf {
-    use core::mem::size_of;
-
-    use kernel::bindings;
-    use kernel::str::CStr;
-    use kernel::transmute::FromBytes;
+    use kernel::{
+        bindings,
+        prelude::*,
+        transmute::FromBytes, //
+    };
 
     /// Newtype to provide a [`FromBytes`] implementation.
     #[repr(transparent)]
@@ -214,9 +212,16 @@ impl GspFirmware {
                 size,
                 signatures: {
                     let sigs_section = match chipset.arch() {
+                        Architecture::Turing
+                            if matches!(chipset, Chipset::TU116 | Chipset::TU117) =>
+                        {
+                            ".fwsignature_tu11x"
+                        }
+                        Architecture::Turing => ".fwsignature_tu10x",
+                        // GA100 uses the same firmware as Turing
+                        Architecture::Ampere if chipset == Chipset::GA100 => ".fwsignature_tu10x",
                         Architecture::Ampere => ".fwsignature_ga10x",
                         Architecture::Ada => ".fwsignature_ad10x",
-                        _ => return Err(ENOTSUPP),
                     };
 
                     elf::elf64_section(firmware.data(), sigs_section)

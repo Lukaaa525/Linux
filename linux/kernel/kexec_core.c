@@ -47,7 +47,6 @@
 #include <asm/page.h>
 #include <asm/sections.h>
 
-#include <crypto/hash.h>
 #include "kexec_internal.h"
 
 atomic_t __kexec_lock = ATOMIC_INIT(0);
@@ -55,7 +54,7 @@ atomic_t __kexec_lock = ATOMIC_INIT(0);
 /* Flag to indicate we are going to kexec a new kernel */
 bool kexec_in_progress = false;
 
-bool kexec_dbg_print;
+bool kexec_file_dbg_print;
 
 /*
  * When kexec transitions to the new kernel there is a one-to-one
@@ -231,7 +230,7 @@ struct kimage *do_kimage_alloc_init(void)
 	struct kimage *image;
 
 	/* Allocate a controlling structure */
-	image = kzalloc(sizeof(*image), GFP_KERNEL);
+	image = kzalloc_obj(*image);
 	if (!image)
 		return NULL;
 
@@ -577,8 +576,6 @@ void kimage_free(struct kimage *image)
 {
 	kimage_entry_t *ptr, entry;
 	kimage_entry_t ind = 0;
-
-	kexec_dbg_print = false;
 
 	if (!image)
 		return;
@@ -977,7 +974,7 @@ void *kimage_map_segment(struct kimage *image, int idx)
 	 * Collect the source pages and map them in a contiguous VA range.
 	 */
 	npages = PFN_UP(eaddr) - PFN_DOWN(addr);
-	src_pages = kmalloc_array(npages, sizeof(*src_pages), GFP_KERNEL);
+	src_pages = kmalloc_objs(*src_pages, npages);
 	if (!src_pages) {
 		pr_err("Could not allocate ima pages array.\n");
 		return NULL;

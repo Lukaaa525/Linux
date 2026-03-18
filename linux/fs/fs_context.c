@@ -264,7 +264,7 @@ static struct fs_context *alloc_fs_context(struct file_system_type *fs_type,
 	struct fs_context *fc;
 	int ret = -ENOMEM;
 
-	fc = kzalloc(sizeof(struct fs_context), GFP_KERNEL_ACCOUNT);
+	fc = kzalloc_obj(struct fs_context, GFP_KERNEL_ACCOUNT);
 	if (!fc)
 		return ERR_PTR(-ENOMEM);
 
@@ -318,7 +318,6 @@ struct fs_context *fs_context_for_reconfigure(struct dentry *dentry,
 	return alloc_fs_context(dentry->d_sb->s_type, dentry, sb_flags,
 				sb_flags_mask, FS_CONTEXT_FOR_RECONFIGURE);
 }
-EXPORT_SYMBOL(fs_context_for_reconfigure);
 
 /**
  * fs_context_for_submount: allocate a new fs_context for a submount

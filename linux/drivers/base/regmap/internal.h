@@ -117,6 +117,9 @@ struct regmap {
 		    void *val_buf, size_t val_size);
 	int (*write)(void *context, const void *data, size_t count);
 
+	int (*reg_default_cb)(struct device *dev, unsigned int reg,
+			      unsigned int *val);
+
 	unsigned long read_flag_mask;
 	unsigned long write_flag_mask;
 
@@ -159,7 +162,7 @@ struct regmap {
 	bool no_sync_defaults;
 
 	struct reg_sequence *patch;
-	int patch_regs;
+	unsigned int patch_regs;
 
 	/* if set, the regmap core can sleep */
 	bool can_sleep;

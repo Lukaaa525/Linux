@@ -1840,6 +1840,8 @@ static int iwl_mld_move_sta_state_down(struct iwl_mld *mld,
 			wiphy_work_cancel(mld->wiphy, &mld_vif->emlsr.unblock_tpt_wk);
 			wiphy_delayed_work_cancel(mld->wiphy,
 						  &mld_vif->emlsr.check_tpt_wk);
+			wiphy_delayed_work_cancel(mld->wiphy,
+						  &mld_vif->mlo_scan_start_wk);
 
 			iwl_mld_reset_cca_40mhz_workaround(mld, vif);
 			iwl_mld_smps_workaround(mld, vif, true);
@@ -2090,8 +2092,7 @@ static int iwl_mld_alloc_ptk_pn(struct iwl_mld *mld,
 		return -EINVAL;
 
 	WARN_ON(rcu_access_pointer(mld_sta->ptk_pn[keyidx]));
-	*ptk_pn = kzalloc(struct_size(*ptk_pn, q, num_rx_queues),
-			  GFP_KERNEL);
+	*ptk_pn = kzalloc_flex(**ptk_pn, q, num_rx_queues);
 	if (!*ptk_pn)
 		return -ENOMEM;
 

@@ -232,17 +232,19 @@ static void zynqmp_r5_mb_rx_cb(struct mbox_client *cl, void *msg)
 
 	ipi = container_of(cl, struct mbox_info, mbox_cl);
 
-	/* copy data from ipi buffer to r5_core */
+	/* copy data from ipi buffer to r5_core if IPI is buffered. */
 	ipi_msg = (struct zynqmp_ipi_message *)msg;
-	buf_msg = (struct zynqmp_ipi_message *)ipi->rx_mc_buf;
-	len = ipi_msg->len;
-	if (len > IPI_BUF_LEN_MAX) {
-		dev_warn(cl->dev, "msg size exceeded than %d\n",
-			 IPI_BUF_LEN_MAX);
-		len = IPI_BUF_LEN_MAX;
+	if (ipi_msg) {
+		buf_msg = (struct zynqmp_ipi_message *)ipi->rx_mc_buf;
+		len = ipi_msg->len;
+		if (len > IPI_BUF_LEN_MAX) {
+			dev_warn(cl->dev, "msg size exceeded than %d\n",
+				 IPI_BUF_LEN_MAX);
+			len = IPI_BUF_LEN_MAX;
+		}
+		buf_msg->len = len;
+		memcpy(buf_msg->data, ipi_msg->data, len);
 	}
-	buf_msg->len = len;
-	memcpy(buf_msg->data, ipi_msg->data, len);
 
 	/* received and processed interrupt ack */
 	if (mbox_send_message(ipi->rx_chan, NULL) < 0)
@@ -265,7 +267,11 @@ static struct mbox_info *zynqmp_r5_setup_mbox(struct device *cdev)
 	struct mbox_client *mbox_cl;
 	struct mbox_info *ipi;
 
-	ipi = kzalloc(sizeof(*ipi), GFP_KERNEL);
+	if (!of_property_present(dev_of_node(cdev), "mboxes") ||
+	    !of_property_present(dev_of_node(cdev), "mbox-names"))
+		return NULL;
+
+	ipi = kzalloc_obj(*ipi);
 	if (!ipi)
 		return NULL;
 
@@ -1005,7 +1011,7 @@ static int zynqmp_r5_get_sram_banks(struct zynqmp_r5_core *r5_core)
 		}
 
 		/* Get SRAM device address */
-		ret = of_property_read_reg(sram_np, i, &abs_addr, &size);
+		ret = of_property_read_reg(sram_np, 0, &abs_addr, &size);
 		if (ret) {
 			dev_err(dev, "failed to get reg property\n");
 			goto fail_sram_get;
@@ -1337,12 +1343,11 @@ static int zynqmp_r5_cluster_init(struct zynqmp_r5_cluster *cluster)
 		core_count = 1;
 	}
 
-	child_devs = kcalloc(core_count, sizeof(struct device *), GFP_KERNEL);
+	child_devs = kzalloc_objs(struct device *, core_count);
 	if (!child_devs)
 		return -ENOMEM;
 
-	r5_cores = kcalloc(core_count,
-			   sizeof(struct zynqmp_r5_core *), GFP_KERNEL);
+	r5_cores = kzalloc_objs(struct zynqmp_r5_core *, core_count);
 	if (!r5_cores) {
 		kfree(child_devs);
 		return -ENOMEM;
@@ -1485,6 +1490,8 @@ static void zynqmp_r5_remoteproc_shutdown(struct platform_device *pdev)
 			dev_err(cluster->dev, "failed to %s rproc %d\n",
 				rproc_state_str, rproc->index);
 		}
+
+		zynqmp_r5_free_mbox(r5_core->ipi);
 	}
 }
 
@@ -1503,7 +1510,7 @@ static int zynqmp_r5_remoteproc_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	int ret;
 
-	cluster = kzalloc(sizeof(*cluster), GFP_KERNEL);
+	cluster = kzalloc_obj(*cluster);
 	if (!cluster)
 		return -ENOMEM;
 

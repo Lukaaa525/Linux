@@ -3,7 +3,6 @@
 
 . "$(cd "$(dirname "$0")" && pwd)"/test_common.sh
 
-TID="generic_16"
 ERR_CODE=0
 
 _prep_test "null" "stop --safe command"
@@ -25,7 +24,7 @@ if ! ${UBLK_PROG} stop -n "${dev_id}" --safe; then
 fi
 
 # Clean up device
-${UBLK_PROG} del -n "${dev_id}" > /dev/null 2>&1
+_ublk_del_dev "${dev_id}" > /dev/null 2>&1
 udevadm settle
 
 # Test 2: stop --safe on device with active opener should fail
@@ -50,7 +49,7 @@ kill $dd_pid 2>/dev/null
 wait $dd_pid 2>/dev/null
 
 # Now device should be idle, regular delete should work
-${UBLK_PROG} del -n "${dev_id}"
+_ublk_del_dev "${dev_id}"
 udevadm settle
 
 _cleanup_test "null"

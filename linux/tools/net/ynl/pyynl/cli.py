@@ -44,6 +44,10 @@ def color(text, modifiers):
         return f"{modifiers}{text}{Colors.RESET}"
     return text
 
+def term_width():
+    """ Get terminal width in columns (80 if stdout is not a terminal) """
+    return shutil.get_terminal_size().columns
+
 def schema_dir():
     """
     Return the effective schema directory, preferring in-tree before
@@ -74,7 +78,7 @@ class YnlEncoder(json.JSONEncoder):
         if isinstance(o, bytes):
             return bytes.hex(o)
         if isinstance(o, set):
-            return list(o)
+            return sorted(o)
         return json.JSONEncoder.default(self, o)
 
 
@@ -103,8 +107,7 @@ def print_attr_list(ynl, attr_names, attr_set, indent=2):
 
             if attr.yaml.get('doc'):
                 doc_prefix = prefix + ' ' * 4
-                term_width = shutil.get_terminal_size().columns
-                doc_text = textwrap.fill(attr.yaml['doc'], width=term_width,
+                doc_text = textwrap.fill(attr.yaml['doc'], width=term_width(),
                                          initial_indent=doc_prefix,
                                          subsequent_indent=doc_prefix)
                 attr_info += f"\n{doc_text}"
@@ -253,6 +256,8 @@ def main():
     schema_group.add_argument('--no-schema', action='store_true')
 
     dbg_group = parser.add_argument_group('Debug options')
+    io_group.add_argument('--policy', action='store_true',
+                          help='Query kernel policy for the operation instead of executing it')
     dbg_group.add_argument('--dbg-small-recv', default=0, const=4000,
                            action='store', nargs='?', type=int, metavar='INT',
                            help="Length of buffers used for recv()")
@@ -264,7 +269,7 @@ def main():
         if args.output_json:
             print(json.dumps(msg, cls=YnlEncoder))
         else:
-            pprint.PrettyPrinter().pprint(msg)
+            pprint.pprint(msg, width=term_width(), compact=True)
 
     if args.list_families:
         for filename in sorted(os.listdir(spec_dir())):
@@ -304,6 +309,16 @@ def main():
                     recv_size=args.dbg_small_recv)
     if args.dbg_small_recv:
         ynl.set_recv_dbg(True)
+
+    if args.policy:
+        if args.do:
+            pol = ynl.get_policy(args.do, 'do')
+            output(pol.attrs if pol else None)
+            args.do = None
+        if args.dump:
+            pol = ynl.get_policy(args.dump, 'dump')
+            output(pol.attrs if pol else None)
+            args.dump = None
 
     if args.ntf:
         ynl.ntf_subscribe(args.ntf)

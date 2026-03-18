@@ -42,7 +42,6 @@ static int kimage_alloc_init(struct kimage **rimage, unsigned long entry,
 	if (!image)
 		return -ENOMEM;
 
-	kexec_dbg_print = !!(flags & KEXEC_DEBUG);
 	image->start = entry;
 	image->nr_segments = nr_segments;
 	memcpy(image->segment, segments, nr_segments * sizeof(*segments));
@@ -96,8 +95,6 @@ static int do_kexec_load(unsigned long entry, unsigned long nr_segments,
 	unsigned long i;
 	int ret;
 
-	image = NULL;
-
 	/*
 	 * Because we write directly to the reserved memory region when loading
 	 * crash kernels we need a serialization here to prevent multiple crash
@@ -132,7 +129,7 @@ static int do_kexec_load(unsigned long entry, unsigned long nr_segments,
 
 	ret = kimage_alloc_init(&image, entry, nr_segments, segments, flags);
 	if (ret)
-		goto out;
+		goto out_unlock;
 
 	if (flags & KEXEC_PRESERVE_CONTEXT)
 		image->preserve_context = 1;
@@ -165,9 +162,6 @@ static int do_kexec_load(unsigned long entry, unsigned long nr_segments,
 	ret = machine_kexec_post_load(image);
 	if (ret)
 		goto out;
-
-	kexec_dprintk("kexec_load: type:%u, start:0x%lx head:0x%lx flags:0x%lx\n",
-		      image->type, image->start, image->head, flags);
 
 	/* Install the new kernel and uninstall the old */
 	image = xchg(dest_image, image);
@@ -290,8 +284,7 @@ COMPAT_SYSCALL_DEFINE4(kexec_load, compat_ulong_t, entry,
 	if ((flags & KEXEC_ARCH_MASK) == KEXEC_ARCH_DEFAULT)
 		return -EINVAL;
 
-	ksegments = kmalloc_array(nr_segments, sizeof(ksegments[0]),
-			GFP_KERNEL);
+	ksegments = kmalloc_objs(ksegments[0], nr_segments);
 	if (!ksegments)
 		return -ENOMEM;
 

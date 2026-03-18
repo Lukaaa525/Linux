@@ -115,7 +115,7 @@ struct pinctrl_map;
  * @PIN_CONFIG_SKEW_DELAY_INPUT_PS: if the pin has independent values for the
  *	programmable skew rate (on inputs) and latch delay (on outputs), then
  *	this parameter specifies the clock skew only. The argument is in ps.
- * @PIN_CONFIG_SKEW_DELAY_OUPUT_PS: if the pin has independent values for the
+ * @PIN_CONFIG_SKEW_DELAY_OUTPUT_PS: if the pin has independent values for the
  *	programmable skew rate (on inputs) and latch delay (on outputs), then
  *	this parameter specifies the latch delay only. The argument is in ps.
  * @PIN_CONFIG_SLEEP_HARDWARE_STATE: indicate this is sleep related state.
@@ -250,9 +250,4 @@ static inline int pinconf_generic_dt_node_to_map_all(struct pinctrl_dev *pctldev
 	return pinconf_generic_dt_node_to_map(pctldev, np_config, map, num_maps,
 			PIN_MAP_TYPE_INVALID);
 }
-
-int pinconf_generic_dt_node_to_map_pinmux(struct pinctrl_dev *pctldev,
-					  struct device_node *np,
-					  struct pinctrl_map **map,
-					  unsigned int *num_maps);
 #endif /* __LINUX_PINCTRL_PINCONF_GENERIC_H */

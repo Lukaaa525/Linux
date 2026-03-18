@@ -91,7 +91,7 @@
 
 /* Macro for allocating structures */
 #define kfd_alloc_struct(ptr_to_struct)	\
-	((typeof(ptr_to_struct)) kzalloc(sizeof(*ptr_to_struct), GFP_KERNEL))
+	((typeof(ptr_to_struct)) kzalloc_obj(*ptr_to_struct))
 
 #define KFD_MAX_NUM_OF_PROCESSES 512
 #define KFD_MAX_NUM_OF_QUEUES_PER_PROCESS 1024
@@ -1525,7 +1525,7 @@ int kfd_wait_on_events(struct kfd_process *p,
 		       bool all, uint32_t *user_timeout_ms,
 		       uint32_t *wait_result);
 void kfd_signal_event_interrupt(u32 pasid, uint32_t partial_id,
-				uint32_t valid_id_bits);
+				uint32_t valid_id_bits, bool signal_mailbox_updated);
 void kfd_signal_hw_exception_event(u32 pasid);
 int kfd_set_event(struct kfd_process *p, uint32_t event_id);
 int kfd_reset_event(struct kfd_process *p, uint32_t event_id);

@@ -36,6 +36,9 @@
 u32 kvm_cpu_caps[NR_KVM_CPU_CAPS] __read_mostly;
 EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_cpu_caps);
 
+bool kvm_is_configuring_cpu_caps __read_mostly;
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_is_configuring_cpu_caps);
+
 struct cpuid_xstate_sizes {
 	u32 eax;
 	u32 ebx;
@@ -599,7 +602,7 @@ int kvm_vcpu_ioctl_set_cpuid(struct kvm_vcpu *vcpu,
 		if (IS_ERR(e))
 			return PTR_ERR(e);
 
-		e2 = kvmalloc_array(cpuid->nent, sizeof(*e2), GFP_KERNEL_ACCOUNT);
+		e2 = kvmalloc_objs(*e2, cpuid->nent, GFP_KERNEL_ACCOUNT);
 		if (!e2) {
 			r = -ENOMEM;
 			goto out_free_cpuid;
@@ -773,7 +776,10 @@ do {									\
 #define SYNTHESIZED_F(name)					\
 ({								\
 	kvm_cpu_cap_synthesized |= feature_bit(name);		\
-	F(name);						\
+								\
+	BUILD_BUG_ON(X86_FEATURE_##name >= MAX_CPU_FEATURES);	\
+	if (boot_cpu_has(X86_FEATURE_##name))			\
+		F(name);					\
 })
 
 /*
@@ -826,9 +832,12 @@ do {									\
 /* DS is defined by ptrace-abi.h on 32-bit builds. */
 #undef DS
 
-void kvm_set_cpu_caps(void)
+void kvm_initialize_cpu_caps(void)
 {
 	memset(kvm_cpu_caps, 0, sizeof(kvm_cpu_caps));
+
+	WARN_ON_ONCE(kvm_is_configuring_cpu_caps);
+	kvm_is_configuring_cpu_caps = true;
 
 	BUILD_BUG_ON(sizeof(kvm_cpu_caps) - (NKVMCAPINTS * sizeof(*kvm_cpu_caps)) >
 		     sizeof(boot_cpu_data.x86_capability));
@@ -1028,6 +1037,7 @@ void kvm_set_cpu_caps(void)
 		F(AMX_FP16),
 		F(AVX_IFMA),
 		F(LAM),
+		F(MOVRS),
 	);
 
 	kvm_cpu_cap_init(CPUID_7_1_ECX,
@@ -1066,10 +1076,25 @@ void kvm_set_cpu_caps(void)
 		SCATTERED_F(SGX_EDECCSSA),
 	);
 
+	kvm_cpu_cap_init(CPUID_1E_1_EAX,
+		F(AMX_INT8_ALIAS),
+		F(AMX_BF16_ALIAS),
+		F(AMX_COMPLEX_ALIAS),
+		F(AMX_FP16_ALIAS),
+		F(AMX_FP8),
+		F(AMX_TF32),
+		F(AMX_AVX512),
+		F(AMX_MOVRS),
+	);
+
 	kvm_cpu_cap_init(CPUID_24_0_EBX,
 		F(AVX10_128),
 		F(AVX10_256),
 		F(AVX10_512),
+	);
+
+	kvm_cpu_cap_init(CPUID_24_1_ECX,
+		F(AVX10_VNNI_INT),
 	);
 
 	kvm_cpu_cap_init(CPUID_8000_0001_ECX,
@@ -1221,11 +1246,12 @@ void kvm_set_cpu_caps(void)
 		F(NULL_SEL_CLR_BASE),
 		/* UpperAddressIgnore */
 		F(AUTOIBRS),
-		F(PREFETCHI),
 		EMULATED_F(NO_SMM_CTL_MSR),
 		/* PrefetchCtlMsr */
 		/* GpOnUserCpuid */
 		/* EPSF */
+		F(PREFETCHI),
+		F(AVX512_BMM),
 		F(ERAPS),
 		SYNTHESIZED_F(SBPB),
 		SYNTHESIZED_F(IBPB_BRTYPE),
@@ -1273,7 +1299,7 @@ void kvm_set_cpu_caps(void)
 		kvm_cpu_cap_clear(X86_FEATURE_RDPID);
 	}
 }
-EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_set_cpu_caps);
+EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvm_initialize_cpu_caps);
 
 #undef F
 #undef SCATTERED_F
@@ -1627,6 +1653,20 @@ static inline int __do_cpuid_func(struct kvm_cpuid_array *array, u32 function)
 			entry->eax = entry->ebx = entry->ecx = entry->edx = 0;
 			break;
 		}
+
+		max_idx = entry->eax = min(entry->eax, 1u);
+
+		/* KVM only supports up to 0x1e.0x1, capped above via min(). */
+		if (max_idx >= 1) {
+			entry = do_host_cpuid(array, function, 1);
+			if (!entry)
+				goto out;
+
+			cpuid_entry_override(entry, CPUID_1E_1_EAX);
+			entry->ebx = 0;
+			entry->ecx = 0;
+			entry->edx = 0;
+		}
 		break;
 	case 0x24: {
 		u8 avx10_version;
@@ -1636,18 +1676,30 @@ static inline int __do_cpuid_func(struct kvm_cpuid_array *array, u32 function)
 			break;
 		}
 
+		max_idx = entry->eax = min(entry->eax, 1u);
 		/*
 		 * The AVX10 version is encoded in EBX[7:0].  Note, the version
 		 * is guaranteed to be >=1 if AVX10 is supported.  Note #2, the
 		 * version needs to be captured before overriding EBX features!
 		 */
-		avx10_version = min_t(u8, entry->ebx & 0xff, 1);
+		avx10_version = min_t(u8, entry->ebx & 0xff, 2);
 		cpuid_entry_override(entry, CPUID_24_0_EBX);
 		entry->ebx |= avx10_version;
 
-		entry->eax = 0;
 		entry->ecx = 0;
 		entry->edx = 0;
+
+		/* KVM only supports up to 0x24.0x1, capped above via min(). */
+		if (max_idx >= 1) {
+			entry = do_host_cpuid(array, function, 1);
+			if (!entry)
+				goto out;
+
+			cpuid_entry_override(entry, CPUID_24_1_ECX);
+			entry->eax = 0;
+			entry->ebx = 0;
+			entry->edx = 0;
+		}
 		break;
 	}
 	case KVM_CPUID_SIGNATURE: {
@@ -1943,7 +1995,7 @@ int kvm_dev_ioctl_get_cpuid(struct kvm_cpuid2 *cpuid,
 	if (sanity_check_entries(entries, cpuid->nent, type))
 		return -EINVAL;
 
-	array.entries = kvcalloc(cpuid->nent, sizeof(struct kvm_cpuid_entry2), GFP_KERNEL);
+	array.entries = kvzalloc_objs(struct kvm_cpuid_entry2, cpuid->nent);
 	if (!array.entries)
 		return -ENOMEM;
 
@@ -2109,7 +2161,8 @@ int kvm_emulate_cpuid(struct kvm_vcpu *vcpu)
 {
 	u32 eax, ebx, ecx, edx;
 
-	if (cpuid_fault_enabled(vcpu) && !kvm_require_cpl(vcpu, 0))
+	if (!is_smm(vcpu) && cpuid_fault_enabled(vcpu) &&
+	    !kvm_require_cpl(vcpu, 0))
 		return 1;
 
 	eax = kvm_rax_read(vcpu);

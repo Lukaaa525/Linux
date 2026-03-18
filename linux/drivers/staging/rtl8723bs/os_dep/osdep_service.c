@@ -14,31 +14,6 @@ inline int RTW_STATUS_CODE(int error_code)
 	return _FAIL;
 }
 
-void *_rtw_malloc(u32 sz)
-{
-	return kmalloc(sz, in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
-}
-
-void *_rtw_zmalloc(u32 sz)
-{
-	void *pbuf = _rtw_malloc(sz);
-
-	if (pbuf)
-		memset(pbuf, 0, sz);
-
-	return pbuf;
-}
-
-inline struct sk_buff *_rtw_skb_alloc(u32 sz)
-{
-	return __dev_alloc_skb(sz, in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
-}
-
-inline struct sk_buff *_rtw_skb_copy(const struct sk_buff *skb)
-{
-	return skb_copy(skb, in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
-}
-
 inline int _rtw_netif_rx(struct net_device *ndev, struct sk_buff *skb)
 {
 	skb->dev = ndev;
@@ -129,11 +104,9 @@ void rtw_buf_update(u8 **buf, u32 *buf_len, u8 *src, u32 src_len)
 		goto keep_ori;
 
 	/* duplicate src */
-	dup = rtw_malloc(src_len);
-	if (dup) {
+	dup = kmemdup(src, src_len, GFP_ATOMIC);
+	if (dup)
 		dup_len = src_len;
-		memcpy(dup, src, dup_len);
-	}
 
 keep_ori:
 	ori = *buf;
@@ -220,13 +193,8 @@ struct rtw_cbuf *rtw_cbuf_alloc(u32 size)
 {
 	struct rtw_cbuf *cbuf;
 
-	cbuf = rtw_malloc(struct_size(cbuf, bufs, size));
-
-	if (cbuf) {
-		cbuf->write = 0;
-		cbuf->read = 0;
-		cbuf->size = size;
-	}
+	cbuf = kzalloc_flex(*cbuf, bufs, size);
+	cbuf->size = size;
 
 	return cbuf;
 }

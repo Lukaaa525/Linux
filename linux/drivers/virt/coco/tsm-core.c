@@ -4,14 +4,12 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/tsm.h>
-#include <linux/rwsem.h>
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/cleanup.h>
 #include <linux/pci-tsm.h>
 
 static struct class *tsm_class;
-static DECLARE_RWSEM(tsm_rwsem);
 static DEFINE_IDA(tsm_ida);
 
 static int match_id(struct device *dev, const void *data)
@@ -37,7 +35,7 @@ static struct tsm_dev *alloc_tsm_dev(struct device *parent)
 	int id;
 
 	struct tsm_dev *tsm_dev __free(kfree) =
-		kzalloc(sizeof(*tsm_dev), GFP_KERNEL);
+		kzalloc_obj(*tsm_dev);
 	if (!tsm_dev)
 		return ERR_PTR(-ENOMEM);
 

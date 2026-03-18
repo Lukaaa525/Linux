@@ -758,6 +758,32 @@ static ssize_t dev_nack_retry_count_store(struct device *dev,
 
 static DEVICE_ATTR_RW(dev_nack_retry_count);
 
+static ssize_t do_daa_store(struct device *dev,
+			    struct device_attribute *attr,
+			    const char *buf, size_t count)
+{
+	struct i3c_master_controller *master = dev_to_i3cmaster(dev);
+	bool val;
+	int ret;
+
+	if (kstrtobool(buf, &val))
+		return -EINVAL;
+
+	if (!val)
+		return -EINVAL;
+
+	if (!master->init_done)
+		return -EAGAIN;
+
+	ret = i3c_master_do_daa(master);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+static DEVICE_ATTR_WO(do_daa);
+
 static struct attribute *i3c_masterdev_attrs[] = {
 	&dev_attr_mode.attr,
 	&dev_attr_current_master.attr,
@@ -769,6 +795,7 @@ static struct attribute *i3c_masterdev_attrs[] = {
 	&dev_attr_dynamic_address.attr,
 	&dev_attr_hdrcap.attr,
 	&dev_attr_hotjoin.attr,
+	&dev_attr_do_daa.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(i3c_masterdev);
@@ -858,7 +885,7 @@ i3c_master_alloc_i2c_dev(struct i3c_master_controller *master,
 {
 	struct i2c_dev_desc *dev;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -983,7 +1010,7 @@ i3c_master_alloc_i3c_dev(struct i3c_master_controller *master,
 {
 	struct i3c_dev_desc *dev;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -1742,7 +1769,7 @@ i3c_master_register_new_i3c_devs(struct i3c_master_controller *master)
 		if (desc->dev || !desc->info.dyn_addr || desc == master->this)
 			continue;
 
-		desc->dev = kzalloc(sizeof(*desc->dev), GFP_KERNEL);
+		desc->dev = kzalloc_obj(*desc->dev);
 		if (!desc->dev)
 			continue;
 
@@ -1768,22 +1795,24 @@ i3c_master_register_new_i3c_devs(struct i3c_master_controller *master)
 }
 
 /**
- * i3c_master_do_daa() - do a DAA (Dynamic Address Assignment)
- * @master: master doing the DAA
+ * i3c_master_do_daa_ext() - Dynamic Address Assignment (extended version)
+ * @master: controller
+ * @rstdaa: whether to first perform Reset of Dynamic Addresses (RSTDAA)
  *
- * This function is instantiating an I3C device object and adding it to the
- * I3C device list. All device information are automatically retrieved using
- * standard CCC commands.
+ * Perform Dynamic Address Assignment with optional support for System
+ * Hibernation (@rstdaa is true).
  *
- * The I3C device object is returned in case the master wants to attach
- * private data to it using i3c_dev_set_master_data().
- *
- * This function must be called with the bus lock held in write mode.
+ * After System Hibernation, Dynamic Addresses can have been reassigned at boot
+ * time to different values. A simple strategy is followed to handle that.
+ * Perform a Reset of Dynamic Addresses (RSTDAA) followed by the normal DAA
+ * procedure which has provision for reassigning addresses that differ from the
+ * previously recorded addresses.
  *
  * Return: a 0 in case of success, an negative error code otherwise.
  */
-int i3c_master_do_daa(struct i3c_master_controller *master)
+int i3c_master_do_daa_ext(struct i3c_master_controller *master, bool rstdaa)
 {
+	int rstret = 0;
 	int ret;
 
 	ret = i3c_master_rpm_get(master);
@@ -1791,7 +1820,15 @@ int i3c_master_do_daa(struct i3c_master_controller *master)
 		return ret;
 
 	i3c_bus_maintenance_lock(&master->bus);
+
+	if (rstdaa) {
+		rstret = i3c_master_rstdaa_locked(master, I3C_BROADCAST_ADDR);
+		if (rstret == I3C_ERROR_M2)
+			rstret = 0;
+	}
+
 	ret = master->ops->do_daa(master);
+
 	i3c_bus_maintenance_unlock(&master->bus);
 
 	if (ret)
@@ -1802,7 +1839,24 @@ int i3c_master_do_daa(struct i3c_master_controller *master)
 	i3c_bus_normaluse_unlock(&master->bus);
 out:
 	i3c_master_rpm_put(master);
-	return ret;
+
+	return rstret ?: ret;
+}
+EXPORT_SYMBOL_GPL(i3c_master_do_daa_ext);
+
+/**
+ * i3c_master_do_daa() - do a DAA (Dynamic Address Assignment)
+ * @master: master doing the DAA
+ *
+ * This function instantiates I3C device objects and adds them to the
+ * I3C device list. All device information is automatically retrieved using
+ * standard CCC commands.
+ *
+ * Return: a 0 in case of success, an negative error code otherwise.
+ */
+int i3c_master_do_daa(struct i3c_master_controller *master)
+{
+	return i3c_master_do_daa_ext(master, false);
 }
 EXPORT_SYMBOL_GPL(i3c_master_do_daa);
 
@@ -1825,7 +1879,7 @@ struct i3c_dma *i3c_master_dma_map_single(struct device *dev, void *buf,
 	void *bounce __free(kfree) = NULL;
 	void *dma_buf = buf;
 
-	struct i3c_dma *dma_xfer __free(kfree) = kzalloc(sizeof(*dma_xfer), GFP_KERNEL);
+	struct i3c_dma *dma_xfer __free(kfree) = kzalloc_obj(*dma_xfer);
 	if (!dma_xfer)
 		return NULL;
 
@@ -2766,10 +2820,10 @@ struct i3c_generic_ibi_slot {
 struct i3c_generic_ibi_pool {
 	spinlock_t lock;
 	unsigned int num_slots;
-	struct i3c_generic_ibi_slot *slots;
 	void *payload_buf;
 	struct list_head free_slots;
 	struct list_head pending;
+	struct i3c_generic_ibi_slot slots[] __counted_by(num_slots);
 };
 
 /**
@@ -2797,7 +2851,6 @@ void i3c_generic_ibi_free_pool(struct i3c_generic_ibi_pool *pool)
 	WARN_ON(nslots != pool->num_slots);
 
 	kfree(pool->payload_buf);
-	kfree(pool->slots);
 	kfree(pool);
 }
 EXPORT_SYMBOL_GPL(i3c_generic_ibi_free_pool);
@@ -2820,19 +2873,15 @@ i3c_generic_ibi_alloc_pool(struct i3c_dev_desc *dev,
 	unsigned int i;
 	int ret;
 
-	pool = kzalloc(sizeof(*pool), GFP_KERNEL);
+	pool = kzalloc_flex(*pool, slots, req->num_slots);
 	if (!pool)
 		return ERR_PTR(-ENOMEM);
+
+	pool->num_slots = req->num_slots;
 
 	spin_lock_init(&pool->lock);
 	INIT_LIST_HEAD(&pool->free_slots);
 	INIT_LIST_HEAD(&pool->pending);
-
-	pool->slots = kcalloc(req->num_slots, sizeof(*slot), GFP_KERNEL);
-	if (!pool->slots) {
-		ret = -ENOMEM;
-		goto err_free_pool;
-	}
 
 	if (req->max_payload_len) {
 		pool->payload_buf = kcalloc(req->num_slots,
@@ -2852,7 +2901,6 @@ i3c_generic_ibi_alloc_pool(struct i3c_dev_desc *dev,
 					  (i * req->max_payload_len);
 
 		list_add_tail(&slot->node, &pool->free_slots);
-		pool->num_slots++;
 	}
 
 	return pool;
@@ -3191,7 +3239,7 @@ int i3c_dev_request_ibi_locked(struct i3c_dev_desc *dev,
 	if (dev->ibi)
 		return -EBUSY;
 
-	ibi = kzalloc(sizeof(*ibi), GFP_KERNEL);
+	ibi = kzalloc_obj(*ibi);
 	if (!ibi)
 		return -ENOMEM;
 

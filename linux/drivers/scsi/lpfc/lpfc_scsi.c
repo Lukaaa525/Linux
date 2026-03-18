@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2025 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2026 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2004-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -265,7 +265,7 @@ lpfc_new_scsi_buf_s3(struct lpfc_vport *vport, int num_to_alloc)
 			 (int)sizeof(struct fcp_rsp), bpl_size);
 
 	for (bcnt = 0; bcnt < num_to_alloc; bcnt++) {
-		psb = kzalloc(sizeof(struct lpfc_io_buf), GFP_KERNEL);
+		psb = kzalloc_obj(struct lpfc_io_buf);
 		if (!psb)
 			break;
 
@@ -4665,7 +4665,7 @@ static int lpfc_scsi_prep_cmnd_buf_s3(struct lpfc_vport *vport,
 	else
 		piocbq->iocb.ulpFCP2Rcvy = 0;
 
-	piocbq->iocb.ulpClass = (pnode->nlp_fcp_info & 0x0f);
+	piocbq->iocb.ulpClass = (pnode->nlp_fcp_info & NLP_FCP_CLASS_MASK);
 	piocbq->io_buf  = lpfc_cmd;
 	if (!piocbq->cmd_cmpl)
 		piocbq->cmd_cmpl = lpfc_scsi_cmd_iocb_cmpl;
@@ -4777,7 +4777,7 @@ static int lpfc_scsi_prep_cmnd_buf_s4(struct lpfc_vport *vport,
 		bf_set(wqe_erp, &wqe->generic.wqe_com, 1);
 
 	bf_set(wqe_class, &wqe->generic.wqe_com,
-	       (pnode->nlp_fcp_info & 0x0f));
+	       (pnode->nlp_fcp_info & NLP_FCP_CLASS_MASK));
 
 	 /* Word 8 */
 	wqe->generic.wqe_com.abort_tag = pwqeq->iotag;
@@ -4877,7 +4877,7 @@ lpfc_scsi_prep_task_mgmt_cmd_s3(struct lpfc_vport *vport,
 	piocb->ulpCommand = CMD_FCP_ICMND64_CR;
 	piocb->ulpContext = ndlp->nlp_rpi;
 	piocb->ulpFCP2Rcvy = (ndlp->nlp_fcp_info & NLP_FCP_2_DEVICE) ? 1 : 0;
-	piocb->ulpClass = (ndlp->nlp_fcp_info & 0x0f);
+	piocb->ulpClass = (ndlp->nlp_fcp_info & NLP_FCP_CLASS_MASK);
 	piocb->ulpPU = 0;
 	piocb->un.fcpi.fcpi_parm = 0;
 
@@ -4945,7 +4945,7 @@ lpfc_scsi_prep_task_mgmt_cmd_s4(struct lpfc_vport *vport,
 	bf_set(wqe_erp, &wqe->fcp_icmd.wqe_com,
 	       ((ndlp->nlp_fcp_info & NLP_FCP_2_DEVICE) ? 1 : 0));
 	bf_set(wqe_class, &wqe->fcp_icmd.wqe_com,
-	       (ndlp->nlp_fcp_info & 0x0f));
+	       (ndlp->nlp_fcp_info & NLP_FCP_CLASS_MASK));
 
 	/* ulpTimeout is only one byte */
 	if (lpfc_cmd->timeout > 0xff) {
@@ -5233,8 +5233,8 @@ static char *lpfc_is_command_vm_io(struct scsi_cmnd *cmd)
  *   0 - Success
  *   SCSI_MLQUEUE_HOST_BUSY - Block all devices served by this host temporarily.
  **/
-static int
-lpfc_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmnd)
+static enum scsi_qc_status lpfc_queuecommand(struct Scsi_Host *shost,
+					     struct scsi_cmnd *cmnd)
 {
 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
 	struct lpfc_hba   *phba = vport->phba;
@@ -6743,8 +6743,8 @@ lpfc_disable_oas_lun(struct lpfc_hba *phba, struct lpfc_name *vport_wwpn,
 	return false;
 }
 
-static int
-lpfc_no_command(struct Scsi_Host *shost, struct scsi_cmnd *cmnd)
+static enum scsi_qc_status lpfc_no_command(struct Scsi_Host *shost,
+					   struct scsi_cmnd *cmnd)
 {
 	return SCSI_MLQUEUE_HOST_BUSY;
 }

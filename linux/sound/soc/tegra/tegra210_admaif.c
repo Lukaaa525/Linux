@@ -241,6 +241,7 @@ static const struct regmap_config tegra210_admaif_regmap_config = {
 	.volatile_reg		= tegra_admaif_volatile_reg,
 	.reg_defaults		= tegra210_admaif_reg_defaults,
 	.num_reg_defaults	= TEGRA210_ADMAIF_CHANNEL_COUNT * 6 + 1,
+	.reg_default_cb		= regmap_default_zero_cb,
 	.cache_type		= REGCACHE_FLAT,
 };
 
@@ -254,6 +255,7 @@ static const struct regmap_config tegra186_admaif_regmap_config = {
 	.volatile_reg		= tegra_admaif_volatile_reg,
 	.reg_defaults		= tegra186_admaif_reg_defaults,
 	.num_reg_defaults	= TEGRA186_ADMAIF_CHANNEL_COUNT * 6 + 1,
+	.reg_default_cb		= regmap_default_zero_cb,
 	.cache_type		= REGCACHE_FLAT,
 };
 
@@ -267,6 +269,7 @@ static const struct regmap_config tegra264_admaif_regmap_config = {
 	.volatile_reg		= tegra_admaif_volatile_reg,
 	.reg_defaults		= tegra264_admaif_reg_defaults,
 	.num_reg_defaults	= TEGRA264_ADMAIF_CHANNEL_COUNT * 6 + 1,
+	.reg_default_cb		= regmap_default_zero_cb,
 	.cache_type		= REGCACHE_FLAT,
 };
 
@@ -836,7 +839,7 @@ static struct snd_kcontrol_new tegra264_admaif_controls[] = {
 static const struct snd_soc_component_driver tegra210_admaif_cmpnt = {
 	.controls		= tegra210_admaif_controls,
 	.num_controls		= ARRAY_SIZE(tegra210_admaif_controls),
-	.pcm_construct		= tegra_pcm_construct,
+	.pcm_new		= tegra_pcm_new,
 	.open			= tegra_pcm_open,
 	.close			= tegra_pcm_close,
 	.hw_params		= tegra_pcm_hw_params,
@@ -846,7 +849,7 @@ static const struct snd_soc_component_driver tegra210_admaif_cmpnt = {
 static const struct snd_soc_component_driver tegra186_admaif_cmpnt = {
 	.controls		= tegra186_admaif_controls,
 	.num_controls		= ARRAY_SIZE(tegra186_admaif_controls),
-	.pcm_construct		= tegra_pcm_construct,
+	.pcm_new		= tegra_pcm_new,
 	.open			= tegra_pcm_open,
 	.close			= tegra_pcm_close,
 	.hw_params		= tegra_pcm_hw_params,
@@ -856,7 +859,7 @@ static const struct snd_soc_component_driver tegra186_admaif_cmpnt = {
 static const struct snd_soc_component_driver tegra264_admaif_cmpnt = {
 	.controls		= tegra264_admaif_controls,
 	.num_controls		= ARRAY_SIZE(tegra264_admaif_controls),
-	.pcm_construct		= tegra_pcm_construct,
+	.pcm_new		= tegra_pcm_new,
 	.open			= tegra_pcm_open,
 	.close			= tegra_pcm_close,
 	.hw_params		= tegra_pcm_hw_params,

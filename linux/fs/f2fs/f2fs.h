@@ -28,8 +28,6 @@
 #include <linux/fscrypt.h>
 #include <linux/fsverity.h>
 
-struct pagevec;
-
 #ifdef CONFIG_F2FS_CHECK_FS
 #define f2fs_bug_on(sbi, condition)	BUG_ON(condition)
 #else
@@ -185,6 +183,7 @@ enum f2fs_lock_name {
 	LOCK_NAME_GC_LOCK,
 	LOCK_NAME_CP_GLOBAL,
 	LOCK_NAME_IO_RWSEM,
+	LOCK_NAME_MAX,
 };
 
 enum f2fs_timeout_type {
@@ -1006,9 +1005,6 @@ struct f2fs_inode_info {
 #ifdef CONFIG_FS_ENCRYPTION
 	struct fscrypt_inode_info *i_crypt_info; /* filesystem encryption info */
 #endif
-#ifdef CONFIG_FS_VERITY
-	struct fsverity_info *i_verity_info; /* filesystem verity info */
-#endif
 };
 
 static inline void get_read_extent_info(struct extent_info *ext,
@@ -1447,7 +1443,10 @@ struct f2fs_time_stat {
 
 struct f2fs_lock_context {
 	struct f2fs_time_stat ts;
+	int orig_nice;
+	int new_nice;
 	bool lock_trace;
+	bool need_restore;
 };
 
 struct f2fs_gc_control {
@@ -1588,6 +1587,9 @@ enum node_type {
 /* a threshold of maximum elapsed time in critical region to print tracepoint */
 #define MAX_LOCK_ELAPSED_TIME		500
 
+#define F2FS_DEFAULT_TASK_PRIORITY		(DEFAULT_PRIO)
+#define F2FS_CRITICAL_TASK_PRIORITY		NICE_TO_PRIO(0)
+
 static inline int f2fs_test_bit(unsigned int nr, char *addr);
 static inline void f2fs_set_bit(unsigned int nr, char *addr);
 static inline void f2fs_clear_bit(unsigned int nr, char *addr);
@@ -1666,6 +1668,7 @@ struct compress_ctx {
 	size_t clen;			/* valid data length in cbuf */
 	void *private;			/* payload buffer for specified compression algorithm */
 	void *private2;			/* extra payload buffer */
+	struct fsverity_info *vi;	/* verity info if needed */
 };
 
 /* compress context for write IO path */
@@ -1721,7 +1724,7 @@ struct decompress_io_ctx {
 	refcount_t refcnt;
 
 	bool failed;			/* IO error occurred before decompression? */
-	bool need_verity;		/* need fs-verity verification after decompression? */
+	struct fsverity_info *vi;	/* fs-verity context if needed */
 	unsigned char compress_algorithm;	/* backup algorithm type */
 	void *private;			/* payload buffer for specified decompression algorithm */
 	void *private2;			/* extra payload buffer */
@@ -1997,6 +2000,15 @@ struct f2fs_sb_info {
 
 	/* max elapsed time threshold in critical region that lock covered */
 	unsigned long long max_lock_elapsed_time;
+
+	/* enable/disable to adjust task priority in critical region covered by lock */
+	unsigned int adjust_lock_priority;
+
+	/* adjust priority for task which is in critical region covered by lock */
+	unsigned int lock_duration_priority;
+
+	/* priority for critical task, e.g. f2fs_ckpt, f2fs_gc threads */
+	long critical_task_priority;
 
 #ifdef CONFIG_F2FS_FS_COMPRESSION
 	struct kmem_cache *page_array_slab;	/* page array entry */
@@ -2692,7 +2704,7 @@ static inline void dec_valid_block_count(struct f2fs_sb_info *sbi,
 
 	spin_lock(&sbi->stat_lock);
 	if (unlikely(sbi->total_valid_block_count < count)) {
-		f2fs_warn(sbi, "Inconsistent total_valid_block_count:%u, ino:%lu, count:%u",
+		f2fs_warn(sbi, "Inconsistent total_valid_block_count:%u, ino:%llu, count:%u",
 			  sbi->total_valid_block_count, inode->i_ino, count);
 		sbi->total_valid_block_count = 0;
 		set_sbi_flag(sbi, SBI_NEED_FSCK);
@@ -2705,7 +2717,7 @@ static inline void dec_valid_block_count(struct f2fs_sb_info *sbi,
 					sbi->current_reserved_blocks + count);
 	spin_unlock(&sbi->stat_lock);
 	if (unlikely(inode->i_blocks < sectors)) {
-		f2fs_warn(sbi, "Inconsistent i_blocks, ino:%lu, iblocks:%llu, sectors:%llu",
+		f2fs_warn(sbi, "Inconsistent i_blocks, ino:%llu, iblocks:%llu, sectors:%llu",
 			  inode->i_ino,
 			  (unsigned long long)inode->i_blocks,
 			  (unsigned long long)sectors);
@@ -2979,7 +2991,7 @@ static inline void dec_valid_node_count(struct f2fs_sb_info *sbi,
 		dquot_free_inode(inode);
 	} else {
 		if (unlikely(inode->i_blocks == 0)) {
-			f2fs_warn(sbi, "dec_valid_node_count: inconsistent i_blocks, ino:%lu, iblocks:%llu",
+			f2fs_warn(sbi, "dec_valid_node_count: inconsistent i_blocks, ino:%llu, iblocks:%llu",
 				  inode->i_ino,
 				  (unsigned long long)inode->i_blocks);
 			set_sbi_flag(sbi, SBI_NEED_FSCK);
@@ -3907,7 +3919,7 @@ enum node_type;
 
 int f2fs_check_nid_range(struct f2fs_sb_info *sbi, nid_t nid);
 bool f2fs_available_free_memory(struct f2fs_sb_info *sbi, int type);
-bool f2fs_in_warm_node_list(struct f2fs_sb_info *sbi, struct folio *folio);
+bool f2fs_in_warm_node_list(struct folio *folio);
 void f2fs_init_fsync_node_info(struct f2fs_sb_info *sbi);
 void f2fs_del_fsync_node_entry(struct f2fs_sb_info *sbi, struct folio *folio);
 void f2fs_reset_fsync_node_info(struct f2fs_sb_info *sbi);
@@ -4274,6 +4286,7 @@ struct f2fs_stat_info {
 	int gc_secs[2][2];
 	int tot_blks, data_blks, node_blks;
 	int bg_data_blks, bg_node_blks;
+	unsigned int defrag_blks;
 	int blkoff[NR_CURSEG_TYPE];
 	int curseg[NR_CURSEG_TYPE];
 	int cursec[NR_CURSEG_TYPE];
@@ -4408,6 +4421,9 @@ static inline struct f2fs_stat_info *F2FS_STAT(struct f2fs_sb_info *sbi)
 		si->bg_node_blks += ((gc_type) == BG_GC) ? (blks) : 0;	\
 	} while (0)
 
+#define stat_inc_defrag_blk_count(sbi, blks)				\
+	(F2FS_STAT(sbi)->defrag_blks += (blks))
+
 int f2fs_build_stats(struct f2fs_sb_info *sbi);
 void f2fs_destroy_stats(struct f2fs_sb_info *sbi);
 void __init f2fs_create_root_stats(void);
@@ -4449,6 +4465,7 @@ void f2fs_update_sit_info(struct f2fs_sb_info *sbi);
 #define stat_inc_tot_blk_count(si, blks)		do { } while (0)
 #define stat_inc_data_blk_count(sbi, blks, gc_type)	do { } while (0)
 #define stat_inc_node_blk_count(sbi, blks, gc_type)	do { } while (0)
+#define stat_inc_defrag_blk_count(sbi, blks)		do { } while (0)
 
 static inline int f2fs_build_stats(struct f2fs_sb_info *sbi) { return 0; }
 static inline void f2fs_destroy_stats(struct f2fs_sb_info *sbi) { }
@@ -4964,12 +4981,6 @@ static inline bool f2fs_allow_multi_device_dio(struct f2fs_sb_info *sbi,
 	if (flag != F2FS_GET_BLOCK_DIO)
 		return false;
 	return sbi->aligned_blksize;
-}
-
-static inline bool f2fs_need_verity(const struct inode *inode, pgoff_t idx)
-{
-	return fsverity_active(inode) &&
-	       idx < DIV_ROUND_UP(inode->i_size, PAGE_SIZE);
 }
 
 #ifdef CONFIG_F2FS_FAULT_INJECTION

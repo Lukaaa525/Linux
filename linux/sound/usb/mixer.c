@@ -1660,6 +1660,69 @@ static const struct usb_feature_control_info *get_feature_control_info(int contr
 	return NULL;
 }
 
+static bool check_insane_volume_range(struct usb_mixer_interface *mixer,
+				      struct snd_kcontrol *kctl,
+				      struct usb_mixer_elem_info *cval)
+{
+	int range, steps, threshold;
+
+	/*
+	 * If a device quirk has overrode our TLV callback, no warning should
+	 * be generated since our checks are only meaningful for dB volume.
+	 */
+	if (!(kctl->vd[0].access & SNDRV_CTL_ELEM_ACCESS_TLV_CALLBACK) ||
+	    kctl->tlv.c != snd_usb_mixer_vol_tlv)
+		return false;
+
+	/*
+	 * Meaningless volume control capability (<1dB). This should cover
+	 * devices mapping their volume to val = 0/100/1, which are very likely
+	 * to be quirky.
+	 */
+	range = cval->max - cval->min;
+	if (range < 256) {
+		usb_audio_warn(mixer->chip,
+			       "Warning! Unlikely small volume range (=%u), linear volume or custom curve?",
+			       range);
+		return true;
+	}
+
+	steps = range / cval->res;
+
+	/*
+	 * There are definitely devices with ~20,000 ranges (e.g., HyperX Cloud
+	 * III with val = -18944/0/1), so we use some heuristics here:
+	 *
+	 * min < 0 < max: Attenuator + amplifier? Likely to be sane
+	 *
+	 * min < 0 = max: DSP? Voltage attenuator with FW conversion to dB?
+	 * Likely to be sane
+	 *
+	 * min < max < 0: Measured values? Neutral
+	 *
+	 * min = 0 < max: Oversimplified FW conversion? Linear volume? Likely to
+	 * be quirky (e.g., MV-SILICON)
+	 *
+	 * 0 < min < max: Amplifier with fixed gains? Likely to be quirky
+	 * (e.g., Logitech webcam)
+	 */
+	if (cval->min < 0 && 0 <= cval->max)
+		threshold = 24576; /* 65535 * (3 / 8) */
+	else if (cval->min < cval->max && cval->max < 0)
+		threshold = 1024;
+	else
+		threshold = 384;
+
+	if (steps > threshold) {
+		usb_audio_warn(mixer->chip,
+			       "Warning! Unlikely big volume step count (=%u), linear volume or wrong cval->res?",
+			       steps);
+		return true;
+	}
+
+	return false;
+}
+
 static void __build_feature_ctl(struct usb_mixer_interface *mixer,
 				const struct usbmix_name_map *imap,
 				unsigned int ctl_mask, int control,
@@ -1673,7 +1736,6 @@ static void __build_feature_ctl(struct usb_mixer_interface *mixer,
 	struct snd_kcontrol *kctl;
 	struct usb_mixer_elem_info *cval;
 	const struct usbmix_name_map *map;
-	unsigned int range;
 
 	if (control == UAC_FU_GRAPHIC_EQUALIZER) {
 		/* FIXME: not supported yet */
@@ -1684,7 +1746,7 @@ static void __build_feature_ctl(struct usb_mixer_interface *mixer,
 	if (check_ignored_ctl(map))
 		return;
 
-	cval = kzalloc(sizeof(*cval), GFP_KERNEL);
+	cval = kzalloc_obj(*cval);
 	if (!cval)
 		return;
 	snd_usb_mixer_elem_init_std(&cval->head, mixer, unitid);
@@ -1811,24 +1873,16 @@ static void __build_feature_ctl(struct usb_mixer_interface *mixer,
 
 	snd_usb_mixer_fu_apply_quirk(mixer, cval, unitid, kctl);
 
-	range = (cval->max - cval->min) / cval->res;
-	/*
-	 * There are definitely devices with a range of ~20,000, so let's be
-	 * conservative and allow for a bit more.
-	 */
-	if (range > 65535) {
-		usb_audio_warn(mixer->chip,
-			       "Warning! Unlikely big volume range (=%u), cval->res is probably wrong.",
-			       range);
-		usb_audio_warn(mixer->chip,
-			       "[%d] FU [%s] ch = %d, val = %d/%d/%d",
+	if (check_insane_volume_range(mixer, kctl, cval)) {
+		usb_audio_warn(mixer->chip, "[%d] FU [%s] ch = %d, val = %d/%d/%d\n",
 			       cval->head.id, kctl->id.name, cval->channels,
 			       cval->min, cval->max, cval->res);
+	} else {
+		usb_audio_dbg(mixer->chip, "[%d] FU [%s] ch = %d, val = %d/%d/%d\n",
+			      cval->head.id, kctl->id.name, cval->channels,
+			      cval->min, cval->max, cval->res);
 	}
 
-	usb_audio_dbg(mixer->chip, "[%d] FU [%s] ch = %d, val = %d/%d/%d\n",
-		      cval->head.id, kctl->id.name, cval->channels,
-		      cval->min, cval->max, cval->res);
 	snd_usb_mixer_add_control(&cval->head, kctl);
 }
 
@@ -1894,7 +1948,7 @@ static void build_connector_control(struct usb_mixer_interface *mixer,
 	if (check_ignored_ctl(map))
 		return;
 
-	cval = kzalloc(sizeof(*cval), GFP_KERNEL);
+	cval = kzalloc_obj(*cval);
 	if (!cval)
 		return;
 	snd_usb_mixer_elem_init_std(&cval->head, mixer, term->id);
@@ -1956,7 +2010,7 @@ static int parse_clock_source_unit(struct mixer_build *state, int unitid,
 				      UAC2_CS_CONTROL_CLOCK_VALID))
 		return 0;
 
-	cval = kzalloc(sizeof(*cval), GFP_KERNEL);
+	cval = kzalloc_obj(*cval);
 	if (!cval)
 		return -ENOMEM;
 
@@ -2177,7 +2231,7 @@ static void build_mixer_unit_ctl(struct mixer_build *state,
 	if (check_ignored_ctl(map))
 		return;
 
-	cval = kzalloc(sizeof(*cval), GFP_KERNEL);
+	cval = kzalloc_obj(*cval);
 	if (!cval)
 		return;
 
@@ -2525,7 +2579,7 @@ static int build_audio_procunit(struct mixer_build *state, int unitid,
 		map = find_map(state->map, unitid, valinfo->control);
 		if (check_ignored_ctl(map))
 			continue;
-		cval = kzalloc(sizeof(*cval), GFP_KERNEL);
+		cval = kzalloc_obj(*cval);
 		if (!cval)
 			return -ENOMEM;
 		snd_usb_mixer_elem_init_std(&cval->head, state->mixer, unitid);
@@ -2771,7 +2825,7 @@ static int parse_audio_selector_unit(struct mixer_build *state, int unitid,
 	if (check_ignored_ctl(map))
 		return 0;
 
-	cval = kzalloc(sizeof(*cval), GFP_KERNEL);
+	cval = kzalloc_obj(*cval);
 	if (!cval)
 		return -ENOMEM;
 	snd_usb_mixer_elem_init_std(&cval->head, state->mixer, unitid);
@@ -3598,13 +3652,12 @@ int snd_usb_create_mixer(struct snd_usb_audio *chip, int ctrlif)
 
 	strscpy(chip->card->mixername, "USB Mixer");
 
-	mixer = kzalloc(sizeof(*mixer), GFP_KERNEL);
+	mixer = kzalloc_obj(*mixer);
 	if (!mixer)
 		return -ENOMEM;
 	mixer->chip = chip;
 	mixer->ignore_ctl_error = !!(chip->quirk_flags & QUIRK_FLAG_IGNORE_CTL_ERROR);
-	mixer->id_elems = kcalloc(MAX_ID_ELEMS, sizeof(*mixer->id_elems),
-				  GFP_KERNEL);
+	mixer->id_elems = kzalloc_objs(*mixer->id_elems, MAX_ID_ELEMS);
 	if (!mixer->id_elems) {
 		kfree(mixer);
 		return -ENOMEM;

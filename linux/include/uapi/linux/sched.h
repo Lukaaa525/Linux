@@ -36,6 +36,9 @@
 /* Flags for the clone3() syscall. */
 #define CLONE_CLEAR_SIGHAND 0x100000000ULL /* Clear any signal handler and reset to SIG_DFL. */
 #define CLONE_INTO_CGROUP 0x200000000ULL /* Clone into a specific cgroup given the right permissions. */
+#define CLONE_AUTOREAP 0x400000000ULL /* Auto-reap child on exit. */
+#define CLONE_PIDFD_AUTOKILL 0x800000000ULL /* Kill child when clone pidfd closes. */
+#define CLONE_NNP 0x1000000000ULL /* Set no_new_privs on child. */
 
 /*
  * cloning flags intersect with CSIGNAL so can be used with unshare and clone3
@@ -145,5 +148,8 @@ struct clone_args {
 			 SCHED_FLAG_DL_OVERRUN		| \
 			 SCHED_FLAG_KEEP_ALL		| \
 			 SCHED_FLAG_UTIL_CLAMP)
+
+/* Only for sched_getattr() own flag param, if task is SCHED_DEADLINE */
+#define SCHED_GETATTR_FLAG_DL_DYNAMIC	0x01
 
 #endif /* _UAPI_LINUX_SCHED_H */

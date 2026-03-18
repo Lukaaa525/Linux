@@ -547,6 +547,7 @@ void dcn3_clk_mgr_construct(
 	/* in case we don't get a value from the register, use default */
 	if (clk_mgr->base.dentist_vco_freq_khz == 0)
 		clk_mgr->base.dentist_vco_freq_khz = 3650000;
+
 	/* Convert dprefclk units from MHz to KHz */
 	/* Value already divided by 10, some resolution lost */
 
@@ -561,7 +562,7 @@ void dcn3_clk_mgr_construct(
 
 	dce_clock_read_ss_info(clk_mgr);
 
-	clk_mgr->base.bw_params = kzalloc(sizeof(*clk_mgr->base.bw_params), GFP_KERNEL);
+	clk_mgr->base.bw_params = kzalloc_obj(*clk_mgr->base.bw_params);
 	if (!clk_mgr->base.bw_params) {
 		BREAK_TO_DEBUGGER();
 		return;

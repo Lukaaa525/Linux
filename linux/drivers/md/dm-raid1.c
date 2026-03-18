@@ -890,7 +890,7 @@ static struct mirror_set *alloc_context(unsigned int nr_mirrors,
 					struct dm_dirty_log *dl)
 {
 	struct mirror_set *ms =
-		kzalloc(struct_size(ms, mirror, nr_mirrors), GFP_KERNEL);
+		kzalloc_flex(*ms, mirror, nr_mirrors);
 
 	if (!ms) {
 		ti->error = "Cannot allocate mirror context";
@@ -993,12 +993,12 @@ static struct dm_dirty_log *create_dirty_log(struct dm_target *ti,
 		return NULL;
 	}
 
-	*args_used = 2 + param_count;
-
-	if (argc < *args_used) {
+	if (param_count > argc - 2) {
 		ti->error = "Insufficient mirror log arguments";
 		return NULL;
 	}
+
+	*args_used = 2 + param_count;
 
 	dl = dm_dirty_log_create(argv[0], ti, mirror_flush, param_count,
 				 argv + 2);

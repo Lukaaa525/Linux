@@ -555,9 +555,6 @@ static void init_once(void *foo)
 #ifdef CONFIG_FS_ENCRYPTION
 	fi->i_crypt_info = NULL;
 #endif
-#ifdef CONFIG_FS_VERITY
-	fi->i_verity_info = NULL;
-#endif
 }
 
 #ifdef CONFIG_QUOTA
@@ -3728,7 +3725,7 @@ static struct block_device **f2fs_get_devices(struct super_block *sb,
 	if (!f2fs_is_multi_device(sbi))
 		return NULL;
 
-	devs = kmalloc_array(sbi->s_ndevs, sizeof(*devs), GFP_KERNEL);
+	devs = kmalloc_objs(*devs, sbi->s_ndevs);
 	if (!devs)
 		return ERR_PTR(-ENOMEM);
 
@@ -4338,6 +4335,9 @@ static void init_sb_info(struct f2fs_sb_info *sbi)
 	spin_lock_init(&sbi->gc_remaining_trials_lock);
 	atomic64_set(&sbi->current_atomic_write, 0);
 	sbi->max_lock_elapsed_time = MAX_LOCK_ELAPSED_TIME;
+	sbi->adjust_lock_priority = 0;
+	sbi->lock_duration_priority = F2FS_DEFAULT_TASK_PRIORITY;
+	sbi->critical_task_priority = F2FS_CRITICAL_TASK_PRIORITY;
 
 	sbi->sum_blocksize = f2fs_sb_has_packed_ssa(sbi) ?
 		4096 : sbi->blocksize;
@@ -4501,7 +4501,7 @@ static int read_raw_super_block(struct f2fs_sb_info *sbi,
 	struct f2fs_super_block *super;
 	int err = 0;
 
-	super = kzalloc(sizeof(struct f2fs_super_block), GFP_KERNEL);
+	super = kzalloc_obj(struct f2fs_super_block);
 	if (!super)
 		return -ENOMEM;
 
@@ -4938,7 +4938,7 @@ try_onemore:
 	recovery = 0;
 
 	/* allocate memory for f2fs-specific super block info */
-	sbi = kzalloc(sizeof(struct f2fs_sb_info), GFP_KERNEL);
+	sbi = kzalloc_obj(struct f2fs_sb_info);
 	if (!sbi)
 		return -ENOMEM;
 
@@ -5509,7 +5509,7 @@ static int f2fs_init_fs_context(struct fs_context *fc)
 {
 	struct f2fs_fs_context *ctx;
 
-	ctx = kzalloc(sizeof(struct f2fs_fs_context), GFP_KERNEL);
+	ctx = kzalloc_obj(struct f2fs_fs_context);
 	if (!ctx)
 		return -ENOMEM;
 

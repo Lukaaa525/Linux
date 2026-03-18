@@ -60,7 +60,7 @@ static void dc_dmub_srv_handle_failure(struct dc_dmub_srv *dc_dmub_srv)
 struct dc_dmub_srv *dc_dmub_srv_create(struct dc *dc, struct dmub_srv *dmub)
 {
 	struct dc_dmub_srv *dc_srv =
-		kzalloc(sizeof(struct dc_dmub_srv), GFP_KERNEL);
+		kzalloc_obj(struct dc_dmub_srv);
 
 	if (dc_srv == NULL) {
 		BREAK_TO_DEBUGGER();
@@ -1034,12 +1034,19 @@ static void dc_build_cursor_update_payload0(
 		struct pipe_ctx *pipe_ctx, uint8_t p_idx,
 		struct dmub_cmd_update_cursor_payload0 *payload)
 {
+	struct dc *dc = pipe_ctx->stream->ctx->dc;
 	struct hubp *hubp = pipe_ctx->plane_res.hubp;
 	unsigned int panel_inst = 0;
 
-	if (!dc_get_edp_link_panel_inst(hubp->ctx->dc,
-		pipe_ctx->stream->link, &panel_inst))
-		return;
+	if (dc->config.frame_update_cmd_version2 == true) {
+		/* Don't need panel_inst for command version2 */
+		payload->cmd_version = DMUB_CMD_CURSOR_UPDATE_VERSION_2;
+	} else {
+		if (!dc_get_edp_link_panel_inst(hubp->ctx->dc,
+			pipe_ctx->stream->link, &panel_inst))
+			return;
+		payload->cmd_version = DMUB_CMD_CURSOR_UPDATE_VERSION_1;
+	}
 
 	/* Payload: Cursor Rect is built from position & attribute
 	 * x & y are obtained from postion
@@ -1052,8 +1059,8 @@ static void dc_build_cursor_update_payload0(
 
 	payload->enable      = hubp->pos.cur_ctl.bits.cur_enable;
 	payload->pipe_idx    = p_idx;
-	payload->cmd_version = DMUB_CMD_PSR_CONTROL_VERSION_1;
 	payload->panel_inst  = panel_inst;
+	payload->otg_inst    = pipe_ctx->stream_res.tg->inst;
 }
 
 static void dc_build_cursor_position_update_payload0(
@@ -2340,6 +2347,33 @@ bool dmub_lsdma_send_poll_reg_write_command(struct dc_dmub_srv *dc_dmub_srv, uin
 bool dc_dmub_srv_is_cursor_offload_enabled(const struct dc *dc)
 {
 	return dc->ctx->dmub_srv && dc->ctx->dmub_srv->cursor_offload_enabled;
+}
+
+void dc_dmub_srv_boot_time_crc_init(const struct dc *dc, uint64_t gpu_addr, uint32_t size)
+{
+	struct dc_dmub_srv *dc_dmub_srv;
+	struct dc_context *dc_ctx;
+	union dmub_rb_cmd cmd = {0};
+	bool result = false;
+
+	if (!dc || !dc->ctx || !dc->ctx->dmub_srv || size == 0)
+		return;
+
+	dc_dmub_srv = dc->ctx->dmub_srv;
+	dc_ctx = dc_dmub_srv->ctx;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.boot_time_crc_init.header.type = DMUB_CMD__BOOT_TIME_CRC;
+	cmd.boot_time_crc_init.header.sub_type = DMUB_CMD__BOOT_TIME_CRC_INIT_MEM;
+	cmd.boot_time_crc_init.header.payload_bytes =
+		sizeof(struct dmub_rb_cmd_boot_time_crc_init);
+	cmd.boot_time_crc_init.data.buffer_addr.quad_part = gpu_addr;
+	cmd.boot_time_crc_init.data.buffer_size = size;
+
+	result = dc_wake_and_execute_dmub_cmd(dc->ctx, &cmd, DM_DMUB_WAIT_TYPE_NO_WAIT);
+
+	if (!result)
+		DC_ERROR("Boot time crc init failed in DMUB");
 }
 
 void dc_dmub_srv_release_hw(const struct dc *dc)

@@ -142,8 +142,6 @@ int smu_v15_0_setup_pptable(struct smu_context *smu);
 
 int smu_v15_0_get_vbios_bootup_values(struct smu_context *smu);
 
-int smu_v15_0_check_fw_version(struct smu_context *smu);
-
 int smu_v15_0_set_driver_table_location(struct smu_context *smu);
 
 int smu_v15_0_set_tool_table_location(struct smu_context *smu);
@@ -225,8 +223,6 @@ int smu_v15_0_deep_sleep_control(struct smu_context *smu,
 				 bool enablement);
 
 int smu_v15_0_set_gfx_power_up_by_imu(struct smu_context *smu);
-
-int smu_v15_0_set_default_dpm_tables(struct smu_context *smu);
 
 int smu_v15_0_get_pptable_from_firmware(struct smu_context *smu,
 					void **table,

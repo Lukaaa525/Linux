@@ -78,6 +78,7 @@
 #include <net/mpls.h>
 #include <net/mptcp.h>
 #include <net/mctp.h>
+#include <net/can.h>
 #include <net/page_pool/helpers.h>
 #include <net/psp/types.h>
 #include <net/dropreason.h>
@@ -890,17 +891,6 @@ skb_fail:
 }
 EXPORT_SYMBOL(napi_alloc_skb);
 
-void skb_add_rx_frag_netmem(struct sk_buff *skb, int i, netmem_ref netmem,
-			    int off, int size, unsigned int truesize)
-{
-	DEBUG_NET_WARN_ON_ONCE(size > truesize);
-
-	skb_fill_netmem_desc(skb, i, netmem, off, size);
-	skb->len += size;
-	skb->data_len += size;
-	skb->truesize += truesize;
-}
-EXPORT_SYMBOL(skb_add_rx_frag_netmem);
 
 void skb_coalesce_rx_frag(struct sk_buff *skb, int i, int size,
 			  unsigned int truesize)
@@ -5139,6 +5129,9 @@ static const u8 skb_ext_type_len[] = {
 #if IS_ENABLED(CONFIG_INET_PSP)
 	[SKB_EXT_PSP] = SKB_EXT_CHUNKSIZEOF(struct psp_skb_ext),
 #endif
+#if IS_ENABLED(CONFIG_CAN)
+	[SKB_EXT_CAN] = SKB_EXT_CHUNKSIZEOF(struct can_skb_ext),
+#endif
 };
 
 static __always_inline unsigned int skb_ext_total_length(void)
@@ -5154,7 +5147,7 @@ static __always_inline unsigned int skb_ext_total_length(void)
 
 static void skb_extensions_init(void)
 {
-	BUILD_BUG_ON(SKB_EXT_NUM >= 8);
+	BUILD_BUG_ON(SKB_EXT_NUM > 8);
 #if !IS_ENABLED(CONFIG_KCOV_INSTRUMENT_ALL)
 	BUILD_BUG_ON(skb_ext_total_length() > 255);
 #endif
@@ -5586,15 +5579,28 @@ static void __skb_complete_tx_timestamp(struct sk_buff *skb,
 
 static bool skb_may_tx_timestamp(struct sock *sk, bool tsonly)
 {
-	bool ret;
+	struct socket *sock;
+	struct file *file;
+	bool ret = false;
 
 	if (likely(tsonly || READ_ONCE(sock_net(sk)->core.sysctl_tstamp_allow_data)))
 		return true;
 
-	read_lock_bh(&sk->sk_callback_lock);
-	ret = sk->sk_socket && sk->sk_socket->file &&
-	      file_ns_capable(sk->sk_socket->file, &init_user_ns, CAP_NET_RAW);
-	read_unlock_bh(&sk->sk_callback_lock);
+	/* The sk pointer remains valid as long as the skb is. The sk_socket and
+	 * file pointer may become NULL if the socket is closed. Both structures
+	 * (including file->cred) are RCU freed which means they can be accessed
+	 * within a RCU read section.
+	 */
+	rcu_read_lock();
+	sock = READ_ONCE(sk->sk_socket);
+	if (!sock)
+		goto out;
+	file = READ_ONCE(sock->file);
+	if (!file)
+		goto out;
+	ret = file_ns_capable(file, &init_user_ns, CAP_NET_RAW);
+out:
+	rcu_read_unlock();
 	return ret;
 }
 
@@ -7250,6 +7256,8 @@ static void kfree_skb_napi_cache(struct sk_buff *skb)
 	local_bh_enable();
 }
 
+DEFINE_STATIC_KEY_FALSE(skb_defer_disable_key);
+
 /**
  * skb_attempt_defer_free - queue skb for remote freeing
  * @skb: buffer
@@ -7262,10 +7270,18 @@ void skb_attempt_defer_free(struct sk_buff *skb)
 {
 	struct skb_defer_node *sdn;
 	unsigned long defer_count;
-	int cpu = skb->alloc_cpu;
 	unsigned int defer_max;
 	bool kick;
+	int cpu;
 
+	if (static_branch_unlikely(&skb_defer_disable_key))
+		goto nodefer;
+
+	/* zero copy notifications should not be delayed. */
+	if (skb_zcopy(skb))
+		goto nodefer;
+
+	cpu = skb->alloc_cpu;
 	if (cpu == raw_smp_processor_id() ||
 	    WARN_ON_ONCE(cpu >= nr_cpu_ids) ||
 	    !cpu_online(cpu)) {
@@ -7423,31 +7439,56 @@ bool csum_and_copy_from_iter_full(void *addr, size_t bytes,
 }
 EXPORT_SYMBOL(csum_and_copy_from_iter_full);
 
-void get_netmem(netmem_ref netmem)
+void __get_netmem(netmem_ref netmem)
 {
-	struct net_iov *niov;
+	struct net_iov *niov = netmem_to_net_iov(netmem);
 
-	if (netmem_is_net_iov(netmem)) {
-		niov = netmem_to_net_iov(netmem);
-		if (net_is_devmem_iov(niov))
-			net_devmem_get_net_iov(netmem_to_net_iov(netmem));
-		return;
-	}
-	get_page(netmem_to_page(netmem));
+	if (net_is_devmem_iov(niov))
+		net_devmem_get_net_iov(netmem_to_net_iov(netmem));
 }
-EXPORT_SYMBOL(get_netmem);
+EXPORT_SYMBOL(__get_netmem);
 
-void put_netmem(netmem_ref netmem)
+void __put_netmem(netmem_ref netmem)
 {
-	struct net_iov *niov;
+	struct net_iov *niov = netmem_to_net_iov(netmem);
 
-	if (netmem_is_net_iov(netmem)) {
-		niov = netmem_to_net_iov(netmem);
-		if (net_is_devmem_iov(niov))
-			net_devmem_put_net_iov(netmem_to_net_iov(netmem));
-		return;
-	}
-
-	put_page(netmem_to_page(netmem));
+	if (net_is_devmem_iov(niov))
+		net_devmem_put_net_iov(netmem_to_net_iov(netmem));
 }
-EXPORT_SYMBOL(put_netmem);
+EXPORT_SYMBOL(__put_netmem);
+
+struct vlan_type_depth __vlan_get_protocol_offset(const struct sk_buff *skb,
+						  __be16 type,
+						  int mac_offset)
+{
+	unsigned int vlan_depth = skb->mac_len, parse_depth = VLAN_MAX_DEPTH;
+
+	/* if type is 802.1Q/AD then the header should already be
+	 * present at mac_len - VLAN_HLEN (if mac_len > 0), or at
+	 * ETH_HLEN otherwise
+	 */
+	if (vlan_depth) {
+		if (WARN_ON_ONCE(vlan_depth < VLAN_HLEN))
+			return (struct vlan_type_depth) { 0 };
+		vlan_depth -= VLAN_HLEN;
+	} else {
+		vlan_depth = ETH_HLEN;
+	}
+	do {
+		struct vlan_hdr vhdr, *vh;
+
+		vh = skb_header_pointer(skb, mac_offset + vlan_depth,
+					sizeof(vhdr), &vhdr);
+		if (unlikely(!vh || !--parse_depth))
+			return (struct vlan_type_depth) { 0 };
+
+		type = vh->h_vlan_encapsulated_proto;
+		vlan_depth += VLAN_HLEN;
+	} while (eth_type_vlan(type));
+
+	return (struct vlan_type_depth) {
+		.type = type,
+		.depth = vlan_depth
+	};
+}
+EXPORT_SYMBOL(__vlan_get_protocol_offset);

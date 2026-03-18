@@ -17,7 +17,6 @@
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
 #include <linux/usb.h>
-#include <linux/crc32.h>
 #include <linux/usb/usbnet.h>
 
 #include "sr9700.h"
@@ -37,7 +36,7 @@ static int sr_write(struct usbnet *dev, u8 reg, u16 length, void *data)
 {
 	int err;
 
-	err = usbnet_write_cmd(dev, SR_WR_REGS, SR_REQ_WR_REG, 0, reg, data,
+	err = usbnet_write_cmd(dev, SR_WR_MULTIPLE_REGS, SR_REQ_WR_REG, 0, reg, data,
 			       length);
 	if ((err >= 0) && (err < length))
 		err = -EINVAL;
@@ -51,20 +50,20 @@ static int sr_read_reg(struct usbnet *dev, u8 reg, u8 *value)
 
 static int sr_write_reg(struct usbnet *dev, u8 reg, u8 value)
 {
-	return usbnet_write_cmd(dev, SR_WR_REG, SR_REQ_WR_REG,
+	return usbnet_write_cmd(dev, SR_WR_SINGLE_REG, SR_REQ_WR_REG,
 				value, reg, NULL, 0);
 }
 
 static void sr_write_async(struct usbnet *dev, u8 reg, u16 length,
 			   const void *data)
 {
-	usbnet_write_cmd_async(dev, SR_WR_REGS, SR_REQ_WR_REG,
+	usbnet_write_cmd_async(dev, SR_WR_MULTIPLE_REGS, SR_REQ_WR_REG,
 			       0, reg, data, length);
 }
 
 static void sr_write_reg_async(struct usbnet *dev, u8 reg, u8 value)
 {
-	usbnet_write_cmd_async(dev, SR_WR_REG, SR_REQ_WR_REG,
+	usbnet_write_cmd_async(dev, SR_WR_SINGLE_REG, SR_REQ_WR_REG,
 			       value, reg, NULL, 0);
 }
 
@@ -231,31 +230,15 @@ static const struct ethtool_ops sr9700_ethtool_ops = {
 static void sr9700_set_multicast(struct net_device *netdev)
 {
 	struct usbnet *dev = netdev_priv(netdev);
-	/* We use the 20 byte dev->data for our 8 byte filter buffer
-	 * to avoid allocating memory that is tricky to free later
-	 */
-	u8 *hashes = (u8 *)&dev->data;
 	/* rx_ctl setting : enable, disable_long, disable_crc */
 	u8 rx_ctl = RCR_RXEN | RCR_DIS_CRC | RCR_DIS_LONG;
 
-	memset(hashes, 0x00, SR_MCAST_SIZE);
-	/* broadcast address */
-	hashes[SR_MCAST_SIZE - 1] |= SR_MCAST_ADDR_FLAG;
-	if (netdev->flags & IFF_PROMISC) {
+	if (netdev->flags & IFF_PROMISC)
 		rx_ctl |= RCR_PRMSC;
-	} else if (netdev->flags & IFF_ALLMULTI ||
-		   netdev_mc_count(netdev) > SR_MCAST_MAX) {
-		rx_ctl |= RCR_RUNT;
-	} else if (!netdev_mc_empty(netdev)) {
-		struct netdev_hw_addr *ha;
+	else if (netdev->flags & IFF_ALLMULTI || !netdev_mc_empty(netdev))
+		/* The chip has no multicast filter */
+		rx_ctl |= RCR_ALL;
 
-		netdev_for_each_mc_addr(ha, netdev) {
-			u32 crc = ether_crc(ETH_ALEN, ha->addr) >> 26;
-			hashes[crc >> 3] |= 1 << (crc & 0x7);
-		}
-	}
-
-	sr_write_async(dev, SR_MAR, SR_MCAST_SIZE, hashes);
 	sr_write_reg_async(dev, SR_RCR, rx_ctl);
 }
 
@@ -271,7 +254,7 @@ static int sr9700_set_mac_address(struct net_device *netdev, void *p)
 	}
 
 	eth_hw_addr_set(netdev, addr->sa_data);
-	sr_write_async(dev, SR_PAR, 6, netdev->dev_addr);
+	sr_write_async(dev, SR_PAR, ETH_ALEN, netdev->dev_addr);
 
 	return 0;
 }
@@ -366,7 +349,7 @@ static int sr9700_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 
 	/* one skb may contains multiple packets */
 	while (skb->len > SR_RX_OVERHEAD) {
-		if (skb->data[0] != 0x40)
+		if (skb->data[0] != RSR_MF)
 			return 0;
 
 		/* ignore the CRC length */
@@ -455,7 +438,7 @@ static void sr9700_status(struct usbnet *dev, struct urb *urb)
 
 	buf = urb->transfer_buffer;
 
-	link = !!(buf[0] & 0x40);
+	link = !!(buf[0] & NSR_LINKST);
 	sr9700_handle_link_change(dev->net, link);
 }
 

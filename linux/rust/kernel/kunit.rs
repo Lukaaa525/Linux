@@ -14,6 +14,10 @@ use crate::prelude::*;
 /// Public but hidden since it should only be used from KUnit generated code.
 #[doc(hidden)]
 pub fn err(args: fmt::Arguments<'_>) {
+    // `args` is unused if `CONFIG_PRINTK` is not set - this avoids a build-time warning.
+    #[cfg(not(CONFIG_PRINTK))]
+    let _ = args;
+
     // SAFETY: The format string is null-terminated and the `%pA` specifier matches the argument we
     // are passing.
     #[cfg(CONFIG_PRINTK)]
@@ -30,6 +34,10 @@ pub fn err(args: fmt::Arguments<'_>) {
 /// Public but hidden since it should only be used from KUnit generated code.
 #[doc(hidden)]
 pub fn info(args: fmt::Arguments<'_>) {
+    // `args` is unused if `CONFIG_PRINTK` is not set - this avoids a build-time warning.
+    #[cfg(not(CONFIG_PRINTK))]
+    let _ = args;
+
     // SAFETY: The format string is null-terminated and the `%pA` specifier matches the argument we
     // are passing.
     #[cfg(CONFIG_PRINTK)]
@@ -189,9 +197,6 @@ pub fn is_test_result_ok(t: impl TestResult) -> bool {
 }
 
 /// Represents an individual test case.
-///
-/// The [`kunit_unsafe_test_suite!`] macro expects a NULL-terminated list of valid test cases.
-/// Use [`kunit_case_null`] to generate such a delimiter.
 #[doc(hidden)]
 pub const fn kunit_case(
     name: &'static kernel::str::CStr,
@@ -212,32 +217,11 @@ pub const fn kunit_case(
     }
 }
 
-/// Represents the NULL test case delimiter.
-///
-/// The [`kunit_unsafe_test_suite!`] macro expects a NULL-terminated list of test cases. This
-/// function returns such a delimiter.
-#[doc(hidden)]
-pub const fn kunit_case_null() -> kernel::bindings::kunit_case {
-    kernel::bindings::kunit_case {
-        run_case: None,
-        name: core::ptr::null_mut(),
-        generate_params: None,
-        attr: kernel::bindings::kunit_attributes {
-            speed: kernel::bindings::kunit_speed_KUNIT_SPEED_NORMAL,
-        },
-        status: kernel::bindings::kunit_status_KUNIT_SUCCESS,
-        module_name: core::ptr::null_mut(),
-        log: core::ptr::null_mut(),
-        param_init: None,
-        param_exit: None,
-    }
-}
-
 /// Registers a KUnit test suite.
 ///
 /// # Safety
 ///
-/// `test_cases` must be a NULL terminated array of valid test cases,
+/// `test_cases` must be a `NULL` terminated array of valid test cases,
 /// whose lifetime is at least that of the test suite (i.e., static).
 ///
 /// # Examples
@@ -251,7 +235,7 @@ pub const fn kunit_case_null() -> kernel::bindings::kunit_case {
 ///
 /// static mut KUNIT_TEST_CASES: [kernel::bindings::kunit_case; 2] = [
 ///     kernel::kunit::kunit_case(c"name", test_fn),
-///     kernel::kunit::kunit_case_null(),
+///     pin_init::zeroed(),
 /// ];
 /// kernel::kunit_unsafe_test_suite!(suite_name, KUNIT_TEST_CASES);
 /// ```

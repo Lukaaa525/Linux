@@ -55,8 +55,6 @@ void iwl_mld_cleanup_vif(void *data, u8 *mac, struct ieee80211_vif *vif)
 
 	ieee80211_iter_keys(mld->hw, vif, iwl_mld_cleanup_keys_iter, NULL);
 
-	wiphy_delayed_work_cancel(mld->wiphy, &mld_vif->mlo_scan_start_wk);
-
 	CLEANUP_STRUCT(mld_vif);
 }
 
@@ -544,7 +542,7 @@ void iwl_mld_handle_probe_resp_data_notif(struct iwl_mld *mld,
 			 notif->noa_attr.len_low))
 		return;
 
-	new_data = kzalloc(sizeof(*new_data), GFP_KERNEL);
+	new_data = kzalloc_obj(*new_data);
 	if (!new_data)
 		return;
 

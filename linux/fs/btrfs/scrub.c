@@ -373,9 +373,8 @@ static int init_scrub_stripe(struct btrfs_fs_info *fs_info,
 	if (ret < 0)
 		goto error;
 
-	stripe->sectors = kcalloc(stripe->nr_sectors,
-				  sizeof(struct scrub_sector_verification),
-				  GFP_KERNEL);
+	stripe->sectors = kzalloc_objs(struct scrub_sector_verification,
+				       stripe->nr_sectors);
 	if (!stripe->sectors)
 		goto error;
 
@@ -456,7 +455,7 @@ static noinline_for_stack struct scrub_ctx *scrub_setup_ctx(
 	/* Since sctx has inline 128 stripes, it can go beyond 64K easily.  Use
 	 * kvzalloc().
 	 */
-	sctx = kvzalloc(sizeof(*sctx), GFP_KERNEL);
+	sctx = kvzalloc_obj(*sctx);
 	if (!sctx)
 		goto nomem;
 	refcount_set(&sctx->refs, 1);
@@ -744,7 +743,7 @@ static void scrub_verify_one_metadata(struct scrub_stripe *stripe, int sector_nr
 		btrfs_warn_rl(fs_info,
 	      "scrub: tree block %llu mirror %u has bad fsid, has %pU want %pU",
 			      logical, stripe->mirror_num,
-			      header->fsid, fs_info->fs_devices->fsid);
+			      header->fsid, fs_info->fs_devices->metadata_uuid);
 		return;
 	}
 	if (memcmp(header->chunk_tree_uuid, fs_info->chunk_tree_uuid,
@@ -892,15 +891,10 @@ static void scrub_repair_read_endio(struct btrfs_bio *bbio)
 {
 	struct scrub_stripe *stripe = bbio->private;
 	struct btrfs_fs_info *fs_info = stripe->bg->fs_info;
-	struct bio_vec *bvec;
 	int sector_nr = calc_sector_number(stripe, bio_first_bvec_all(&bbio->bio));
-	u32 bio_size = 0;
-	int i;
+	const u32 bio_size = bio_get_size(&bbio->bio);
 
 	ASSERT(sector_nr < stripe->nr_sectors);
-
-	bio_for_each_bvec_all(bvec, &bbio->bio, i)
-		bio_size += bvec->bv_len;
 
 	if (bbio->bio.bi_status) {
 		scrub_bitmap_set_io_error(stripe, sector_nr,
@@ -1250,15 +1244,11 @@ out:
 static void scrub_read_endio(struct btrfs_bio *bbio)
 {
 	struct scrub_stripe *stripe = bbio->private;
-	struct bio_vec *bvec;
 	int sector_nr = calc_sector_number(stripe, bio_first_bvec_all(&bbio->bio));
 	int num_sectors;
-	u32 bio_size = 0;
-	int i;
+	const u32 bio_size = bio_get_size(&bbio->bio);
 
 	ASSERT(sector_nr < stripe->nr_sectors);
-	bio_for_each_bvec_all(bvec, &bbio->bio, i)
-		bio_size += bvec->bv_len;
 	num_sectors = bio_size >> stripe->bg->fs_info->sectorsize_bits;
 
 	if (bbio->bio.bi_status) {
@@ -1279,13 +1269,8 @@ static void scrub_write_endio(struct btrfs_bio *bbio)
 {
 	struct scrub_stripe *stripe = bbio->private;
 	struct btrfs_fs_info *fs_info = stripe->bg->fs_info;
-	struct bio_vec *bvec;
 	int sector_nr = calc_sector_number(stripe, bio_first_bvec_all(&bbio->bio));
-	u32 bio_size = 0;
-	int i;
-
-	bio_for_each_bvec_all(bvec, &bbio->bio, i)
-		bio_size += bvec->bv_len;
+	const u32 bio_size = bio_get_size(&bbio->bio);
 
 	if (bbio->bio.bi_status) {
 		unsigned long flags;
@@ -1294,7 +1279,7 @@ static void scrub_write_endio(struct btrfs_bio *bbio)
 		bitmap_set(&stripe->write_error_bitmap, sector_nr,
 			   bio_size >> fs_info->sectorsize_bits);
 		spin_unlock_irqrestore(&stripe->write_error_lock, flags);
-		for (i = 0; i < (bio_size >> fs_info->sectorsize_bits); i++)
+		for (int i = 0; i < (bio_size >> fs_info->sectorsize_bits); i++)
 			btrfs_dev_stat_inc_and_print(stripe->dev,
 						     BTRFS_DEV_STAT_WRITE_ERRS);
 	}
@@ -1696,7 +1681,7 @@ static int scrub_find_fill_first_stripe(struct btrfs_block_group *bg,
 				     logical_len);
 	/* Either error or not found. */
 	if (ret)
-		goto out;
+		return ret;
 	get_extent_info(extent_path, &extent_start, &extent_len, &extent_flags,
 			&extent_gen);
 	if (extent_flags & BTRFS_EXTENT_FLAG_TREE_BLOCK)
@@ -1729,7 +1714,7 @@ static int scrub_find_fill_first_stripe(struct btrfs_block_group *bg,
 		ret = find_first_extent_item(extent_root, extent_path, cur_logical,
 					     stripe_end - cur_logical + 1);
 		if (ret < 0)
-			goto out;
+			return ret;
 		if (ret > 0) {
 			ret = 0;
 			break;
@@ -1763,7 +1748,7 @@ static int scrub_find_fill_first_stripe(struct btrfs_block_group *bg,
 						stripe->logical, stripe_end,
 						stripe->csums, &csum_bitmap);
 		if (ret < 0)
-			goto out;
+			return ret;
 		if (ret > 0)
 			ret = 0;
 
@@ -1773,7 +1758,7 @@ static int scrub_find_fill_first_stripe(struct btrfs_block_group *bg,
 		}
 	}
 	set_bit(SCRUB_STRIPE_FLAG_INITIALIZED, &stripe->state);
-out:
+
 	return ret;
 }
 
@@ -2474,9 +2459,8 @@ static noinline_for_stack int scrub_stripe(struct scrub_ctx *sctx,
 	if (profile & BTRFS_BLOCK_GROUP_RAID56_MASK) {
 		ASSERT(sctx->raid56_data_stripes == NULL);
 
-		sctx->raid56_data_stripes = kcalloc(nr_data_stripes(map),
-						    sizeof(struct scrub_stripe),
-						    GFP_KERNEL);
+		sctx->raid56_data_stripes = kzalloc_objs(struct scrub_stripe,
+							 nr_data_stripes(map));
 		if (!sctx->raid56_data_stripes) {
 			ret = -ENOMEM;
 			goto out;

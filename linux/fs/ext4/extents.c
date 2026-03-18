@@ -621,8 +621,7 @@ int ext4_ext_precache(struct inode *inode)
 		return ret;
 	}
 
-	path = kcalloc(depth + 1, sizeof(struct ext4_ext_path),
-		       GFP_NOFS);
+	path = kzalloc_objs(struct ext4_ext_path, depth + 1, GFP_NOFS);
 	if (path == NULL) {
 		up_read(&ei->i_data_sem);
 		return -ENOMEM;
@@ -916,8 +915,7 @@ ext4_find_extent(struct inode *inode, ext4_lblk_t block,
 	}
 	if (!path) {
 		/* account possible depth increase */
-		path = kcalloc(depth + 2, sizeof(struct ext4_ext_path),
-				gfp_flags);
+		path = kzalloc_objs(struct ext4_ext_path, depth + 2, gfp_flags);
 		if (unlikely(!path))
 			return ERR_PTR(-ENOMEM);
 		path[0].p_maxdepth = depth + 1;
@@ -1105,7 +1103,7 @@ static int ext4_ext_split(handle_t *handle, struct inode *inode,
 	 * We need this to handle errors and free blocks
 	 * upon them.
 	 */
-	ablocks = kcalloc(depth, sizeof(ext4_fsblk_t), gfp_flags);
+	ablocks = kzalloc_objs(ext4_fsblk_t, depth, gfp_flags);
 	if (!ablocks)
 		return -ENOMEM;
 
@@ -2947,8 +2945,8 @@ again:
 			path[k].p_block =
 				le16_to_cpu(path[k].p_hdr->eh_entries)+1;
 	} else {
-		path = kcalloc(depth + 1, sizeof(struct ext4_ext_path),
-			       GFP_NOFS | __GFP_NOFAIL);
+		path = kzalloc_objs(struct ext4_ext_path, depth + 1,
+				    GFP_NOFS | __GFP_NOFAIL);
 		path[0].p_maxdepth = path[0].p_depth = depth;
 		path[0].p_hdr = ext_inode_hdr(inode);
 		i = 0;
@@ -4605,7 +4603,7 @@ retry:
 		}
 		ret = ext4_map_blocks(handle, inode, &map, flags);
 		if (ret <= 0) {
-			ext4_debug("inode #%lu: block %u: len %u: "
+			ext4_debug("inode #%llu: block %u: len %u: "
 				   "ext4_ext_map_blocks returned %d",
 				   inode->i_ino, map.m_lblk,
 				   map.m_len, ret);
@@ -4957,7 +4955,7 @@ int ext4_convert_unwritten_extents_atomic(handle_t *handle, struct inode *inode,
 		ret = ext4_map_blocks(handle, inode, &map, flags);
 		if (ret != max_blocks)
 			ext4_msg(inode->i_sb, KERN_INFO,
-				     "inode #%lu: block %u: len %u: "
+				     "inode #%llu: block %u: len %u: "
 				     "split block mapping found for atomic write, "
 				     "ret = %d",
 				     inode->i_ino, map.m_lblk,
@@ -4976,7 +4974,7 @@ int ext4_convert_unwritten_extents_atomic(handle_t *handle, struct inode *inode,
 
 	if (ret <= 0 || ret2)
 		ext4_warning(inode->i_sb,
-			     "inode #%lu: block %u: len %u: "
+			     "inode #%llu: block %u: len %u: "
 			     "returned %d or %d",
 			     inode->i_ino, map.m_lblk,
 			     map.m_len, ret, ret2);
@@ -5033,7 +5031,7 @@ int ext4_convert_unwritten_extents(handle_t *handle, struct inode *inode,
 				      EXT4_EX_NOCACHE);
 		if (ret <= 0)
 			ext4_warning(inode->i_sb,
-				     "inode #%lu: block %u: len %u: "
+				     "inode #%llu: block %u: len %u: "
 				     "ext4_ext_map_blocks returned %d",
 				     inode->i_ino, map.m_lblk,
 				     map.m_len, ret);

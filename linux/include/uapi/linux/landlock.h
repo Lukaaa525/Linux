@@ -199,9 +199,9 @@ struct landlock_net_port_attr {
 	 * with ``setsockopt(IP_LOCAL_PORT_RANGE)``.
 	 *
 	 * A Landlock rule with port 0 and the %LANDLOCK_ACCESS_NET_BIND_TCP
-	 * or %LANDLOCK_ACCESS_NET_BIND_UDP right means that requesting to bind
-	 * on port 0 is allowed and it will automatically translate to binding
-	 * on a kernel-assigned ephemeral port.
+	 * right means that requesting to bind on port 0 is allowed and it will
+	 * automatically translate to binding on a kernel-assigned ephemeral
+	 * port.
 	 */
 	__u64 port;
 };
@@ -350,37 +350,10 @@ struct landlock_net_port_attr {
  *   port. Support added in Landlock ABI version 4.
  * - %LANDLOCK_ACCESS_NET_CONNECT_TCP: Connect TCP sockets to the given
  *   remote port. Support added in Landlock ABI version 4.
- *
- * And similarly for UDP port numbers:
- *
- * - %LANDLOCK_ACCESS_NET_BIND_UDP: Bind UDP sockets to the given local
- *   port. Support added in Landlock ABI version 9.
- *   Note: this access right is not required if your program sends
- *   datagrams and just uses the implicitly bound port assigned by the
- *   kernel to reply. Conversely, denying this right only blocks a
- *   program from binding to non-ephemeral ports if it can send datagrams.
- * - %LANDLOCK_ACCESS_NET_CONNECT_UDP: Connect UDP sockets to remote
- *   addresses with the given remote port. Support added in Landlock ABI
- *   version 9.
- * - %LANDLOCK_ACCESS_NET_SENDTO_UDP: Send datagrams on UDP sockets with
- *   an explicit destination address set to the given remote port.
- *   Support added in Landlock ABI version 9. Note: this access right
- *   does not control sending datagrams with no explicit destination
- *   (e.g. via :manpage:`send(2)` or ``sendto(..., NULL, 0)``, so this
- *   access right is not necessary when specifying a destination address
- *   once and for all in :manpage:`connect(2)`.
- *
- *   Note: sending datagrams to an explicit ``AF_UNSPEC`` destination
- *   address family is not supported. For IPv4 sockets, you will need to
- *   use an ``AF_INET`` address instead, and for IPv6 sockets, you will
- *   need to use a ``NULL`` address.
  */
 /* clang-format off */
 #define LANDLOCK_ACCESS_NET_BIND_TCP			(1ULL << 0)
 #define LANDLOCK_ACCESS_NET_CONNECT_TCP			(1ULL << 1)
-#define LANDLOCK_ACCESS_NET_BIND_UDP			(1ULL << 2)
-#define LANDLOCK_ACCESS_NET_CONNECT_UDP			(1ULL << 3)
-#define LANDLOCK_ACCESS_NET_SENDTO_UDP			(1ULL << 4)
 /* clang-format on */
 
 /**
@@ -402,14 +375,10 @@ struct landlock_net_port_attr {
  *   related Landlock domain (e.g., a parent domain or a non-sandboxed process).
  * - %LANDLOCK_SCOPE_SIGNAL: Restrict a sandboxed process from sending a signal
  *   to another process outside the domain.
- * - %LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET: Restrict a sandboxed process from
- *   connecting to a pathname UNIX socket created by a process outside the
- *   related Landlock domain.
  */
 /* clang-format off */
 #define LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET		(1ULL << 0)
-#define LANDLOCK_SCOPE_SIGNAL				(1ULL << 1)
-#define LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET		(1ULL << 2)
-/* clang-format on */
+#define LANDLOCK_SCOPE_SIGNAL		                (1ULL << 1)
+/* clang-format on*/
 
 #endif /* _UAPI_LINUX_LANDLOCK_H */

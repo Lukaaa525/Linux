@@ -110,7 +110,7 @@ static int __init processor_probe(struct parisc_device *dev)
 		unsigned long bytecnt;
 	        pdc_pat_cell_mod_maddr_block_t *pa_pdc_cell;
 
-		pa_pdc_cell = kmalloc(sizeof (*pa_pdc_cell), GFP_KERNEL);
+		pa_pdc_cell = kmalloc_obj(*pa_pdc_cell);
 		if (!pa_pdc_cell)
 			panic("couldn't allocate memory for PDC_PAT_CELL!");
 
@@ -438,7 +438,7 @@ show_cpuinfo (struct seq_file *m, void *v)
 				 cpu_name);
 
 		seq_printf(m, "hversion\t: 0x%04x\n"
-			        "sversion\t: 0x%04x\n",
+				"sversion\t: 0x%04x\n",
 				 boot_cpu_data.hversion,
 				 boot_cpu_data.sversion );
 

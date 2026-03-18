@@ -40,7 +40,6 @@
 #include "util/perf_api_probe.h"
 #include "util/trigger.h"
 #include "util/perf-hooks.h"
-#include "util/cpu-set-sched.h"
 #include "util/synthetic-events.h"
 #include "util/time-utils.h"
 #include "util/units.h"
@@ -1286,7 +1285,6 @@ static int record__mmap_evlist(struct record *rec,
 	struct record_opts *opts = &rec->opts;
 	bool auxtrace_overwrite = opts->auxtrace_snapshot_mode ||
 				  opts->auxtrace_sample_mode;
-	char msg[512];
 
 	if (opts->affinity != PERF_AFFINITY_SYS)
 		cpu__setup_cpunode_map();
@@ -1305,8 +1303,7 @@ static int record__mmap_evlist(struct record *rec,
 			       opts->mmap_pages, opts->auxtrace_mmap_pages);
 			return -errno;
 		} else {
-			pr_err("failed to mmap with %d (%s)\n", errno,
-				str_error_r(errno, msg, sizeof(msg)));
+			pr_err("failed to mmap: %m\n");
 			if (errno)
 				return -errno;
 			else
@@ -1324,7 +1321,8 @@ static int record__mmap_evlist(struct record *rec,
 	if (record__threads_enabled(rec)) {
 		ret = perf_data__create_dir(&rec->data, evlist->core.nr_mmaps);
 		if (ret) {
-			pr_err("Failed to create data directory: %s\n", strerror(-ret));
+			errno = -ret;
+			pr_err("Failed to create data directory: %m\n");
 			return ret;
 		}
 		for (i = 0; i < evlist->core.nr_mmaps; i++) {
@@ -1404,6 +1402,7 @@ try_again:
 			}
 #endif
 			if (report_error || verbose > 0) {
+				evsel__open_strerror(pos, &opts->target, errno, msg, sizeof(msg));
 				ui__error("Failure to open event '%s' on PMU '%s' which will be "
 					  "removed.\n%s\n",
 					  evsel__name(pos), evsel__pmu_name(pos), msg);
@@ -1461,9 +1460,8 @@ try_again:
 	}
 
 	if (evlist__apply_filters(evlist, &pos, &opts->target)) {
-		pr_err("failed to set filter \"%s\" on event %s with %d (%s)\n",
-			pos->filter ?: "BPF", evsel__name(pos), errno,
-			str_error_r(errno, msg, sizeof(msg)));
+		pr_err("failed to set filter \"%s\" on event %s: %m\n",
+			pos->filter ?: "BPF", evsel__name(pos));
 		rc = -1;
 		goto out;
 	}
@@ -1511,6 +1509,8 @@ static int process_buildids(struct record *rec)
 	if (perf_data__size(&rec->data) == 0)
 		return 0;
 
+	/* A single DSO is needed and not all inline frames. */
+	symbol_conf.inline_name = false;
 	/*
 	 * During this process, it'll load kernel map and replace the
 	 * dso->long_name to a real pathname it found.  In this case
@@ -1521,7 +1521,6 @@ static int process_buildids(struct record *rec)
 	 *   $HOME/.debug/.build-id/f0/6e17aa50adf4d00b88925e03775de107611551
 	 */
 	symbol_conf.ignore_vmlinux_buildid = true;
-
 	/*
 	 * If --buildid-all is given, it marks all DSO regardless of hits,
 	 * so no need to process samples. But if timestamp_boundary is enabled,
@@ -1748,8 +1747,7 @@ static void *record__thread(void *arg)
 
 	err = write(thread->pipes.ack[1], &msg, sizeof(msg));
 	if (err == -1)
-		pr_warning("threads[%d]: failed to notify on start: %s\n",
-			   thread->tid, strerror(errno));
+		pr_warning("threads[%d]: failed to notify on start: %m\n", thread->tid);
 
 	pr_debug("threads[%d]: started on cpu%d\n", thread->tid, sched_getcpu());
 
@@ -1792,8 +1790,7 @@ static void *record__thread(void *arg)
 
 	err = write(thread->pipes.ack[1], &msg, sizeof(msg));
 	if (err == -1)
-		pr_warning("threads[%d]: failed to notify on termination: %s\n",
-			   thread->tid, strerror(errno));
+		pr_warning("threads[%d]: failed to notify on termination: %m\n", thread->tid);
 
 	return NULL;
 }
@@ -2338,7 +2335,7 @@ static int record__start_threads(struct record *rec)
 
 	sigfillset(&full);
 	if (sigprocmask(SIG_SETMASK, &full, &mask)) {
-		pr_err("Failed to block signals on threads start: %s\n", strerror(errno));
+		pr_err("Failed to block signals on threads start: %m\n");
 		return -1;
 	}
 
@@ -2356,7 +2353,7 @@ static int record__start_threads(struct record *rec)
 		if (pthread_create(&handle, &attrs, record__thread, &thread_data[t])) {
 			for (tt = 1; tt < t; tt++)
 				record__terminate_thread(&thread_data[t]);
-			pr_err("Failed to start threads: %s\n", strerror(errno));
+			pr_err("Failed to start threads: %m\n");
 			ret = -1;
 			goto out_err;
 		}
@@ -2379,7 +2376,7 @@ out_err:
 	pthread_attr_destroy(&attrs);
 
 	if (sigprocmask(SIG_SETMASK, &mask, NULL)) {
-		pr_err("Failed to unblock signals on threads start: %s\n", strerror(errno));
+		pr_err("Failed to unblock signals on threads start: %m\n");
 		ret = -1;
 	}
 

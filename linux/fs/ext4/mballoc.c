@@ -2266,7 +2266,7 @@ static void ext4_mb_use_best_found(struct ext4_allocation_context *ac,
 	folio_get(ac->ac_buddy_folio);
 	/* store last allocated for subsequent stream allocation */
 	if (ac->ac_flags & EXT4_MB_STREAM_ALLOC) {
-		int hash = ac->ac_inode->i_ino % sbi->s_mb_nr_global_goals;
+		int hash = (unsigned int)ac->ac_inode->i_ino % sbi->s_mb_nr_global_goals;
 
 		WRITE_ONCE(sbi->s_mb_last_groups[hash], ac->ac_f_ex.fe_group);
 	}
@@ -3032,7 +3032,7 @@ ext4_mb_regular_allocator(struct ext4_allocation_context *ac)
 
 	/* if stream allocation is enabled, use global goal */
 	if (ac->ac_flags & EXT4_MB_STREAM_ALLOC) {
-		int hash = ac->ac_inode->i_ino % sbi->s_mb_nr_global_goals;
+		int hash = (unsigned int)ac->ac_inode->i_ino % sbi->s_mb_nr_global_goals;
 
 		ac->ac_g_ex.fe_group = READ_ONCE(sbi->s_mb_last_groups[hash]);
 		ac->ac_g_ex.fe_start = -1;
@@ -3754,8 +3754,7 @@ int ext4_mb_init(struct super_block *sb)
 	} while (i < MB_NUM_ORDERS(sb));
 
 	sbi->s_mb_avg_fragment_size =
-		kmalloc_array(MB_NUM_ORDERS(sb), sizeof(struct xarray),
-			GFP_KERNEL);
+		kmalloc_objs(struct xarray, MB_NUM_ORDERS(sb));
 	if (!sbi->s_mb_avg_fragment_size) {
 		ret = -ENOMEM;
 		goto out;
@@ -3764,8 +3763,7 @@ int ext4_mb_init(struct super_block *sb)
 		xa_init(&sbi->s_mb_avg_fragment_size[i]);
 
 	sbi->s_mb_largest_free_orders =
-		kmalloc_array(MB_NUM_ORDERS(sb), sizeof(struct xarray),
-			GFP_KERNEL);
+		kmalloc_objs(struct xarray, MB_NUM_ORDERS(sb));
 	if (!sbi->s_mb_largest_free_orders) {
 		ret = -ENOMEM;
 		goto out;
@@ -3817,8 +3815,8 @@ int ext4_mb_init(struct super_block *sb)
 
 	sbi->s_mb_nr_global_goals = umin(num_possible_cpus(),
 					 DIV_ROUND_UP(sbi->s_groups_count, 4));
-	sbi->s_mb_last_groups = kcalloc(sbi->s_mb_nr_global_goals,
-					sizeof(ext4_group_t), GFP_KERNEL);
+	sbi->s_mb_last_groups = kzalloc_objs(ext4_group_t,
+					     sbi->s_mb_nr_global_goals);
 	if (sbi->s_mb_last_groups == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -3838,7 +3836,7 @@ int ext4_mb_init(struct super_block *sb)
 		spin_lock_init(&lg->lg_prealloc_lock);
 	}
 
-	if (bdev_nonrot(sb->s_bdev))
+	if (!bdev_rot(sb->s_bdev))
 		sbi->s_mb_max_linear_groups = 0;
 	else
 		sbi->s_mb_max_linear_groups = MB_DEFAULT_LINEAR_LIMIT;
@@ -5630,7 +5628,7 @@ void ext4_discard_preallocations(struct inode *inode)
 	if (EXT4_SB(sb)->s_mount_state & EXT4_FC_REPLAY)
 		return;
 
-	mb_debug(sb, "discard preallocation for inode %lu\n",
+	mb_debug(sb, "discard preallocation for inode %llu\n",
 		 inode->i_ino);
 	trace_ext4_discard_preallocations(inode,
 			atomic_read(&ei->i_prealloc_active));

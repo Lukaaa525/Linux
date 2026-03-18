@@ -382,7 +382,7 @@ static struct btrfs_fs_devices *alloc_fs_devices(const u8 *fsid)
 {
 	struct btrfs_fs_devices *fs_devs;
 
-	fs_devs = kzalloc(sizeof(*fs_devs), GFP_KERNEL);
+	fs_devs = kzalloc_obj(*fs_devs);
 	if (!fs_devs)
 		return ERR_PTR(-ENOMEM);
 
@@ -392,6 +392,7 @@ static struct btrfs_fs_devices *alloc_fs_devices(const u8 *fsid)
 	INIT_LIST_HEAD(&fs_devs->alloc_list);
 	INIT_LIST_HEAD(&fs_devs->fs_list);
 	INIT_LIST_HEAD(&fs_devs->seed_list);
+	spin_lock_init(&fs_devs->per_profile_lock);
 
 	if (fsid) {
 		memcpy(fs_devs->fsid, fsid, BTRFS_FSID_SIZE);
@@ -694,7 +695,7 @@ static int btrfs_open_one_device(struct btrfs_fs_devices *fs_devices,
 			set_bit(BTRFS_DEV_STATE_WRITEABLE, &device->dev_state);
 	}
 
-	if (!bdev_nonrot(file_bdev(bdev_file)))
+	if (bdev_rot(file_bdev(bdev_file)))
 		fs_devices->rotating = true;
 
 	if (bdev_max_discard_sectors(file_bdev(bdev_file)))
@@ -1509,28 +1510,156 @@ error_bdev_put:
 }
 
 /*
- * Try to find a chunk that intersects [start, start + len] range and when one
- * such is found, record the end of it in *start
+ * Find the first pending extent intersecting a range.
+ *
+ * @device:         the device to search
+ * @start:          start of the range to check
+ * @len:            length of the range to check
+ * @pending_start:  output pointer for the start of the found pending extent
+ * @pending_end:    output pointer for the end of the found pending extent (inclusive)
+ *
+ * Search for a pending chunk allocation that intersects the half-open range
+ * [start, start + len).
+ *
+ * Return: true if a pending extent was found, false otherwise.
+ * If the return value is true, store the first pending extent in
+ * [*pending_start, *pending_end]. Otherwise, the two output variables
+ * may still be modified, to something outside the range and should not
+ * be used.
  */
-static bool contains_pending_extent(struct btrfs_device *device, u64 *start,
-				    u64 len)
+bool btrfs_first_pending_extent(struct btrfs_device *device, u64 start, u64 len,
+				u64 *pending_start, u64 *pending_end)
 {
-	u64 physical_start, physical_end;
-
 	lockdep_assert_held(&device->fs_info->chunk_mutex);
 
-	if (btrfs_find_first_extent_bit(&device->alloc_state, *start,
-					&physical_start, &physical_end,
+	if (btrfs_find_first_extent_bit(&device->alloc_state, start,
+					pending_start, pending_end,
 					CHUNK_ALLOCATED, NULL)) {
 
-		if (in_range(physical_start, *start, len) ||
-		    in_range(*start, physical_start,
-			     physical_end + 1 - physical_start)) {
-			*start = physical_end + 1;
+		if (in_range(*pending_start, start, len) ||
+		    in_range(start, *pending_start, *pending_end + 1 - *pending_start)) {
 			return true;
 		}
 	}
 	return false;
+}
+
+/*
+ * Find the first real hole accounting for pending extents.
+ *
+ * @device:         the device containing the candidate hole
+ * @start:          input/output pointer for the hole start position
+ * @len:            input/output pointer for the hole length
+ * @min_hole_size:  the size of hole we are looking for
+ *
+ * Given a potential hole specified by [*start, *start + *len), check for pending
+ * chunk allocations within that range. If pending extents are found, the hole is
+ * adjusted to represent the first true free space that is large enough when
+ * accounting for pending chunks.
+ *
+ * Note that this function must handle various cases involving non consecutive
+ * pending extents.
+ *
+ * Returns: true if a suitable hole was found and false otherwise.
+ * If the return value is true, then *start and *len are set to represent the hole.
+ * If the return value is false, then *start is set to the largest hole we
+ * found and *len is set to its length.
+ * If there are no holes at all, then *start is set to the end of the range and
+ * *len is set to 0.
+ */
+bool btrfs_find_hole_in_pending_extents(struct btrfs_device *device, u64 *start,
+					u64 *len, u64 min_hole_size)
+{
+	u64 pending_start, pending_end;
+	u64 end;
+	u64 max_hole_start = 0;
+	u64 max_hole_len = 0;
+
+	lockdep_assert_held(&device->fs_info->chunk_mutex);
+
+	if (*len == 0)
+		return false;
+
+	end = *start + *len - 1;
+
+	/*
+	 * Loop until we either see a large enough hole or check every pending
+	 * extent overlapping the candidate hole.
+	 * At every hole that we observe, record it if it is the new max.
+	 * At the end of the iteration, set the output variables to the max hole.
+	 */
+	while (true) {
+		if (btrfs_first_pending_extent(device, *start, *len, &pending_start, &pending_end)) {
+			/*
+			 * Case 1: the pending extent overlaps the start of
+			 * candidate hole. That means the true hole is after the
+			 * pending extent, but we need to find the next pending
+			 * extent to properly size the hole. In the next loop,
+			 * we will reduce to case 2 or 3.
+			 * e.g.,
+			 *
+			 *   |----pending A----|    real hole     |----pending B----|
+			 *            |           candidate hole        |
+			 *         *start                              end
+			 */
+			if (pending_start <= *start) {
+				*start = pending_end + 1;
+				goto next;
+			}
+			/*
+			 * Case 2: The pending extent starts after *start (and overlaps
+			 * [*start, end), so the first hole just goes up to the start
+			 * of the pending extent.
+			 * e.g.,
+			 *
+			 *   |    real hole    |----pending A----|
+			 *   |       candidate hole     |
+			 * *start                      end
+			 */
+			*len = pending_start - *start;
+			if (*len > max_hole_len) {
+				max_hole_start = *start;
+				max_hole_len = *len;
+			}
+			if (*len >= min_hole_size)
+				break;
+			/*
+			 * If the hole wasn't big enough, then we advance past
+			 * the pending extent and keep looking.
+			 */
+			*start = pending_end + 1;
+			goto next;
+		} else {
+			/*
+			 * Case 3: There is no pending extent overlapping the
+			 * range [*start, *start + *len - 1], so the only remaining
+			 * hole is the remaining range.
+			 * e.g.,
+			 *
+			 *   |       candidate hole           |
+			 *   |          real hole             |
+			 * *start                            end
+			 */
+
+			if (*len > max_hole_len) {
+				max_hole_start = *start;
+				max_hole_len = *len;
+			}
+			break;
+		}
+next:
+		if (*start > end)
+			break;
+		*len = end - *start + 1;
+	}
+	if (max_hole_len) {
+		*start = max_hole_start;
+		*len = max_hole_len;
+	} else {
+		*start = end + 1;
+		*len = 0;
+	}
+	return max_hole_len >= min_hole_size;
 }
 
 static u64 dev_extent_search_start(struct btrfs_device *device)
@@ -1597,59 +1726,57 @@ static bool dev_extent_hole_check_zoned(struct btrfs_device *device,
 }
 
 /*
- * Check if specified hole is suitable for allocation.
+ * Validate and adjust a hole for chunk allocation
  *
- * @device:	the device which we have the hole
- * @hole_start: starting position of the hole
- * @hole_size:	the size of the hole
- * @num_bytes:	the size of the free space that we need
+ * @device:      the device containing the candidate hole
+ * @hole_start:  input/output pointer for the hole start position
+ * @hole_size:   input/output pointer for the hole size
+ * @num_bytes:   minimum allocation size required
  *
- * This function may modify @hole_start and @hole_size to reflect the suitable
- * position for allocation. Returns 1 if hole position is updated, 0 otherwise.
+ * Check if the specified hole is suitable for allocation and adjust it if
+ * necessary. The hole may be modified to skip over pending chunk allocations
+ * and to satisfy stricter zoned requirements on zoned filesystems.
+ *
+ * For regular (non-zoned) allocation, if the hole after adjustment is smaller
+ * than @num_bytes, the search continues past additional pending extents until
+ * either a sufficiently large hole is found or no more pending extents exist.
+ *
+ * Return: true if a suitable hole was found and false otherwise.
+ * If the return value is true, then *hole_start and *hole_size are set to
+ * represent the hole we found.
+ * If the return value is false, then *hole_start is set to the largest
+ * hole we found and *hole_size is set to its length.
+ * If there are no holes at all, then *hole_start is set to the end of the range
+ * and *hole_size is set to 0.
  */
 static bool dev_extent_hole_check(struct btrfs_device *device, u64 *hole_start,
 				  u64 *hole_size, u64 num_bytes)
 {
-	bool changed = false;
-	u64 hole_end = *hole_start + *hole_size;
+	bool found = false;
+	const u64 hole_end = *hole_start + *hole_size - 1;
 
-	for (;;) {
-		/*
-		 * Check before we set max_hole_start, otherwise we could end up
-		 * sending back this offset anyway.
-		 */
-		if (contains_pending_extent(device, hole_start, *hole_size)) {
-			if (hole_end >= *hole_start)
-				*hole_size = hole_end - *hole_start;
-			else
-				*hole_size = 0;
-			changed = true;
-		}
+	ASSERT(*hole_size > 0);
 
-		switch (device->fs_devices->chunk_alloc_policy) {
-		default:
-			btrfs_warn_unknown_chunk_allocation(device->fs_devices->chunk_alloc_policy);
-			fallthrough;
-		case BTRFS_CHUNK_ALLOC_REGULAR:
-			/* No extra check */
-			break;
-		case BTRFS_CHUNK_ALLOC_ZONED:
-			if (dev_extent_hole_check_zoned(device, hole_start,
-							hole_size, num_bytes)) {
-				changed = true;
-				/*
-				 * The changed hole can contain pending extent.
-				 * Loop again to check that.
-				 */
-				continue;
-			}
-			break;
-		}
+again:
+	*hole_size = hole_end - *hole_start + 1;
+	found = btrfs_find_hole_in_pending_extents(device, hole_start, hole_size, num_bytes);
+	if (!found)
+		return found;
+	ASSERT(*hole_size >= num_bytes);
 
+	switch (device->fs_devices->chunk_alloc_policy) {
+	default:
+		btrfs_warn_unknown_chunk_allocation(device->fs_devices->chunk_alloc_policy);
+		fallthrough;
+	case BTRFS_CHUNK_ALLOC_REGULAR:
+		return found;
+	case BTRFS_CHUNK_ALLOC_ZONED:
+		if (dev_extent_hole_check_zoned(device, hole_start, hole_size, num_bytes))
+			goto again;
 		break;
 	}
 
-	return changed;
+	return found;
 }
 
 /*
@@ -1708,7 +1835,7 @@ static int find_free_dev_extent(struct btrfs_device *device, u64 num_bytes,
 		ret = -ENOMEM;
 		goto out;
 	}
-again:
+
 	if (search_start >= search_end ||
 		test_bit(BTRFS_DEV_STATE_REPLACE_TGT, &device->dev_state)) {
 		ret = -ENOSPC;
@@ -1795,11 +1922,7 @@ next:
 	 */
 	if (search_end > search_start) {
 		hole_size = search_end - search_start;
-		if (dev_extent_hole_check(device, &search_start, &hole_size,
-					  num_bytes)) {
-			btrfs_release_path(path);
-			goto again;
-		}
+		dev_extent_hole_check(device, &search_start, &hole_size, num_bytes);
 
 		if (hole_size > max_hole_size) {
 			max_hole_start = search_start;
@@ -2217,6 +2340,7 @@ int btrfs_rm_device(struct btrfs_fs_info *fs_info,
 		mutex_lock(&fs_info->chunk_mutex);
 		list_del_init(&device->dev_alloc_list);
 		device->fs_devices->rw_devices--;
+		btrfs_update_per_profile_avail(fs_info);
 		mutex_unlock(&fs_info->chunk_mutex);
 	}
 
@@ -2328,6 +2452,7 @@ error_undo:
 		list_add(&device->dev_alloc_list,
 			 &fs_devices->alloc_list);
 		device->fs_devices->rw_devices++;
+		btrfs_update_per_profile_avail(fs_info);
 		mutex_unlock(&fs_info->chunk_mutex);
 	}
 	return ret;
@@ -2797,7 +2922,7 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 
 	atomic64_add(device->total_bytes, &fs_info->free_chunk_space);
 
-	if (!bdev_nonrot(device->bdev))
+	if (bdev_rot(device->bdev))
 		fs_devices->rotating = true;
 
 	orig_super_total_bytes = btrfs_super_total_bytes(fs_info->super_copy);
@@ -2815,6 +2940,7 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 	 */
 	btrfs_clear_space_info_full(fs_info);
 
+	btrfs_update_per_profile_avail(fs_info);
 	mutex_unlock(&fs_info->chunk_mutex);
 
 	/* Add sysfs device entry */
@@ -2825,6 +2951,7 @@ int btrfs_init_new_device(struct btrfs_fs_info *fs_info, const char *device_path
 	if (seeding_dev) {
 		mutex_lock(&fs_info->chunk_mutex);
 		ret = init_first_rw_device(trans);
+		btrfs_update_per_profile_avail(fs_info);
 		mutex_unlock(&fs_info->chunk_mutex);
 		if (unlikely(ret)) {
 			btrfs_abort_transaction(trans, ret);
@@ -2907,6 +3034,7 @@ error_sysfs:
 				    orig_super_total_bytes);
 	btrfs_set_super_num_devices(fs_info->super_copy,
 				    orig_super_num_devices);
+	btrfs_update_per_profile_avail(fs_info);
 	mutex_unlock(&fs_info->chunk_mutex);
 	mutex_unlock(&fs_info->fs_devices->device_list_mutex);
 error_trans:
@@ -2999,6 +3127,7 @@ int btrfs_grow_device(struct btrfs_trans_handle *trans,
 	if (list_empty(&device->post_commit_list))
 		list_add_tail(&device->post_commit_list,
 			      &trans->transaction->dev_update_list);
+	btrfs_update_per_profile_avail(fs_info);
 	mutex_unlock(&fs_info->chunk_mutex);
 
 	btrfs_reserve_chunk_metadata(trans, false);
@@ -3375,6 +3504,7 @@ int btrfs_remove_chunk(struct btrfs_trans_handle *trans, u64 chunk_offset)
 		}
 	}
 
+	btrfs_update_per_profile_avail(fs_info);
 	mutex_unlock(&fs_info->chunk_mutex);
 	trans->removing_chunk = false;
 
@@ -3384,11 +3514,10 @@ int btrfs_remove_chunk(struct btrfs_trans_handle *trans, u64 chunk_offset)
 	 */
 	btrfs_trans_release_chunk_metadata(trans);
 
+	/* On error, btrfs_remove_block_group() aborts the transaction. */
 	ret = btrfs_remove_block_group(trans, map);
-	if (unlikely(ret)) {
-		btrfs_abort_transaction(trans, ret);
-		goto out;
-	}
+	if (unlikely(ret))
+		ASSERT(BTRFS_FS_ERROR(fs_info) != 0);
 
 out:
 	if (trans->removing_chunk) {
@@ -3466,7 +3595,7 @@ int btrfs_relocate_chunk(struct btrfs_fs_info *fs_info, u64 chunk_offset, bool v
 
 	/* step one, relocate all the extents inside this chunk */
 	btrfs_scrub_pause(fs_info);
-	ret = btrfs_relocate_block_group(fs_info, chunk_offset, true);
+	ret = btrfs_relocate_block_group(fs_info, chunk_offset, verbose);
 	btrfs_scrub_continue(fs_info);
 	if (ret) {
 		/*
@@ -4156,20 +4285,29 @@ static int balance_remap_chunks(struct btrfs_fs_info *fs_info, struct btrfs_path
 end:
 	while (!list_empty(chunks)) {
 		bool is_unused;
+		struct btrfs_block_group *bg;
 
 		rci = list_first_entry(chunks, struct remap_chunk_info, list);
 
-		spin_lock(&rci->bg->lock);
-		is_unused = !btrfs_is_block_group_used(rci->bg);
-		spin_unlock(&rci->bg->lock);
+		bg = rci->bg;
+		if (bg) {
+			/*
+			 * This is a bit racy and the 'used' status can change
+			 * but this is not a problem as later functions will
+			 * verify it again.
+			 */
+			spin_lock(&bg->lock);
+			is_unused = !btrfs_is_block_group_used(bg);
+			spin_unlock(&bg->lock);
 
-		if (is_unused)
-			btrfs_mark_bg_unused(rci->bg);
+			if (is_unused)
+				btrfs_mark_bg_unused(bg);
 
-		if (rci->made_ro)
-			btrfs_dec_block_group_ro(rci->bg);
+			if (rci->made_ro)
+				btrfs_dec_block_group_ro(bg);
 
-		btrfs_put_block_group(rci->bg);
+			btrfs_put_block_group(bg);
+		}
 
 		list_del(&rci->list);
 		kfree(rci);
@@ -4246,8 +4384,14 @@ again:
 		 * this shouldn't happen, it means the last relocate
 		 * failed
 		 */
-		if (ret == 0)
-			BUG(); /* FIXME break ? */
+		if (unlikely(ret == 0)) {
+			btrfs_err(fs_info,
+				  "unexpected exact match of CHUNK_ITEM in chunk tree, offset 0x%llx",
+				  key.offset);
+			mutex_unlock(&fs_info->reclaim_bgs_lock);
+			ret = -EUCLEAN;
+			goto error;
+		}
 
 		ret = btrfs_previous_item(chunk_root, path, 0,
 					  BTRFS_CHUNK_ITEM_KEY);
@@ -4329,7 +4473,7 @@ again:
 		if (chunk_type & BTRFS_BLOCK_GROUP_METADATA_REMAP) {
 			mutex_unlock(&fs_info->reclaim_bgs_lock);
 
-			rci = kmalloc(sizeof(struct remap_chunk_info), GFP_NOFS);
+			rci = kmalloc_obj(struct remap_chunk_info, GFP_NOFS);
 			if (!rci) {
 				ret = -ENOMEM;
 				goto error;
@@ -4877,7 +5021,7 @@ int btrfs_recover_balance(struct btrfs_fs_info *fs_info)
 		return 0;
 	}
 
-	bctl = kzalloc(sizeof(*bctl), GFP_NOFS);
+	bctl = kzalloc_obj(*bctl, GFP_NOFS);
 	if (!bctl)
 		return -ENOMEM;
 
@@ -5023,6 +5167,7 @@ int btrfs_shrink_device(struct btrfs_device *device, u64 new_size)
 	u64 diff;
 	u64 start;
 	u64 free_diff = 0;
+	u64 pending_start, pending_end;
 
 	new_size = round_down(new_size, fs_info->sectorsize);
 	start = new_size;
@@ -5063,12 +5208,13 @@ int btrfs_shrink_device(struct btrfs_device *device, u64 new_size)
 		atomic64_sub(free_diff, &fs_info->free_chunk_space);
 	}
 
+	btrfs_update_per_profile_avail(fs_info);
 	/*
 	 * Once the device's size has been set to the new size, ensure all
 	 * in-memory chunks are synced to disk so that the loop below sees them
 	 * and relocates them accordingly.
 	 */
-	if (contains_pending_extent(device, &start, diff)) {
+	if (btrfs_first_pending_extent(device, start, diff, &pending_start, &pending_end)) {
 		mutex_unlock(&fs_info->chunk_mutex);
 		ret = btrfs_commit_transaction(trans);
 		if (ret)
@@ -5178,6 +5324,7 @@ again:
 	WARN_ON(diff > old_total);
 	btrfs_set_super_total_bytes(super_copy,
 			round_down(old_total - diff, fs_info->sectorsize));
+	btrfs_update_per_profile_avail(fs_info);
 	mutex_unlock(&fs_info->chunk_mutex);
 
 	btrfs_reserve_chunk_metadata(trans, false);
@@ -5248,6 +5395,168 @@ static int btrfs_cmp_device_info(const void *a, const void *b)
 	if (di_a->total_avail < di_b->total_avail)
 		return 1;
 	return 0;
+}
+
+/*
+ * Return 0 if we allocated any virtual(*) chunk, and restore the size to
+ * @allocated.
+ * Return -ENOSPC if we have no more space to allocate virtual chunk
+ *
+ * *: A virtual chunk is a chunk that only exists during per-profile available
+ *    estimation.
+ *    Those numbers won't really take on-disk space, but only to emulate
+ *    chunk allocator behavior to get accurate estimation on available space.
+ *
+ *    Another difference is, a virtual chunk has no size limit and doesn't care
+ *    about holes in the device tree, allowing us to exhaust device space
+ *    much faster.
+ */
+static int alloc_virtual_chunk(struct btrfs_fs_info *fs_info,
+			       struct btrfs_device_info *devices_info,
+			       enum btrfs_raid_types type,
+			       u64 *allocated)
+{
+	const struct btrfs_raid_attr *raid_attr = &btrfs_raid_array[type];
+	struct btrfs_fs_devices *fs_devices = fs_info->fs_devices;
+	struct btrfs_device *device;
+	u64 stripe_size;
+	int ndevs = 0;
+
+	lockdep_assert_held(&fs_info->chunk_mutex);
+
+	/* Go through devices to collect their unallocated space. */
+	list_for_each_entry(device, &fs_devices->alloc_list, dev_alloc_list) {
+		u64 avail;
+
+		if (!test_bit(BTRFS_DEV_STATE_IN_FS_METADATA,
+					&device->dev_state) ||
+		    test_bit(BTRFS_DEV_STATE_REPLACE_TGT, &device->dev_state))
+			continue;
+
+		if (device->total_bytes > device->bytes_used +
+				device->per_profile_allocated)
+			avail = device->total_bytes - device->bytes_used -
+				device->per_profile_allocated;
+		else
+			avail = 0;
+
+		avail = round_down(avail, fs_info->sectorsize);
+
+		/* And exclude the [0, 1M) reserved space. */
+		if (avail > BTRFS_DEVICE_RANGE_RESERVED)
+			avail -= BTRFS_DEVICE_RANGE_RESERVED;
+		else
+			avail = 0;
+
+		/*
+		 * Not enough to support a single stripe, this device
+		 * can not be utilized for chunk allocation.
+		 */
+		if (avail < BTRFS_STRIPE_LEN)
+			continue;
+
+		/*
+		 * Unlike chunk allocator, we don't care about stripe or hole
+		 * size, so here we use @avail directly.
+		 */
+		devices_info[ndevs].dev_offset = 0;
+		devices_info[ndevs].total_avail = avail;
+		devices_info[ndevs].max_avail = avail;
+		devices_info[ndevs].dev = device;
+		++ndevs;
+	}
+	sort(devices_info, ndevs, sizeof(struct btrfs_device_info),
+	     btrfs_cmp_device_info, NULL);
+	ndevs = rounddown(ndevs, raid_attr->devs_increment);
+	if (ndevs < raid_attr->devs_min)
+		return -ENOSPC;
+	if (raid_attr->devs_max)
+		ndevs = min(ndevs, (int)raid_attr->devs_max);
+	else
+		ndevs = min(ndevs, (int)BTRFS_MAX_DEVS(fs_info));
+
+	/*
+	 * Stripe size will be determined by the device with the least
+	 * unallocated space.
+	 */
+	stripe_size = devices_info[ndevs - 1].total_avail;
+
+	for (int i = 0; i < ndevs; i++)
+		devices_info[i].dev->per_profile_allocated += stripe_size;
+	*allocated = div_u64(stripe_size * (ndevs - raid_attr->nparity),
+			     raid_attr->ncopies);
+	return 0;
+}
+
+static int calc_one_profile_avail(struct btrfs_fs_info *fs_info,
+				  enum btrfs_raid_types type,
+				  u64 *result_ret)
+{
+	struct btrfs_device_info *devices_info = NULL;
+	struct btrfs_fs_devices *fs_devices = fs_info->fs_devices;
+	struct btrfs_device *device;
+	u64 allocated;
+	u64 result = 0;
+	int ret = 0;
+
+	lockdep_assert_held(&fs_info->chunk_mutex);
+	ASSERT(type >= 0 && type < BTRFS_NR_RAID_TYPES);
+
+	/* Not enough devices, quick exit, just update the result. */
+	if (fs_devices->rw_devices < btrfs_raid_array[type].devs_min) {
+		ret = -ENOSPC;
+		goto out;
+	}
+
+	devices_info = kzalloc_objs(*devices_info, fs_devices->rw_devices, GFP_NOFS);
+	if (!devices_info) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	/* Clear virtual chunk used space for each device. */
+	list_for_each_entry(device, &fs_devices->alloc_list, dev_alloc_list)
+		device->per_profile_allocated = 0;
+
+	while (!alloc_virtual_chunk(fs_info, devices_info, type, &allocated))
+		result += allocated;
+
+out:
+	kfree(devices_info);
+	if (ret < 0 && ret != -ENOSPC)
+		return ret;
+	*result_ret = result;
+	return 0;
+}
+
+/* Update the per-profile available space array. */
+void btrfs_update_per_profile_avail(struct btrfs_fs_info *fs_info)
+{
+	u64 results[BTRFS_NR_RAID_TYPES];
+	int ret;
+
+	/*
+	 * Zoned is more complex as we can not simply get the amount of
+	 * available space for each device.
+	 */
+	if (btrfs_is_zoned(fs_info))
+		goto error;
+
+	for (int i = 0; i < BTRFS_NR_RAID_TYPES; i++) {
+		ret = calc_one_profile_avail(fs_info, i, &results[i]);
+		if (ret < 0)
+			goto error;
+	}
+
+	spin_lock(&fs_info->fs_devices->per_profile_lock);
+	for (int i = 0; i < BTRFS_NR_RAID_TYPES; i++)
+		fs_info->fs_devices->per_profile_avail[i] = results[i];
+	spin_unlock(&fs_info->fs_devices->per_profile_lock);
+	return;
+error:
+	spin_lock(&fs_info->fs_devices->per_profile_lock);
+	for (int i = 0; i < BTRFS_NR_RAID_TYPES; i++)
+		fs_info->fs_devices->per_profile_avail[i] = U64_MAX;
+	spin_unlock(&fs_info->fs_devices->per_profile_lock);
 }
 
 static void check_raid56_incompat_flag(struct btrfs_fs_info *info, u64 type)
@@ -5727,6 +6036,8 @@ static struct btrfs_block_group *create_chunk(struct btrfs_trans_handle *trans,
 	check_raid56_incompat_flag(info, type);
 	check_raid1c34_incompat_flag(info, type);
 
+	btrfs_update_per_profile_avail(info);
+
 	return block_group;
 }
 
@@ -5764,8 +6075,7 @@ struct btrfs_block_group *btrfs_create_chunk(struct btrfs_trans_handle *trans,
 	ctl.space_info = space_info;
 	init_alloc_chunk_ctl(fs_devices, &ctl);
 
-	devices_info = kcalloc(fs_devices->rw_devices, sizeof(*devices_info),
-			       GFP_NOFS);
+	devices_info = kzalloc_objs(*devices_info, fs_devices->rw_devices, GFP_NOFS);
 	if (!devices_info)
 		return ERR_PTR(-ENOMEM);
 
@@ -6210,7 +6520,7 @@ struct btrfs_io_context *alloc_btrfs_io_context(struct btrfs_fs_info *fs_info,
 {
 	struct btrfs_io_context *bioc;
 
-	bioc = kzalloc(struct_size(bioc, stripes, total_stripes), GFP_NOFS);
+	bioc = kzalloc_flex(*bioc, stripes, total_stripes, GFP_NOFS);
 
 	if (!bioc)
 		return NULL;
@@ -6343,7 +6653,7 @@ struct btrfs_discard_stripe *btrfs_map_discard(struct btrfs_fs_info *fs_info,
 		stripe_nr /= map->num_stripes;
 	}
 
-	stripes = kcalloc(*num_stripes, sizeof(*stripes), GFP_NOFS);
+	stripes = kzalloc_objs(*stripes, *num_stripes, GFP_NOFS);
 	if (!stripes) {
 		ret = -ENOMEM;
 		goto out_free_map;
@@ -6779,7 +7089,7 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
 
 		ret = btrfs_translate_remap(fs_info, &new_logical, length);
 		if (ret)
-			return ret;
+			goto out;
 
 		if (new_logical != logical) {
 			btrfs_free_chunk_map(map);
@@ -6793,8 +7103,10 @@ int btrfs_map_block(struct btrfs_fs_info *fs_info, enum btrfs_map_op op,
 	}
 
 	num_copies = btrfs_chunk_map_num_copies(map);
-	if (io_geom.mirror_num > num_copies)
-		return -EINVAL;
+	if (io_geom.mirror_num > num_copies) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	map_offset = logical - map->start;
 	io_geom.raid56_full_stripe_start = (u64)-1;
@@ -7074,7 +7386,7 @@ struct btrfs_device *btrfs_alloc_device(struct btrfs_fs_info *fs_info,
 	if (WARN_ON(!devid && !fs_info))
 		return ERR_PTR(-EINVAL);
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
@@ -7576,10 +7888,9 @@ bool btrfs_check_rw_degradable(struct btrfs_fs_info *fs_info,
 
 	map = btrfs_find_chunk_map(fs_info, 0, U64_MAX);
 	/* No chunk at all? Return false anyway */
-	if (!map) {
-		ret = false;
-		goto out;
-	}
+	if (!map)
+		return false;
+
 	while (map) {
 		int missing = 0;
 		int max_tolerated;
@@ -7604,15 +7915,14 @@ bool btrfs_check_rw_degradable(struct btrfs_fs_info *fs_info,
 	"chunk %llu missing %d devices, max tolerance is %d for writable mount",
 				   map->start, missing, max_tolerated);
 			btrfs_free_chunk_map(map);
-			ret = false;
-			goto out;
+			return false;
 		}
 		next_start = map->start + map->chunk_len;
 		btrfs_free_chunk_map(map);
 
 		map = btrfs_find_chunk_map(fs_info, next_start, U64_MAX - next_start);
 	}
-out:
+
 	return ret;
 }
 
@@ -8301,7 +8611,14 @@ int btrfs_verify_dev_extents(struct btrfs_fs_info *fs_info)
 	}
 
 	/* Ensure all chunks have corresponding dev extents */
-	return verify_chunk_dev_extent_mapping(fs_info);
+	ret = verify_chunk_dev_extent_mapping(fs_info);
+	if (ret < 0)
+		return ret;
+
+	mutex_lock(&fs_info->chunk_mutex);
+	btrfs_update_per_profile_avail(fs_info);
+	mutex_unlock(&fs_info->chunk_mutex);
+	return 0;
 }
 
 /*

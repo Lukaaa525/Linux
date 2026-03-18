@@ -528,7 +528,7 @@ ax25_cb *ax25_create_cb(void)
 {
 	ax25_cb *ax25;
 
-	if ((ax25 = kzalloc(sizeof(*ax25), GFP_ATOMIC)) == NULL)
+	if ((ax25 = kzalloc_obj(*ax25, GFP_ATOMIC)) == NULL)
 		return NULL;
 
 	refcount_set(&ax25->refcount, 1);
@@ -1249,7 +1249,7 @@ static int __must_check ax25_connect(struct socket *sock,
 			goto out_release;
 		}
 
-		if ((digi = kmalloc(sizeof(ax25_digi), GFP_KERNEL)) == NULL) {
+		if ((digi = kmalloc_obj(ax25_digi)) == NULL) {
 			err = -ENOBUFS;
 			goto out_release;
 		}
@@ -1986,7 +1986,7 @@ static int ax25_info_show(struct seq_file *seq, void *v)
 		   ax25->paclen);
 
 	if (ax25->sk != NULL) {
-		seq_printf(seq, " %d %d %lu\n",
+		seq_printf(seq, " %d %d %llu\n",
 			   sk_wmem_alloc_get(ax25->sk),
 			   sk_rmem_alloc_get(ax25->sk),
 			   sock_i_ino(ax25->sk));

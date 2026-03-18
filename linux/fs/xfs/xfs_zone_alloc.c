@@ -78,7 +78,7 @@ xfs_zone_account_reclaimable(
 	struct xfs_rtgroup	*rtg,
 	uint32_t		freed)
 {
-	struct xfs_group	*xg = &rtg->rtg_group;
+	struct xfs_group	*xg = rtg_group(rtg);
 	struct xfs_mount	*mp = rtg_mount(rtg);
 	struct xfs_zone_info	*zi = mp->m_zone_info;
 	uint32_t		used = rtg_rmap(rtg)->i_used_blocks;
@@ -189,27 +189,16 @@ xfs_open_zone_mark_full(
 		xfs_zone_account_reclaimable(rtg, rtg_blocks(rtg) - used);
 }
 
-static void
-xfs_zone_record_blocks(
-	struct xfs_trans	*tp,
+static inline void
+xfs_zone_inc_written(
 	struct xfs_open_zone	*oz,
-	xfs_fsblock_t		fsbno,
 	xfs_filblks_t		len)
 {
-	struct xfs_mount	*mp = tp->t_mountp;
-	struct xfs_rtgroup	*rtg = oz->oz_rtg;
-	struct xfs_inode	*rmapip = rtg_rmap(rtg);
+	xfs_assert_ilocked(rtg_rmap(oz->oz_rtg), XFS_ILOCK_EXCL);
 
-	trace_xfs_zone_record_blocks(oz, xfs_rtb_to_rgbno(mp, fsbno), len);
-
-	xfs_rtgroup_lock(rtg, XFS_RTGLOCK_RMAP);
-	xfs_rtgroup_trans_join(tp, rtg, XFS_RTGLOCK_RMAP);
-	rmapip->i_used_blocks += len;
-	ASSERT(rmapip->i_used_blocks <= rtg_blocks(rtg));
 	oz->oz_written += len;
-	if (oz->oz_written == rtg_blocks(rtg))
+	if (oz->oz_written == rtg_blocks(oz->oz_rtg))
 		xfs_open_zone_mark_full(oz);
-	xfs_trans_log_inode(tp, rmapip, XFS_ILOG_CORE);
 }
 
 /*
@@ -227,9 +216,7 @@ xfs_zone_skip_blocks(
 	trace_xfs_zone_skip_blocks(oz, 0, len);
 
 	xfs_rtgroup_lock(rtg, XFS_RTGLOCK_RMAP);
-	oz->oz_written += len;
-	if (oz->oz_written == rtg_blocks(rtg))
-		xfs_open_zone_mark_full(oz);
+	xfs_zone_inc_written(oz, len);
 	xfs_rtgroup_unlock(rtg, XFS_RTGLOCK_RMAP);
 
 	xfs_add_frextents(rtg_mount(rtg), len);
@@ -244,6 +231,8 @@ xfs_zoned_map_extent(
 	xfs_fsblock_t		old_startblock)
 {
 	struct xfs_bmbt_irec	data;
+	struct xfs_rtgroup	*rtg = oz->oz_rtg;
+	struct xfs_inode	*rmapip = rtg_rmap(rtg);
 	int			nmaps = 1;
 	int			error;
 
@@ -302,7 +291,15 @@ xfs_zoned_map_extent(
 		}
 	}
 
-	xfs_zone_record_blocks(tp, oz, new->br_startblock, new->br_blockcount);
+	trace_xfs_zone_record_blocks(oz,
+		xfs_rtb_to_rgbno(tp->t_mountp, new->br_startblock),
+		new->br_blockcount);
+	xfs_rtgroup_lock(rtg, XFS_RTGLOCK_RMAP);
+	xfs_rtgroup_trans_join(tp, rtg, XFS_RTGLOCK_RMAP);
+	rmapip->i_used_blocks += new->br_blockcount;
+	ASSERT(rmapip->i_used_blocks <= rtg_blocks(rtg));
+	xfs_zone_inc_written(oz, new->br_blockcount);
+	xfs_trans_log_inode(tp, rmapip, XFS_ILOG_CORE);
 
 	/* Map the new blocks into the data fork. */
 	xfs_bmap_map_extent(tp, ip, XFS_DATA_FORK, new);
@@ -417,7 +414,7 @@ xfs_init_open_zone(
 {
 	struct xfs_open_zone	*oz;
 
-	oz = kzalloc(sizeof(*oz), GFP_NOFS | __GFP_NOFAIL);
+	oz = kzalloc_obj(*oz, GFP_NOFS | __GFP_NOFAIL);
 	spin_lock_init(&oz->oz_alloc_lock);
 	atomic_set(&oz->oz_ref, 1);
 	oz->oz_rtg = rtg;
@@ -681,10 +678,11 @@ xfs_select_zone_nowait(
 	if (oz)
 		goto out_unlock;
 
-	if (pack_tight)
+	if (pack_tight) {
 		oz = xfs_select_open_zone_mru(zi, write_hint);
-	if (oz)
-		goto out_unlock;
+		if (oz)
+			goto out_unlock;
+	}
 
 	/*
 	 * See if we can open a new zone and use that so that data for different
@@ -695,7 +693,7 @@ xfs_select_zone_nowait(
 		goto out_unlock;
 
 	/*
-	 * Try to find an zone that is an ok match to colocate data with.
+	 * Try to find a zone that is an ok match to colocate data with.
 	 */
 	oz = xfs_select_open_zone_lru(zi, write_hint, XFS_ZONE_ALLOC_OK);
 	if (oz)
@@ -759,7 +757,7 @@ xfs_zone_alloc_blocks(
 
 	trace_xfs_zone_alloc_blocks(oz, allocated, count_fsb);
 
-	*sector = xfs_gbno_to_daddr(&rtg->rtg_group, 0);
+	*sector = xfs_gbno_to_daddr(rtg_group(rtg), 0);
 	*is_seq = bdev_zone_is_seq(mp->m_rtdev_targp->bt_bdev, *sector);
 	if (!*is_seq)
 		*sector += XFS_FSB_TO_BB(mp, allocated);
@@ -1080,7 +1078,7 @@ xfs_init_zone(
 	if (write_pointer == 0) {
 		/* zone is empty */
 		atomic_inc(&zi->zi_nr_free_zones);
-		xfs_group_set_mark(&rtg->rtg_group, XFS_RTG_FREE);
+		xfs_group_set_mark(rtg_group(rtg), XFS_RTG_FREE);
 		iz->available += rtg_blocks(rtg);
 	} else if (write_pointer < rtg_blocks(rtg)) {
 		/* zone is open */
@@ -1196,7 +1194,7 @@ xfs_alloc_zone_info(
 	struct xfs_zone_info	*zi;
 	int			i;
 
-	zi = kzalloc(sizeof(*zi), GFP_KERNEL);
+	zi = kzalloc_obj(*zi);
 	if (!zi)
 		return NULL;
 	INIT_LIST_HEAD(&zi->zi_open_zones);

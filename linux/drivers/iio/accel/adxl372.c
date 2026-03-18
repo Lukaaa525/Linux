@@ -7,6 +7,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/bitops.h>
+#include <linux/cleanup.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/module.h>
@@ -295,7 +296,6 @@ struct adxl372_state {
 	u32				inact_time_ms;
 	u8				fifo_set_size;
 	unsigned long			int1_bitmask;
-	unsigned long			int2_bitmask;
 	u16				watermark;
 	__be16				fifo_buf[ADXL372_FIFO_SIZE];
 	bool				peak_fifo_mode_en;
@@ -337,18 +337,14 @@ static ssize_t adxl372_write_threshold_value(struct iio_dev *indio_dev, unsigned
 	struct adxl372_state *st = iio_priv(indio_dev);
 	int ret;
 
-	mutex_lock(&st->threshold_m);
+	guard(mutex)(&st->threshold_m);
+
 	ret = regmap_write(st->regmap, addr, ADXL372_THRESH_VAL_H_SEL(threshold));
 	if (ret < 0)
-		goto unlock;
+		return ret;
 
-	ret = regmap_update_bits(st->regmap, addr + 1, GENMASK(7, 5),
-				 ADXL372_THRESH_VAL_L_SEL(threshold) << 5);
-
-unlock:
-	mutex_unlock(&st->threshold_m);
-
-	return ret;
+	return regmap_update_bits(st->regmap, addr + 1, GENMASK(7, 5),
+				  ADXL372_THRESH_VAL_L_SEL(threshold) << 5);
 }
 
 static int adxl372_read_axis(struct adxl372_state *st, u8 addr)
@@ -1247,11 +1243,10 @@ int adxl372_probe(struct device *dev, struct regmap *regmap,
 
 		indio_dev->trig = iio_trigger_get(st->dready_trig);
 
-		ret = devm_request_threaded_irq(dev, st->irq,
-					iio_trigger_generic_data_rdy_poll,
-					NULL,
-					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
-					indio_dev->name, st->dready_trig);
+		ret = devm_request_irq(dev, st->irq,
+				       iio_trigger_generic_data_rdy_poll,
+				       IRQF_TRIGGER_RISING | IRQF_NO_THREAD,
+				       indio_dev->name, st->dready_trig);
 		if (ret < 0)
 			return ret;
 	}

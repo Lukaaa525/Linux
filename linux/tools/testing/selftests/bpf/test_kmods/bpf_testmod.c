@@ -18,6 +18,7 @@
 #include <linux/in6.h>
 #include <linux/un.h>
 #include <linux/filter.h>
+#include <linux/rcupdate_trace.h>
 #include <net/sock.h>
 #include <linux/namei.h>
 #include "bpf_testmod.h"
@@ -759,10 +760,61 @@ __bpf_kfunc struct sock *bpf_kfunc_call_test3(struct sock *sk)
 
 __bpf_kfunc long noinline bpf_kfunc_call_test4(signed char a, short b, int c, long d)
 {
-	/* Provoke the compiler to assume that the caller has sign-extended a,
+	/*
+	 * Make val as volatile to avoid compiler optimizations.
+	 * Verify that negative signed values remain negative after
+	 * sign-extension (JIT must sign-extend, not zero-extend).
+	 */
+	volatile long val;
+
+	/* val will be positive, if JIT does zero-extension instead of sign-extension */
+	val = a;
+	if (val >= 0)
+		return 1;
+
+	val = b;
+	if (val >= 0)
+		return 2;
+
+	val = c;
+	if (val >= 0)
+		return 3;
+
+	/*
+	 * Provoke the compiler to assume that the caller has sign-extended a,
 	 * b and c on platforms where this is required (e.g. s390x).
 	 */
 	return (long)a + (long)b + (long)c + d;
+}
+
+__bpf_kfunc int bpf_kfunc_call_test5(u8 a, u16 b, u32 c)
+{
+	/*
+	 * Make val as volatile to avoid compiler optimizations on the below checks
+	 * In C, assigning u8/u16/u32 to long performs zero-extension.
+	 */
+	volatile long val = a;
+
+	/* Check zero-extension */
+	if (val != (unsigned long)a)
+		return 1;
+	/* Check no sign-extension */
+	if (val < 0)
+		return 2;
+
+	val = b;
+	if (val != (unsigned long)b)
+		return 3;
+	if (val < 0)
+		return 4;
+
+	val = c;
+	if (val != (unsigned long)c)
+		return 5;
+	if (val < 0)
+		return 6;
+
+	return 0;
 }
 
 static struct prog_test_ref_kfunc prog_test_struct = {
@@ -883,6 +935,32 @@ __bpf_kfunc static u32 bpf_kfunc_call_test_static_unused_arg(u32 arg, u32 unused
 
 __bpf_kfunc void bpf_kfunc_call_test_sleepable(void)
 {
+}
+
+struct bpf_kfunc_rcu_tasks_trace_data {
+	struct rcu_head rcu;
+	int *done;
+};
+
+static void bpf_kfunc_rcu_tasks_trace_cb(struct rcu_head *rhp)
+{
+	struct bpf_kfunc_rcu_tasks_trace_data *data;
+
+	data = container_of(rhp, struct bpf_kfunc_rcu_tasks_trace_data, rcu);
+	WRITE_ONCE(*data->done, 1);
+	kfree(data);
+}
+
+__bpf_kfunc int bpf_kfunc_call_test_call_rcu_tasks_trace(int *done)
+{
+	struct bpf_kfunc_rcu_tasks_trace_data *data;
+
+	data = kmalloc(sizeof(*data), GFP_ATOMIC);
+	if (!data)
+		return -ENOMEM;
+	data->done = done;
+	call_rcu_tasks_trace(&data->rcu, bpf_kfunc_rcu_tasks_trace_cb);
+	return 0;
 }
 
 __bpf_kfunc int bpf_kfunc_init_sock(struct init_sock_args *args)
@@ -1168,12 +1246,40 @@ __bpf_kfunc int bpf_kfunc_implicit_arg(int a, struct bpf_prog_aux *aux);
 __bpf_kfunc int bpf_kfunc_implicit_arg_legacy(int a, int b, struct bpf_prog_aux *aux);
 __bpf_kfunc int bpf_kfunc_implicit_arg_legacy_impl(int a, int b, struct bpf_prog_aux *aux);
 
+/* hook targets */
+noinline void bpf_testmod_test_hardirq_fn(void) { barrier(); }
+noinline void bpf_testmod_test_softirq_fn(void) { barrier(); }
+
+/* Tasklet for SoftIRQ context */
+static void ctx_check_tasklet_fn(struct tasklet_struct *t)
+{
+	bpf_testmod_test_softirq_fn();
+}
+
+DECLARE_TASKLET(ctx_check_tasklet, ctx_check_tasklet_fn);
+
+/* IRQ Work for HardIRQ context */
+static void ctx_check_irq_fn(struct irq_work *work)
+{
+	bpf_testmod_test_hardirq_fn();
+	tasklet_schedule(&ctx_check_tasklet);
+}
+
+static struct irq_work ctx_check_irq = IRQ_WORK_INIT_HARD(ctx_check_irq_fn);
+
+/* The kfunc trigger */
+__bpf_kfunc void bpf_kfunc_trigger_ctx_check(void)
+{
+	irq_work_queue(&ctx_check_irq);
+}
+
 BTF_KFUNCS_START(bpf_testmod_check_kfunc_ids)
 BTF_ID_FLAGS(func, bpf_testmod_test_mod_kfunc)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test1)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test2)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test3)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test4)
+BTF_ID_FLAGS(func, bpf_kfunc_call_test5)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test_mem_len_pass1)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test_mem_len_fail1)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test_mem_len_fail2)
@@ -1195,6 +1301,7 @@ BTF_ID_FLAGS(func, bpf_kfunc_call_test_destructive, KF_DESTRUCTIVE)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test_static_unused_arg)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test_offset)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test_sleepable, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_kfunc_call_test_call_rcu_tasks_trace)
 BTF_ID_FLAGS(func, bpf_kfunc_init_sock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_kfunc_close_sock, KF_SLEEPABLE)
 BTF_ID_FLAGS(func, bpf_kfunc_call_kernel_connect, KF_SLEEPABLE)
@@ -1213,6 +1320,7 @@ BTF_ID_FLAGS(func, bpf_kfunc_multi_st_ops_test_1_assoc, KF_IMPLICIT_ARGS)
 BTF_ID_FLAGS(func, bpf_kfunc_implicit_arg, KF_IMPLICIT_ARGS)
 BTF_ID_FLAGS(func, bpf_kfunc_implicit_arg_legacy, KF_IMPLICIT_ARGS)
 BTF_ID_FLAGS(func, bpf_kfunc_implicit_arg_legacy_impl)
+BTF_ID_FLAGS(func, bpf_kfunc_trigger_ctx_check)
 BTF_KFUNCS_END(bpf_testmod_check_kfunc_ids)
 
 static int bpf_testmod_ops_init(struct btf *btf)
@@ -1843,6 +1951,10 @@ static void bpf_testmod_exit(void)
          */
 	while (refcount_read(&prog_test_struct.cnt) > 1)
 		msleep(20);
+
+	/* Clean up irqwork and tasklet */
+	irq_work_sync(&ctx_check_irq);
+	tasklet_kill(&ctx_check_tasklet);
 
 	bpf_kfunc_close_sock();
 	sysfs_remove_bin_file(kernel_kobj, &bin_attr_bpf_testmod_file);

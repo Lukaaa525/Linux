@@ -385,6 +385,8 @@ int amdgpu_gfx_mqd_sw_init(struct amdgpu_device *adev,
 	struct amdgpu_kiq *kiq = &adev->gfx.kiq[xcc_id];
 	struct amdgpu_ring *ring = &kiq->ring;
 	u32 domain = AMDGPU_GEM_DOMAIN_GTT;
+	u32 gfx_mqd_size = max(adev->mqds[AMDGPU_HW_IP_GFX].mqd_size, mqd_size);
+	u32 compute_mqd_size = max(adev->mqds[AMDGPU_HW_IP_COMPUTE].mqd_size, mqd_size);
 
 #if !defined(CONFIG_ARM) && !defined(CONFIG_ARM64)
 	/* Only enable on gfx10 and 11 for now to avoid changing behavior on older chips */
@@ -424,17 +426,17 @@ int amdgpu_gfx_mqd_sw_init(struct amdgpu_device *adev,
 		for (i = 0; i < adev->gfx.num_gfx_rings; i++) {
 			ring = &adev->gfx.gfx_ring[i];
 			if (!ring->mqd_obj) {
-				r = amdgpu_bo_create_kernel(adev, mqd_size, PAGE_SIZE,
-							    domain, &ring->mqd_obj,
+				r = amdgpu_bo_create_kernel(adev, AMDGPU_MQD_SIZE_ALIGN(gfx_mqd_size),
+								PAGE_SIZE, domain, &ring->mqd_obj,
 							    &ring->mqd_gpu_addr, &ring->mqd_ptr);
 				if (r) {
 					dev_warn(adev->dev, "failed to create ring mqd bo (%d)", r);
 					return r;
 				}
 
-				ring->mqd_size = mqd_size;
+				ring->mqd_size = gfx_mqd_size;
 				/* prepare MQD backup */
-				adev->gfx.me.mqd_backup[i] = kzalloc(mqd_size, GFP_KERNEL);
+				adev->gfx.me.mqd_backup[i] = kzalloc(gfx_mqd_size, GFP_KERNEL);
 				if (!adev->gfx.me.mqd_backup[i]) {
 					dev_warn(adev->dev, "no memory to create MQD backup for ring %s\n", ring->name);
 					return -ENOMEM;
@@ -448,17 +450,17 @@ int amdgpu_gfx_mqd_sw_init(struct amdgpu_device *adev,
 		j = i + xcc_id * adev->gfx.num_compute_rings;
 		ring = &adev->gfx.compute_ring[j];
 		if (!ring->mqd_obj) {
-			r = amdgpu_bo_create_kernel(adev, mqd_size, PAGE_SIZE,
-						    domain, &ring->mqd_obj,
+			r = amdgpu_bo_create_kernel(adev, AMDGPU_MQD_SIZE_ALIGN(compute_mqd_size),
+							PAGE_SIZE, domain, &ring->mqd_obj,
 						    &ring->mqd_gpu_addr, &ring->mqd_ptr);
 			if (r) {
 				dev_warn(adev->dev, "failed to create ring mqd bo (%d)", r);
 				return r;
 			}
 
-			ring->mqd_size = mqd_size;
+			ring->mqd_size = compute_mqd_size;
 			/* prepare MQD backup */
-			adev->gfx.mec.mqd_backup[j] = kzalloc(mqd_size, GFP_KERNEL);
+			adev->gfx.mec.mqd_backup[j] = kzalloc(compute_mqd_size, GFP_KERNEL);
 			if (!adev->gfx.mec.mqd_backup[j]) {
 				dev_warn(adev->dev, "no memory to create MQD backup for ring %s\n", ring->name);
 				return -ENOMEM;
@@ -499,6 +501,55 @@ void amdgpu_gfx_mqd_sw_fini(struct amdgpu_device *adev, int xcc_id)
 	amdgpu_bo_free_kernel(&ring->mqd_obj,
 			      &ring->mqd_gpu_addr,
 			      &ring->mqd_ptr);
+}
+
+void amdgpu_gfx_mqd_symmetrically_map_cu_mask(struct amdgpu_device *adev, const uint32_t *cu_mask,
+					      uint32_t cu_mask_count, uint32_t *se_mask)
+{
+	struct amdgpu_cu_info *cu_info = &adev->gfx.cu_info;
+	struct amdgpu_gfx_config *gfx_info = &adev->gfx.config;
+	uint32_t cu_per_sh[8][4] = {0};
+	int i, se, sh, cu, cu_bitmap_sh_mul;
+	int xcc_inst = ffs(adev->gfx.xcc_mask) - 1;
+	bool wgp_mode_req = amdgpu_ip_version(adev, GC_HWIP, 0) >= IP_VERSION(10, 0, 0);
+	int cu_inc = wgp_mode_req ? 2 : 1;
+	uint32_t en_mask = wgp_mode_req ? 0x3 : 0x1;
+	int num_xcc, inc, inst = 0;
+
+	if (xcc_inst < 0)
+		xcc_inst = 0;
+
+	num_xcc = hweight16(adev->gfx.xcc_mask);
+	if (!num_xcc)
+		num_xcc = 1;
+
+	inc = cu_inc * num_xcc;
+
+	cu_bitmap_sh_mul = 2;
+
+	for (se = 0; se < gfx_info->max_shader_engines; se++)
+		for (sh = 0; sh < gfx_info->max_sh_per_se; sh++)
+			cu_per_sh[se][sh] = hweight32(
+				cu_info->bitmap[xcc_inst][se % 4][sh + (se / 4) *
+				cu_bitmap_sh_mul]);
+
+	for (i = 0; i < gfx_info->max_shader_engines; i++)
+		se_mask[i] = 0;
+
+	i = inst;
+	for (cu = 0; cu < 16; cu += cu_inc) {
+		for (sh = 0; sh < gfx_info->max_sh_per_se; sh++) {
+			for (se = 0; se < gfx_info->max_shader_engines; se++) {
+				if (cu_per_sh[se][sh] > cu) {
+					if ((i / 32) < cu_mask_count && (cu_mask[i / 32] & (1 << (i % 32))))
+						se_mask[se] |= en_mask << (cu + sh * 16);
+					i += inc;
+					if (i >= cu_mask_count * 32)
+						return;
+				}
+			}
+		}
+	}
 }
 
 int amdgpu_gfx_disable_kcq(struct amdgpu_device *adev, int xcc_id)

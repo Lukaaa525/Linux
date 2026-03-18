@@ -32,6 +32,7 @@ ksmbd		https://github.com/smfrench/smb3-kernel.git#ksmbd-for-next
 nfs		git://git.linux-nfs.org/projects/trondmy/nfs-2.6.git#linux-next
 nfs-anna	git://git.linux-nfs.org/projects/anna/linux-nfs.git#linux-next
 nfsd		https://git.kernel.org/pub/scm/linux/kernel/git/cel/linux#nfsd-next
+ntfs		https://git.kernel.org/pub/scm/linux/kernel/git/linkinjeon/ntfs.git#ntfs-next
 ntfs3		https://github.com/Paragon-Software-Group/linux-ntfs3.git#master
 orangefs	https://git.kernel.org/pub/scm/linux/kernel/git/hubcap/linux.git#for-next
 overlayfs	https://git.kernel.org/pub/scm/linux/kernel/git/overlayfs/vfs.git#overlayfs-next
@@ -98,6 +99,7 @@ at91-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/at91/linux.git#at91-f
 omap-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/khilman/linux-omap.git#fixes
 kvm-fixes	git://git.kernel.org/pub/scm/virt/kvm/kvm.git#master
 kvms390-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/kvms390/linux.git#master
+kvm-arm-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/kvmarm/kvmarm.git#fixes
 hwmon-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/groeck/linux-staging.git#hwmon
 nvdimm-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/nvdimm/nvdimm.git#libnvdimm-fixes
 cxl-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/cxl/cxl.git#fixes
@@ -137,6 +139,7 @@ i2c-host-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/andi.shyti/linux.
 sparc-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/alarsson/linux-sparc.git#for-linus
 clk-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/clk/linux.git#clk-fixes
 thead-clk-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/fustini/linux.git#thead-clk-fixes
+tenstorrent-clk-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/tenstorrent/linux.git#tenstorrent-clk-fixes
 pwrseq-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/brgl/linux.git#pwrseq/for-current
 thead-dt-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/fustini/linux.git#thead-dt-fixes
 ftrace-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/trace/linux-trace.git#ftrace/fixes
@@ -151,9 +154,10 @@ uml-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/uml/linux.git#fixes
 fwctl-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/fwctl/fwctl.git#for-rc
 devsec-tsm-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/devsec/tsm.git#fixes
 drm-rust-fixes	https://gitlab.freedesktop.org/drm/rust/kernel.git#drm-rust-fixes
-tenstorrent-dt-fixes	https://github.com/tenstorrent/linux.git#tenstorrent-dt-fixes
+tenstorrent-dt-fixes	https://git.kernel.org/pub/scm/linux/kernel/git/tenstorrent/linux.git#tenstorrent-dt-fixes
 drm-misc-fixes	https://gitlab.freedesktop.org/drm/misc/kernel.git#for-linux-next-fixes
 rust		https://github.com/Rust-for-Linux/linux.git#rust-next
+rust-interop	https://github.com/Rust-for-Linux/linux.git#interop-next
 rust-alloc	https://github.com/Rust-for-Linux/linux.git#alloc-next
 rust-io		https://github.com/Rust-for-Linux/linux.git#io-next
 rust-pin-init	https://github.com/Rust-for-Linux/linux.git#pin-init-next
@@ -184,7 +188,7 @@ cix		https://git.kernel.org/pub/scm/linux/kernel/git/peter.chen/cix.git#for-next
 davinci		https://git.kernel.org/pub/scm/linux/kernel/git/brgl/linux.git#davinci/for-next
 drivers-memory	https://git.kernel.org/pub/scm/linux/kernel/git/krzk/linux-mem-ctrl.git#for-next
 fsl		https://git.kernel.org/pub/scm/linux/kernel/git/chleroy/linux.git#soc_fsl
-imx-mxs		https://git.kernel.org/pub/scm/linux/kernel/git/shawnguo/linux.git#for-next
+imx-mxs		https://git.kernel.org/pub/scm/linux/kernel/git/frank.li/linux.git#for-next
 mediatek	https://git.kernel.org/pub/scm/linux/kernel/git/mediatek/linux.git#for-next
 mvebu		https://git.kernel.org/pub/scm/linux/kernel/git/gclement/mvebu.git#for-next
 omap		https://git.kernel.org/pub/scm/linux/kernel/git/khilman/linux-omap.git#for-next
@@ -201,14 +205,16 @@ stm32		https://git.kernel.org/pub/scm/linux/kernel/git/atorgue/stm32.git#stm32-n
 sunxi		https://git.kernel.org/pub/scm/linux/kernel/git/sunxi/linux.git#sunxi/for-next
 tee		https://git.kernel.org/pub/scm/linux/kernel/git/jenswi/linux-tee.git#next
 tegra		https://git.kernel.org/pub/scm/linux/kernel/git/tegra/linux.git#for-next
-tenstorrent-dt	https://github.com/tenstorrent/linux.git#tenstorrent-dt-for-next
+tenstorrent-dt	https://git.kernel.org/pub/scm/linux/kernel/git/tenstorrent/linux.git#tenstorrent-dt-for-next
 thead-dt	https://git.kernel.org/pub/scm/linux/kernel/git/fustini/linux.git#thead-dt-for-next
 ti		https://git.kernel.org/pub/scm/linux/kernel/git/ti/linux.git#ti-next
 xilinx		https://github.com/Xilinx/linux-xlnx.git#for-next
+socfpga		https://git.kernel.org/pub/scm/linux/kernel/git/dinguyen/linux.git#for-next
 clk		https://git.kernel.org/pub/scm/linux/kernel/git/clk/linux.git#clk-next
 clk-imx		https://git.kernel.org/pub/scm/linux/kernel/git/abelvesa/linux.git#for-next
 clk-renesas	https://git.kernel.org/pub/scm/linux/kernel/git/geert/renesas-drivers.git#renesas-clk
 thead-clk	https://git.kernel.org/pub/scm/linux/kernel/git/fustini/linux.git#thead-clk-for-next
+tenstorrent-clk	https://git.kernel.org/pub/scm/linux/kernel/git/tenstorrent/linux.git#tenstorrent-clk-for-next
 csky		https://github.com/c-sky/csky-linux.git#linux-next
 loongarch	https://git.kernel.org/pub/scm/linux/kernel/git/chenhuacai/linux-loongson.git#loongarch-next
 m68k		https://git.kernel.org/pub/scm/linux/kernel/git/geert/linux-m68k.git#for-next
@@ -258,6 +264,7 @@ ath-next	https://git.kernel.org/pub/scm/linux/kernel/git/ath/ath.git#for-next
 iwlwifi-next	https://git.kernel.org/pub/scm/linux/kernel/git/iwlwifi/iwlwifi-next.git#next
 wpan-next	https://git.kernel.org/pub/scm/linux/kernel/git/wpan/wpan-next.git#master
 wpan-staging	https://git.kernel.org/pub/scm/linux/kernel/git/wpan/wpan-next.git#staging
+drbd		https://github.com/LINBIT/linux-drbd.git#drbd-next
 mtd		https://git.kernel.org/pub/scm/linux/kernel/git/mtd/linux.git#mtd/next
 nand		https://git.kernel.org/pub/scm/linux/kernel/git/mtd/linux.git#nand/next
 spi-nor		https://git.kernel.org/pub/scm/linux/kernel/git/mtd/linux.git#spi-nor/next
@@ -272,6 +279,8 @@ drm-msm		https://gitlab.freedesktop.org/drm/msm.git#msm-next
 drm-msm-lumag	https://gitlab.freedesktop.org/lumag/msm.git#msm-next-lumag
 drm-xe		https://gitlab.freedesktop.org/drm/xe/kernel.git#drm-xe-next
 etnaviv		https://git.pengutronix.de/git/lst/linux#etnaviv/next
+drm-rust	https://gitlab.freedesktop.org/drm/rust/kernel.git#drm-rust-next
+drm-nova	https://gitlab.freedesktop.org/drm/nova.git#nova-next
 fbdev		https://git.kernel.org/pub/scm/linux/kernel/git/deller/linux-fbdev.git#for-next
 regmap		https://git.kernel.org/pub/scm/linux/kernel/git/broonie/regmap.git#for-next
 sound		https://git.kernel.org/pub/scm/linux/kernel/git/tiwai/sound.git#for-next
@@ -398,9 +407,8 @@ capabilities-next	https://git.kernel.org/pub/scm/linux/kernel/git/sergeh/linux.g
 ipe		https://git.kernel.org/pub/scm/linux/kernel/git/wufan/ipe.git#next
 kcsan		https://git.kernel.org/pub/scm/linux/kernel/git/melver/linux.git#next
 crc		https://git.kernel.org/pub/scm/linux/kernel/git/ebiggers/linux.git#crc-next
+keys-next	https://git.kernel.org/pub/scm/linux/kernel/git/dhowells/linux-fs.git#keys-next
 fwctl		https://git.kernel.org/pub/scm/linux/kernel/git/fwctl/fwctl.git#for-next
 devsec-tsm	https://git.kernel.org/pub/scm/linux/kernel/git/devsec/tsm.git#next
 hisilicon	https://github.com/hisilicon/linux-hisi.git#for-next
 kthread		https://git.kernel.org/pub/scm/linux/kernel/git/frederic/linux-dynticks.git#for-next
-drm-rust	https://gitlab.freedesktop.org/drm/rust/kernel.git#drm-rust-next
-drm-nova	https://gitlab.freedesktop.org/drm/nova.git#nova-next

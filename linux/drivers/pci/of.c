@@ -696,7 +696,7 @@ void of_pci_make_dev_node(struct pci_dev *pdev)
 	if (!name)
 		return;
 
-	cset = kmalloc(sizeof(*cset), GFP_KERNEL);
+	cset = kmalloc_obj(*cset);
 	if (!cset)
 		goto out_free_name;
 	of_changeset_init(cset);
@@ -775,7 +775,7 @@ void of_pci_make_host_bridge_node(struct pci_host_bridge *bridge)
 
 	/* Check if there is a DT root node to attach the created node */
 	if (!of_root) {
-		pr_err("of_root node is NULL, cannot create PCI host bridge node\n");
+		pr_debug("of_root node is NULL, cannot create PCI host bridge node\n");
 		return;
 	}
 
@@ -784,7 +784,7 @@ void of_pci_make_host_bridge_node(struct pci_host_bridge *bridge)
 	if (!name)
 		return;
 
-	cset = kmalloc(sizeof(*cset), GFP_KERNEL);
+	cset = kmalloc_obj(*cset);
 	if (!cset)
 		goto out_free_name;
 	of_changeset_init(cset);

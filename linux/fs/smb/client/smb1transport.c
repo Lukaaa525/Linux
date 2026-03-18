@@ -29,7 +29,6 @@
 #include "cifs_debug.h"
 #include "smbdirect.h"
 #include "compress.h"
-#include "cifs_debug.h"
 
 /* Max number of iovectors we can use off the stack when sending requests. */
 #define CIFS_MAX_IOV_SIZE 8
@@ -170,12 +169,18 @@ cifs_check_receive(struct mid_q_entry *mid, struct TCP_Server_Info *server,
 
 		iov[0].iov_base = mid->resp_buf;
 		iov[0].iov_len = len;
-		/* FIXME: add code to kill session */
+
 		rc = cifs_verify_signature(&rqst, server,
 					   mid->sequence_number);
-		if (rc)
+		if (rc) {
 			cifs_server_dbg(VFS, "SMB signature verification returned error = %d\n",
 				 rc);
+
+			if (!(server->sec_mode & SECMODE_SIGN_REQUIRED)) {
+				cifs_reconnect(server, true);
+				return rc;
+			}
+		}
 	}
 
 	/* BB special case reconnect tid and uid here? */
@@ -252,13 +257,15 @@ SendReceive(const unsigned int xid, struct cifs_ses *ses,
 	rc = cifs_send_recv(xid, ses, ses->server,
 			    &rqst, &resp_buf_type, flags, &resp_iov);
 	if (rc < 0)
-		return rc;
+		goto out;
 
 	if (out_buf) {
 		*pbytes_returned = resp_iov.iov_len;
 		if (resp_iov.iov_len)
 			memcpy(out_buf, resp_iov.iov_base, resp_iov.iov_len);
 	}
+
+out:
 	free_rsp_buf(resp_buf_type, resp_iov.iov_base);
 	return rc;
 }
@@ -453,7 +460,7 @@ check_smb_hdr(struct smb_hdr *smb)
 		return 0;
 
 	/*
-	 * Windows NT server returns error resposne (e.g. STATUS_DELETE_PENDING
+	 * Windows NT server returns error response (e.g. STATUS_DELETE_PENDING
 	 * or STATUS_OBJECT_NAME_NOT_FOUND or ERRDOS/ERRbadfile or any other)
 	 * for some TRANS2 requests without the RESPONSE flag set in header.
 	 */

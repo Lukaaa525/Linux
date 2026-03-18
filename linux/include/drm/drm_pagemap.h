@@ -4,6 +4,7 @@
 
 #include <linux/dma-direction.h>
 #include <linux/hmm.h>
+#include <linux/memremap.h>
 #include <linux/types.h>
 
 #define NR_PAGES(order) (1U << (order))
@@ -95,7 +96,7 @@ struct drm_pagemap_ops {
 	 */
 	void (*device_unmap)(struct drm_pagemap *dpagemap,
 			     struct device *dev,
-			     struct drm_pagemap_addr addr);
+			     const struct drm_pagemap_addr *addr);
 
 	/**
 	 * @populate_mm: Populate part of the mm with @dpagemap memory,
@@ -245,8 +246,6 @@ struct drm_pagemap_devmem_ops {
 
 #if IS_ENABLED(CONFIG_ZONE_DEVICE)
 
-struct drm_pagemap *drm_pagemap_page_to_dpagemap(struct page *page);
-
 int drm_pagemap_init(struct drm_pagemap *dpagemap,
 		     struct dev_pagemap *pagemap,
 		     struct drm_device *drm,
@@ -365,10 +364,30 @@ int drm_pagemap_populate_mm(struct drm_pagemap *dpagemap,
 			    struct mm_struct *mm,
 			    unsigned long timeslice_ms);
 
-#endif /* IS_ENABLED(CONFIG_ZONE_DEVICE) */
-
 void drm_pagemap_destroy(struct drm_pagemap *dpagemap, bool is_atomic_or_reclaim);
 
 int drm_pagemap_reinit(struct drm_pagemap *dpagemap);
+
+/**
+ * drm_pagemap_page_zone_device_data() - Page to zone_device_data
+ * @page: Pointer to the page
+ *
+ * Return: Page's zone_device_data
+ */
+static inline struct drm_pagemap_zdd *drm_pagemap_page_zone_device_data(struct page *page)
+{
+	struct folio *folio = page_folio(page);
+
+	return folio_zone_device_data(folio);
+}
+
+#else
+
+static inline struct drm_pagemap_zdd *drm_pagemap_page_zone_device_data(struct page *page)
+{
+	return NULL;
+}
+
+#endif /* IS_ENABLED(CONFIG_ZONE_DEVICE) */
 
 #endif

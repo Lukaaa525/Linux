@@ -36,7 +36,7 @@ static int affs_dir_open(struct inode *inode, struct file *file)
 {
 	struct affs_dir_data	*data;
 
-	data = kzalloc(sizeof(struct affs_dir_data), GFP_KERNEL);
+	data = kzalloc_obj(struct affs_dir_data);
 	if (!data)
 		return -ENOMEM;
 	file->private_data = data;
@@ -90,7 +90,7 @@ affs_readdir(struct file *file, struct dir_context *ctx)
 	u32			 ino;
 	int			 error = 0;
 
-	pr_debug("%s(ino=%lu,f_pos=%llx)\n", __func__, inode->i_ino, ctx->pos);
+	pr_debug("%s(ino=%llu,f_pos=%llx)\n", __func__, inode->i_ino, ctx->pos);
 
 	if (ctx->pos < 2) {
 		data->ino = 0;

@@ -302,7 +302,7 @@ static void construct_link_service(struct link_service *link_srv)
 
 struct link_service *link_create_link_service(void)
 {
-	struct link_service *link_srv = kzalloc(sizeof(*link_srv), GFP_KERNEL);
+	struct link_service *link_srv = kzalloc_obj(*link_srv);
 
 	if (link_srv == NULL)
 		goto fail;
@@ -364,6 +364,18 @@ static enum transmitter translate_encoder_to_transmitter(
 	break;
 	default:
 		return TRANSMITTER_UNKNOWN;
+	}
+}
+
+static bool encoder_is_external_dp(
+		struct graphics_object_id encoder)
+{
+	switch (encoder.id) {
+	case ENCODER_ID_EXTERNAL_NUTMEG:
+	case ENCODER_ID_EXTERNAL_TRAVIS:
+		return true;
+	default:
+		return false;
 	}
 }
 
@@ -514,6 +526,13 @@ static bool construct_phy(struct dc_link *link,
 	 * so that we avoid initializing DDC and HPD, etc.
 	 */
 	bp_funcs->get_src_obj(bios, link->link_id, 0, &link_encoder);
+
+	if (encoder_is_external_dp(link_encoder)) {
+		/* External DP bridge encoders: find the actual link encoder and use that. */
+		link->ext_enc_id = link_encoder;
+		bp_funcs->get_src_obj(bios, link->ext_enc_id, 0, &link_encoder);
+	}
+
 	transmitter_from_encoder = translate_encoder_to_transmitter(link_encoder);
 	link_analog_engine = find_analog_engine(link, &enc_init_data.analog_encoder);
 
@@ -561,12 +580,13 @@ static bool construct_phy(struct dc_link *link,
 	enc_init_data.connector = link->link_id;
 	enc_init_data.channel = get_ddc_line(link);
 	enc_init_data.transmitter = transmitter_from_encoder;
-	enc_init_data.analog_engine = find_analog_engine(link, &enc_init_data.analog_encoder);
 	enc_init_data.encoder = link_encoder;
 	enc_init_data.analog_engine = link_analog_engine;
-	enc_init_data.hpd_gpio = link_get_hpd_gpio(link->ctx->dc_bios, link->link_id,
-				      link->ctx->gpio_service);
-
+	if (link->ctx->dce_version <= DCN_VERSION_4_01)
+		enc_init_data.hpd_gpio = link_get_hpd_gpio(link->ctx->dc_bios, link->link_id,
+					      link->ctx->gpio_service);
+	else
+		enc_init_data.hpd_gpio = NULL;
 	if (enc_init_data.hpd_gpio) {
 		dal_gpio_open(enc_init_data.hpd_gpio, GPIO_MODE_INTERRUPT);
 		dal_gpio_unlock_pin(enc_init_data.hpd_gpio);
@@ -690,6 +710,13 @@ static bool construct_phy(struct dc_link *link,
 		goto create_fail;
 	}
 
+	/* For external DP bridge encoders:
+	 * Set the connector signal to DisplayPort so that they can work with
+	 * the pre-existing code paths for DP without a lot of code churn.
+	 */
+	if (link->ext_enc_id.id != ENCODER_ID_UNKNOWN)
+		link->connector_signal = SIGNAL_TYPE_DISPLAY_PORT;
+
 	LINK_INFO("Connector[%d] description: signal: %s\n",
 		  init_params->connector_index,
 		  signal_type_to_string(link->connector_signal));
@@ -734,7 +761,8 @@ static bool construct_phy(struct dc_link *link,
 						      link->device_tag.dev_id))
 			continue;
 		if (link->device_tag.dev_id.device_type == DEVICE_TYPE_CRT &&
-		    link->connector_signal != SIGNAL_TYPE_RGB)
+		    link->connector_signal != SIGNAL_TYPE_RGB &&
+		    link->ext_enc_id.id == ENCODER_ID_UNKNOWN)
 			continue;
 		if (link->device_tag.dev_id.device_type == DEVICE_TYPE_LCD &&
 		    link->connector_signal == SIGNAL_TYPE_RGB)
@@ -896,8 +924,7 @@ static bool link_construct(struct dc_link *link,
 
 struct dc_link *link_create(const struct link_init_data *init_params)
 {
-	struct dc_link *link =
-			kzalloc(sizeof(*link), GFP_KERNEL);
+	struct dc_link *link = kzalloc_obj(*link);
 
 	if (NULL == link)
 		goto alloc_fail;

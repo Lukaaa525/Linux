@@ -44,17 +44,11 @@ static void hinic3_txq_stats_init(struct hinic3_txq *txq)
 int hinic3_alloc_txqs(struct net_device *netdev)
 {
 	struct hinic3_nic_dev *nic_dev = netdev_priv(netdev);
-	struct hinic3_hwdev *hwdev = nic_dev->hwdev;
 	u16 q_id, num_txqs = nic_dev->max_qps;
 	struct pci_dev *pdev = nic_dev->pdev;
 	struct hinic3_txq *txq;
 
-	if (!num_txqs) {
-		dev_err(hwdev->dev, "Cannot allocate zero size txqs\n");
-		return -EINVAL;
-	}
-
-	nic_dev->txqs = kcalloc(num_txqs, sizeof(*nic_dev->txqs),  GFP_KERNEL);
+	nic_dev->txqs = kzalloc_objs(*nic_dev->txqs, num_txqs);
 	if (!nic_dev->txqs)
 		return -ENOMEM;
 
@@ -609,7 +603,6 @@ static netdev_tx_t hinic3_send_one_skb(struct sk_buff *skb,
 
 err_drop_pkt:
 	dev_kfree_skb_any(skb);
-
 err_out:
 	return NETDEV_TX_OK;
 }
@@ -688,14 +681,12 @@ int hinic3_alloc_txqs_res(struct net_device *netdev, u16 num_sq,
 	for (idx = 0; idx < num_sq; idx++) {
 		tqres = &txqs_res[idx];
 
-		tqres->tx_info = kcalloc(sq_depth, sizeof(*tqres->tx_info),
-					 GFP_KERNEL);
+		tqres->tx_info = kzalloc_objs(*tqres->tx_info, sq_depth);
 		if (!tqres->tx_info)
 			goto err_free_tqres;
 
-		tqres->bds = kcalloc(sq_depth * HINIC3_BDS_PER_SQ_WQEBB +
-				     HINIC3_MAX_SQ_SGE, sizeof(*tqres->bds),
-				     GFP_KERNEL);
+		tqres->bds = kzalloc_objs(*tqres->bds,
+					  sq_depth * HINIC3_BDS_PER_SQ_WQEBB + HINIC3_MAX_SQ_SGE);
 		if (!tqres->bds) {
 			kfree(tqres->tx_info);
 			goto err_free_tqres;

@@ -70,6 +70,7 @@ beyond).
    researcher-guidelines
    generated-content
    coding-assistants
+   conclave
 
 Dealing with bugs
 -----------------
@@ -110,10 +111,3 @@ developers:
 
    kernel-docs
    deprecated
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

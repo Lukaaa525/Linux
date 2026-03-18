@@ -356,7 +356,7 @@ extern int  sched_dl_global_validate(void);
 extern void sched_dl_do_global(void);
 extern int  sched_dl_overflow(struct task_struct *p, int policy, const struct sched_attr *attr);
 extern void __setparam_dl(struct task_struct *p, const struct sched_attr *attr);
-extern void __getparam_dl(struct task_struct *p, struct sched_attr *attr);
+extern void __getparam_dl(struct task_struct *p, struct sched_attr *attr, unsigned int flags);
 extern bool __checkparam_dl(const struct sched_attr *attr);
 extern bool dl_param_changed(struct task_struct *p, const struct sched_attr *attr);
 extern int  dl_cpuset_cpumask_can_shrink(const struct cpumask *cur, const struct cpumask *trial);
@@ -417,6 +417,7 @@ extern void dl_server_init(struct sched_dl_entity *dl_se, struct rq *rq,
 extern void sched_init_dl_servers(void);
 
 extern void fair_server_init(struct rq *rq);
+extern void ext_server_init(struct rq *rq);
 extern void __dl_server_attach_root(struct sched_dl_entity *dl_se, struct rq *rq);
 extern int dl_server_apply_params(struct sched_dl_entity *dl_se,
 		    u64 runtime, u64 period, bool init);
@@ -683,8 +684,9 @@ struct cfs_rq {
 
 	s64			sum_w_vruntime;
 	u64			sum_weight;
-
 	u64			zero_vruntime;
+	unsigned int		sum_shift;
+
 #ifdef CONFIG_SCHED_CORE
 	unsigned int		forceidle_seq;
 	u64			zero_vruntime_fi;
@@ -781,7 +783,6 @@ enum scx_rq_flags {
 	SCX_RQ_ONLINE		= 1 << 0,
 	SCX_RQ_CAN_STOP_TICK	= 1 << 1,
 	SCX_RQ_BAL_KEEP		= 1 << 3, /* balance decided to keep current */
-	SCX_RQ_BYPASSING	= 1 << 4,
 	SCX_RQ_CLK_VALID	= 1 << 5, /* RQ clock is fresh and valid */
 	SCX_RQ_BAL_CB_PENDING	= 1 << 6, /* must queue a cb after dispatching */
 
@@ -799,17 +800,23 @@ struct scx_rq {
 	u32			cpuperf_target;		/* [0, SCHED_CAPACITY_SCALE] */
 	bool			cpu_released;
 	u32			flags;
+	u32			nr_immed;		/* ENQ_IMMED tasks on local_dsq */
 	u64			clock;			/* current per-rq clock -- see scx_bpf_now() */
 	cpumask_var_t		cpus_to_kick;
 	cpumask_var_t		cpus_to_kick_if_idle;
 	cpumask_var_t		cpus_to_preempt;
 	cpumask_var_t		cpus_to_wait;
 	unsigned long		kick_sync;
-	local_t			reenq_local_deferred;
+
+	struct task_struct	*sub_dispatch_prev;
+
+	raw_spinlock_t		deferred_reenq_lock;
+	u64			deferred_reenq_locals_seq;
+	struct list_head	deferred_reenq_locals;	/* scheds requesting reenq of local DSQ */
+	struct list_head	deferred_reenq_users;	/* user DSQs requesting reenq */
 	struct balance_callback	deferred_bal_cb;
 	struct irq_work		deferred_irq_work;
 	struct irq_work		kick_cpus_irq_work;
-	struct scx_dispatch_q	bypass_dsq;
 };
 #endif /* CONFIG_SCHED_CLASS_EXT */
 
@@ -1174,6 +1181,7 @@ struct rq {
 	struct dl_rq		dl;
 #ifdef CONFIG_SCHED_CLASS_EXT
 	struct scx_rq		scx;
+	struct sched_dl_entity	ext_server;
 #endif
 
 	struct sched_dl_entity	fair_server;
@@ -1283,6 +1291,8 @@ struct rq {
 	call_single_data_t	hrtick_csd;
 	struct hrtimer		hrtick_timer;
 	ktime_t			hrtick_time;
+	ktime_t			hrtick_delay;
+	unsigned int		hrtick_sched;
 #endif
 
 #ifdef CONFIG_SCHEDSTATS
@@ -1604,13 +1614,16 @@ extern void raw_spin_rq_lock_nested(struct rq *rq, int subclass)
 extern bool raw_spin_rq_trylock(struct rq *rq)
 	__cond_acquires(true, __rq_lockp(rq));
 
-extern void raw_spin_rq_unlock(struct rq *rq)
-	__releases(__rq_lockp(rq));
-
 static inline void raw_spin_rq_lock(struct rq *rq)
 	__acquires(__rq_lockp(rq))
 {
 	raw_spin_rq_lock_nested(rq, 0);
+}
+
+static inline void raw_spin_rq_unlock(struct rq *rq)
+	__releases(__rq_lockp(rq))
+{
+	raw_spin_unlock(rq_lockp(rq));
 }
 
 static inline void raw_spin_rq_lock_irq(struct rq *rq)
@@ -2746,6 +2759,17 @@ static inline const struct sched_class *next_active_class(const struct sched_cla
 
 #define sched_class_above(_a, _b)	((_a) < (_b))
 
+static inline void rq_modified_begin(struct rq *rq, const struct sched_class *class)
+{
+	if (sched_class_above(rq->next_class, class))
+		rq->next_class = class;
+}
+
+static inline bool rq_modified_above(struct rq *rq, const struct sched_class *class)
+{
+	return sched_class_above(rq->next_class, class);
+}
+
 static inline bool sched_stop_runnable(struct rq *rq)
 {
 	return rq->stop && task_on_rq_queued(rq->stop);
@@ -3017,46 +3041,31 @@ extern unsigned int sysctl_numa_balancing_hot_threshold;
  *  - enabled by features
  *  - hrtimer is actually high res
  */
-static inline int hrtick_enabled(struct rq *rq)
+static inline bool hrtick_enabled(struct rq *rq)
 {
-	if (!cpu_active(cpu_of(rq)))
-		return 0;
-	return hrtimer_is_hres_active(&rq->hrtick_timer);
+	return cpu_active(cpu_of(rq)) && hrtimer_highres_enabled();
 }
 
-static inline int hrtick_enabled_fair(struct rq *rq)
+static inline bool hrtick_enabled_fair(struct rq *rq)
 {
-	if (!sched_feat(HRTICK))
-		return 0;
-	return hrtick_enabled(rq);
+	return sched_feat(HRTICK) && hrtick_enabled(rq);
 }
 
-static inline int hrtick_enabled_dl(struct rq *rq)
+static inline bool hrtick_enabled_dl(struct rq *rq)
 {
-	if (!sched_feat(HRTICK_DL))
-		return 0;
-	return hrtick_enabled(rq);
+	return sched_feat(HRTICK_DL) && hrtick_enabled(rq);
 }
 
 extern void hrtick_start(struct rq *rq, u64 delay);
+static inline bool hrtick_active(struct rq *rq)
+{
+	return hrtimer_active(&rq->hrtick_timer);
+}
 
 #else /* !CONFIG_SCHED_HRTICK: */
-
-static inline int hrtick_enabled_fair(struct rq *rq)
-{
-	return 0;
-}
-
-static inline int hrtick_enabled_dl(struct rq *rq)
-{
-	return 0;
-}
-
-static inline int hrtick_enabled(struct rq *rq)
-{
-	return 0;
-}
-
+static inline bool hrtick_enabled_fair(struct rq *rq) { return false; }
+static inline bool hrtick_enabled_dl(struct rq *rq) { return false; }
+static inline bool hrtick_enabled(struct rq *rq) { return false; }
 #endif /* !CONFIG_SCHED_HRTICK */
 
 #ifndef arch_scale_freq_tick
@@ -3390,11 +3399,11 @@ struct irqtime {
 };
 
 DECLARE_PER_CPU(struct irqtime, cpu_irqtime);
-extern int sched_clock_irqtime;
+DECLARE_STATIC_KEY_FALSE(sched_clock_irqtime);
 
 static inline int irqtime_enabled(void)
 {
-	return sched_clock_irqtime;
+	return static_branch_likely(&sched_clock_irqtime);
 }
 
 /*
@@ -3811,8 +3820,10 @@ static __always_inline void mm_unset_cid_on_task(struct task_struct *t)
 static __always_inline void mm_drop_cid_on_cpu(struct mm_struct *mm, struct mm_cid_pcpu *pcp)
 {
 	/* Clear the ONCPU bit, but do not set UNSET in the per CPU storage */
-	pcp->cid = cpu_cid_to_cid(pcp->cid);
-	mm_drop_cid(mm, pcp->cid);
+	if (cid_on_cpu(pcp->cid)) {
+		pcp->cid = cpu_cid_to_cid(pcp->cid);
+		mm_drop_cid(mm, pcp->cid);
+	}
 }
 
 static inline unsigned int __mm_get_cid(struct mm_struct *mm, unsigned int max_cids)
@@ -3869,7 +3880,8 @@ static __always_inline void mm_cid_update_pcpu_cid(struct mm_struct *mm, unsigne
 	__this_cpu_write(mm->mm_cid.pcpu->cid, cid);
 }
 
-static __always_inline void mm_cid_from_cpu(struct task_struct *t, unsigned int cpu_cid)
+static __always_inline void mm_cid_from_cpu(struct task_struct *t, unsigned int cpu_cid,
+					    unsigned int mode)
 {
 	unsigned int max_cids, tcid = t->mm_cid.cid;
 	struct mm_struct *mm = t->mm;
@@ -3894,12 +3906,17 @@ static __always_inline void mm_cid_from_cpu(struct task_struct *t, unsigned int 
 		/* Still nothing, allocate a new one */
 		if (!cid_on_cpu(cpu_cid))
 			cpu_cid = cid_to_cpu_cid(mm_get_cid(mm));
+
+		/* Handle the transition mode flag if required */
+		if (mode & MM_CID_TRANSIT)
+			cpu_cid = cpu_cid_to_cid(cpu_cid) | MM_CID_TRANSIT;
 	}
 	mm_cid_update_pcpu_cid(mm, cpu_cid);
 	mm_cid_update_task_cid(t, cpu_cid);
 }
 
-static __always_inline void mm_cid_from_task(struct task_struct *t, unsigned int cpu_cid)
+static __always_inline void mm_cid_from_task(struct task_struct *t, unsigned int cpu_cid,
+					     unsigned int mode)
 {
 	unsigned int max_cids, tcid = t->mm_cid.cid;
 	struct mm_struct *mm = t->mm;
@@ -3925,7 +3942,7 @@ static __always_inline void mm_cid_from_task(struct task_struct *t, unsigned int
 		if (!cid_on_task(tcid))
 			tcid = mm_get_cid(mm);
 		/* Set the transition mode flag if required */
-		tcid |= READ_ONCE(mm->mm_cid.transit);
+		tcid |= mode & MM_CID_TRANSIT;
 	}
 	mm_cid_update_pcpu_cid(mm, tcid);
 	mm_cid_update_task_cid(t, tcid);
@@ -3934,26 +3951,46 @@ static __always_inline void mm_cid_from_task(struct task_struct *t, unsigned int
 static __always_inline void mm_cid_schedin(struct task_struct *next)
 {
 	struct mm_struct *mm = next->mm;
-	unsigned int cpu_cid;
+	unsigned int cpu_cid, mode;
 
 	if (!next->mm_cid.active)
 		return;
 
 	cpu_cid = __this_cpu_read(mm->mm_cid.pcpu->cid);
-	if (likely(!READ_ONCE(mm->mm_cid.percpu)))
-		mm_cid_from_task(next, cpu_cid);
+	mode = READ_ONCE(mm->mm_cid.mode);
+	if (likely(!cid_on_cpu(mode)))
+		mm_cid_from_task(next, cpu_cid, mode);
 	else
-		mm_cid_from_cpu(next, cpu_cid);
+		mm_cid_from_cpu(next, cpu_cid, mode);
 }
 
 static __always_inline void mm_cid_schedout(struct task_struct *prev)
 {
+	struct mm_struct *mm = prev->mm;
+	unsigned int mode, cid;
+
 	/* During mode transitions CIDs are temporary and need to be dropped */
 	if (likely(!cid_in_transit(prev->mm_cid.cid)))
 		return;
 
-	mm_drop_cid(prev->mm, cid_from_transit_cid(prev->mm_cid.cid));
-	prev->mm_cid.cid = MM_CID_UNSET;
+	mode = READ_ONCE(mm->mm_cid.mode);
+	cid = cid_from_transit_cid(prev->mm_cid.cid);
+
+	/*
+	 * If transition mode is done, transfer ownership when the CID is
+	 * within the convergence range to optimize the next schedule in.
+	 */
+	if (!cid_in_transit(mode) && cid < READ_ONCE(mm->mm_cid.max_cids)) {
+		if (cid_on_cpu(mode))
+			cid = cid_to_cpu_cid(cid);
+
+		/* Update both so that the next schedule in goes into the fast path */
+		mm_cid_update_pcpu_cid(mm, cid);
+		prev->mm_cid.cid = cid;
+	} else {
+		mm_drop_cid(mm, cid);
+		prev->mm_cid.cid = MM_CID_UNSET;
+	}
 }
 
 static inline void mm_cid_switch_to(struct task_struct *prev, struct task_struct *next)

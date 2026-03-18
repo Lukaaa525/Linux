@@ -11,7 +11,7 @@
 
 static const struct iommufd_viommu_ops amd_viommu_ops;
 
-void *amd_iommufd_hw_info(struct device *dev, u32 *length, u32 *type)
+void *amd_iommufd_hw_info(struct device *dev, u32 *length, enum iommu_hw_info_type *type)
 {
 	struct iommu_hw_info_amd *hwinfo;
 
@@ -19,7 +19,7 @@ void *amd_iommufd_hw_info(struct device *dev, u32 *length, u32 *type)
 	    *type != IOMMU_HW_INFO_TYPE_AMD)
 		return ERR_PTR(-EOPNOTSUPP);
 
-	hwinfo = kzalloc(sizeof(*hwinfo), GFP_KERNEL);
+	hwinfo = kzalloc_obj(*hwinfo);
 	if (!hwinfo)
 		return ERR_PTR(-ENOMEM);
 

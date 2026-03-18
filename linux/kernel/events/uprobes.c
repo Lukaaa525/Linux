@@ -238,7 +238,7 @@ static int delayed_uprobe_add(struct uprobe *uprobe, struct mm_struct *mm)
 	if (delayed_uprobe_check(uprobe, mm))
 		return 0;
 
-	du  = kzalloc(sizeof(*du), GFP_KERNEL);
+	du = kzalloc_obj(*du);
 	if (!du)
 		return -ENOMEM;
 
@@ -344,7 +344,7 @@ out:
 static void update_ref_ctr_warn(struct uprobe *uprobe,
 				struct mm_struct *mm, short d)
 {
-	pr_warn("ref_ctr %s failed for inode: 0x%lx offset: "
+	pr_warn("ref_ctr %s failed for inode: 0x%llx offset: "
 		"0x%llx ref_ctr_offset: 0x%llx of mm: 0x%p\n",
 		d > 0 ? "increment" : "decrement", uprobe->inode->i_ino,
 		(unsigned long long) uprobe->offset,
@@ -982,7 +982,7 @@ static struct uprobe *insert_uprobe(struct uprobe *uprobe)
 static void
 ref_ctr_mismatch_warn(struct uprobe *cur_uprobe, struct uprobe *uprobe)
 {
-	pr_warn("ref_ctr_offset mismatch. inode: 0x%lx offset: 0x%llx "
+	pr_warn("ref_ctr_offset mismatch. inode: 0x%llx offset: 0x%llx "
 		"ref_ctr_offset(old): 0x%llx ref_ctr_offset(new): 0x%llx\n",
 		uprobe->inode->i_ino, (unsigned long long) uprobe->offset,
 		(unsigned long long) cur_uprobe->ref_ctr_offset,
@@ -994,7 +994,7 @@ static struct uprobe *alloc_uprobe(struct inode *inode, loff_t offset,
 {
 	struct uprobe *uprobe, *cur_uprobe;
 
-	uprobe = kzalloc(sizeof(struct uprobe), GFP_KERNEL);
+	uprobe = kzalloc_obj(struct uprobe);
 	if (!uprobe)
 		return ERR_PTR(-ENOMEM);
 
@@ -1138,7 +1138,7 @@ static bool filter_chain(struct uprobe *uprobe, struct mm_struct *mm)
 	bool ret = false;
 
 	down_read(&uprobe->consumer_rwsem);
-	list_for_each_entry_rcu(uc, &uprobe->consumers, cons_node, rcu_read_lock_trace_held()) {
+	list_for_each_entry(uc, &uprobe->consumers, cons_node) {
 		ret = consumer_filter(uc, mm);
 		if (ret)
 			break;
@@ -1219,8 +1219,8 @@ build_map_info(struct address_space *mapping, loff_t offset, bool is_register)
 			 * Needs GFP_NOWAIT to avoid i_mmap_rwsem recursion through
 			 * reclaim. This is optimistic, no harm done if it fails.
 			 */
-			prev = kmalloc(sizeof(struct map_info),
-					GFP_NOWAIT | __GFP_NOMEMALLOC);
+			prev = kmalloc_obj(struct map_info,
+					   GFP_NOWAIT | __GFP_NOMEMALLOC);
 			if (prev)
 				prev->next = NULL;
 		}
@@ -1252,7 +1252,7 @@ build_map_info(struct address_space *mapping, loff_t offset, bool is_register)
 	}
 
 	do {
-		info = kmalloc(sizeof(struct map_info), GFP_KERNEL);
+		info = kmalloc_obj(struct map_info);
 		if (!info) {
 			curr = ERR_PTR(-ENOMEM);
 			goto out;
@@ -1755,7 +1755,7 @@ static struct xol_area *__create_xol_area(unsigned long vaddr)
 	struct xol_area *area;
 	void *insns;
 
-	area = kzalloc(sizeof(*area), GFP_KERNEL);
+	area = kzalloc_obj(*area);
 	if (unlikely(!area))
 		goto out;
 
@@ -2069,7 +2069,7 @@ static struct uprobe_task *alloc_utask(void)
 {
 	struct uprobe_task *utask;
 
-	utask = kzalloc(sizeof(*utask), GFP_KERNEL);
+	utask = kzalloc_obj(*utask);
 	if (!utask)
 		return NULL;
 
@@ -2102,7 +2102,7 @@ static struct return_instance *alloc_return_instance(struct uprobe_task *utask)
 	if (ri)
 		return ri;
 
-	ri = kzalloc(sizeof(*ri), GFP_KERNEL);
+	ri = kzalloc_obj(*ri);
 	if (!ri)
 		return ZERO_SIZE_PTR;
 

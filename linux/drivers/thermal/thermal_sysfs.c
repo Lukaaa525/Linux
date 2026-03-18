@@ -18,6 +18,7 @@
 #include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/string_choices.h>
 #include <linux/jiffies.h>
 
 #include "thermal_core.h"
@@ -56,10 +57,8 @@ mode_show(struct device *dev, struct device_attribute *attr, char *buf)
 
 	guard(thermal_zone)(tz);
 
-	if (tz->mode == THERMAL_DEVICE_ENABLED)
-		return sysfs_emit(buf, "enabled\n");
-
-	return sysfs_emit(buf, "disabled\n");
+	return sysfs_emit(buf, "%s\n",
+		str_enabled_disabled(tz->mode == THERMAL_DEVICE_ENABLED));
 }
 
 static ssize_t
@@ -392,7 +391,7 @@ static int create_trip_attrs(struct thermal_zone_device *tz)
 	struct attribute **attrs;
 	int i;
 
-	attrs = kcalloc(tz->num_trips * 3 + 1, sizeof(*attrs), GFP_KERNEL);
+	attrs = kzalloc_objs(*attrs, tz->num_trips * 3 + 1);
 	if (!attrs)
 		return -ENOMEM;
 
@@ -465,7 +464,7 @@ int thermal_zone_create_device_groups(struct thermal_zone_device *tz)
 	/* we need one extra for trips and the NULL to terminate the array */
 	size = ARRAY_SIZE(thermal_zone_attribute_groups) + 2;
 	/* This also takes care of API requirement to be NULL terminated */
-	groups = kcalloc(size, sizeof(*groups), GFP_KERNEL);
+	groups = kzalloc_objs(*groups, size);
 	if (!groups)
 		return -ENOMEM;
 

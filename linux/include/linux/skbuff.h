@@ -2682,8 +2682,17 @@ static inline void skb_fill_page_desc_noacc(struct sk_buff *skb, int i,
 	shinfo->nr_frags = i + 1;
 }
 
-void skb_add_rx_frag_netmem(struct sk_buff *skb, int i, netmem_ref netmem,
-			    int off, int size, unsigned int truesize);
+static inline void skb_add_rx_frag_netmem(struct sk_buff *skb, int i,
+					  netmem_ref netmem, int off,
+					  int size, unsigned int truesize)
+{
+	DEBUG_NET_WARN_ON_ONCE(size > truesize);
+
+	skb_fill_netmem_desc(skb, i, netmem, off, size);
+	skb->len += size;
+	skb->data_len += size;
+	skb->truesize += truesize;
+}
 
 static inline void skb_add_rx_frag(struct sk_buff *skb, int i,
 				   struct page *page, int off, int size,
@@ -2813,6 +2822,7 @@ static inline void *__skb_push(struct sk_buff *skb, unsigned int len)
 	DEBUG_NET_WARN_ON_ONCE(len > INT_MAX);
 
 	skb->data -= len;
+	DEBUG_NET_WARN_ON_ONCE(skb->data < skb->head);
 	skb->len  += len;
 	return skb->data;
 }
@@ -4301,6 +4311,18 @@ skb_header_pointer(const struct sk_buff *skb, int offset, int len, void *buffer)
 				    skb_headlen(skb), buffer);
 }
 
+/* Variant of skb_header_pointer() where @offset is user-controlled
+ * and potentially negative.
+ */
+static inline void * __must_check
+skb_header_pointer_careful(const struct sk_buff *skb, int offset,
+			   int len, void *buffer)
+{
+	if (unlikely(offset < 0 && -offset > skb_headroom(skb)))
+		return NULL;
+	return skb_header_pointer(skb, offset, len, buffer);
+}
+
 static inline void * __must_check
 skb_pointer_if_linear(const struct sk_buff *skb, int offset, int len)
 {
@@ -4988,6 +5010,9 @@ enum skb_ext_id {
 #endif
 #if IS_ENABLED(CONFIG_INET_PSP)
 	SKB_EXT_PSP,
+#endif
+#if IS_ENABLED(CONFIG_CAN)
+	SKB_EXT_CAN,
 #endif
 	SKB_EXT_NUM, /* must be last */
 };

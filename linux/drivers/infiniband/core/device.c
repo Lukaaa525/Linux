@@ -30,7 +30,6 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-#define pr_fmt(fmt) "infiniband: " fmt
 
 #include <linux/module.h>
 #include <linux/string.h>
@@ -94,6 +93,7 @@ static struct workqueue_struct *ib_unreg_wq;
 static DEFINE_XARRAY_FLAGS(devices, XA_FLAGS_ALLOC);
 static DECLARE_RWSEM(devices_rwsem);
 #define DEVICE_REGISTERED XA_MARK_1
+#define DEVICE_GID_UPDATES XA_MARK_2
 
 static u32 highest_client_id;
 #define CLIENT_REGISTERED XA_MARK_1
@@ -812,9 +812,8 @@ static int alloc_port_data(struct ib_device *device)
 	 * Therefore port_data is declared as a 1 based array with potential
 	 * empty slots at the beginning.
 	 */
-	pdata_rcu = kzalloc(struct_size(pdata_rcu, pdata,
-					size_add(rdma_end_port(device), 1)),
-			    GFP_KERNEL);
+	pdata_rcu = kzalloc_flex(*pdata_rcu, pdata,
+				 size_add(rdma_end_port(device), 1));
 	if (!pdata_rcu)
 		return -ENOMEM;
 	/*
@@ -959,7 +958,7 @@ static int add_one_compat_dev(struct ib_device *device,
 	if (ret)
 		goto done;
 
-	cdev = kzalloc(sizeof(*cdev), GFP_KERNEL);
+	cdev = kzalloc_obj(*cdev);
 	if (!cdev) {
 		ret = -ENOMEM;
 		goto cdev_err;
@@ -1385,29 +1384,6 @@ out:
 	up_read(&devices_rwsem);
 }
 
-static int ib_check_netdev_state(struct ib_device *device, const char *id)
-{
-	struct ib_port_data *pdata;
-	u32 port;
-	struct net_device *ndev = NULL;
-	int ret = 0;
-
-	rcu_read_lock();
-	pdata = READ_ONCE(device->port_data);
-	if (pdata) {
-		rdma_for_each_port(device, port) {
-			ndev = rcu_dereference(pdata[port].netdev);
-			if (ndev && ndev->reg_state != NETREG_REGISTERED) {
-				pr_info("%s: netdev %s is no longer registered.\n", id, ndev->name);
-				ret = -ENODEV;
-				break;
-			}
-		}
-	}
-	rcu_read_unlock();
-	return ret;
-}
-
 /**
  * ib_register_device - Register an IB device with IB core
  * @device: Device to register
@@ -1480,9 +1456,7 @@ int ib_register_device(struct ib_device *device, const char *name,
 		goto dev_cleanup;
 	}
 
-	ib_check_netdev_state(device, "before enable_device_and_get()");
 	ret = enable_device_and_get(device);
-	ib_check_netdev_state(device, "after enable_device_and_get()");
 	if (ret) {
 		void (*dealloc_fn)(struct ib_device *);
 
@@ -1662,13 +1636,7 @@ static void ib_unregister_work(struct work_struct *work)
 	struct ib_device *ib_dev =
 		container_of(work, struct ib_device, unregistration_work);
 
-	if (IS_ENABLED(CONFIG_NET_DEV_REFCNT_TRACKER))
-		pr_info("netdevice_event(NETDEV_UNREGISTER) ib_dev=%p (%d)(%s) start\n",
-			ib_dev, refcount_read(&ib_dev->refcount), ib_dev->name);
 	__ib_unregister_device(ib_dev);
-	if (IS_ENABLED(CONFIG_NET_DEV_REFCNT_TRACKER))
-		pr_info("netdevice_event(NETDEV_UNREGISTER) ib_dev=%p (%d)(%s) end\n",
-			ib_dev, refcount_read(&ib_dev->refcount), ib_dev->name);
 	put_device(&ib_dev->dev);
 }
 
@@ -1716,7 +1684,6 @@ static int rdma_dev_change_netns(struct ib_device *device, struct net *cur_net,
 		ret = -ENODEV;
 		goto out;
 	}
-	ib_check_netdev_state(device, "inside rdma_dev_change_netns()");
 
 	kobject_uevent(&device->dev.kobj, KOBJ_REMOVE);
 	disable_device(device);
@@ -2186,7 +2153,7 @@ int ib_query_port(struct ib_device *device,
 }
 EXPORT_SYMBOL(ib_query_port);
 
-static void add_ndev_hash(struct ib_device *ib_dev, struct ib_port_data *pdata)
+static void add_ndev_hash(struct ib_port_data *pdata)
 {
 	unsigned long flags;
 
@@ -2203,15 +2170,9 @@ static void add_ndev_hash(struct ib_device *ib_dev, struct ib_port_data *pdata)
 		synchronize_rcu();
 		spin_lock_irqsave(&ndev_hash_lock, flags);
 	}
-	if (pdata->netdev) {
+	if (pdata->netdev)
 		hash_add_rcu(ndev_hash, &pdata->ndev_hash_link,
 			     (uintptr_t)pdata->netdev);
-		if (IS_ENABLED(CONFIG_NET_DEV_REFCNT_TRACKER))
-			pr_info("Added to hash: ib_dev=%p (%d)(%s) ndev=%p (%d)(%s)\n",
-				ib_dev, refcount_read(&ib_dev->refcount), ib_dev->name,
-				pdata->netdev, netdev_refcnt_read(pdata->netdev),
-				pdata->netdev->name);
-	}
 	spin_unlock_irqrestore(&ndev_hash_lock, flags);
 }
 
@@ -2264,7 +2225,7 @@ int ib_device_set_netdev(struct ib_device *ib_dev, struct net_device *ndev,
 	netdev_hold(ndev, &pdata->netdev_tracker, GFP_ATOMIC);
 	spin_unlock_irqrestore(&pdata->netdev_lock, flags);
 
-	add_ndev_hash(ib_dev, pdata);
+	add_ndev_hash(pdata);
 
 	/* Make sure that the device is registered before we send events */
 	if (xa_load(&devices, ib_dev->index) != ib_dev)
@@ -2296,10 +2257,6 @@ static void free_netdevs(struct ib_device *ib_dev)
 			spin_lock(&ndev_hash_lock);
 			hash_del_rcu(&pdata->ndev_hash_link);
 			spin_unlock(&ndev_hash_lock);
-			if (IS_ENABLED(CONFIG_NET_DEV_REFCNT_TRACKER))
-				pr_info("Removed from hash: ib_dev=%p (%d)(%s) ndev=%p (%d)(%s)\n",
-					ib_dev, refcount_read(&ib_dev->refcount), ib_dev->name,
-					ndev, netdev_refcnt_read(ndev), ndev->name);
 
 			/*
 			 * If this is the last dev_put there is still a
@@ -2456,9 +2413,40 @@ void ib_enum_all_roce_netdevs(roce_netdev_filter filter,
 	unsigned long index;
 
 	down_read(&devices_rwsem);
-	xa_for_each_marked (&devices, index, dev, DEVICE_REGISTERED)
+	xa_for_each_marked(&devices, index, dev, DEVICE_GID_UPDATES)
 		ib_enum_roce_netdev(dev, filter, filter_cookie, cb, cookie);
 	up_read(&devices_rwsem);
+}
+
+/**
+ * ib_device_enable_gid_updates - Mark device as ready for GID cache updates
+ * @device: Device to mark
+ *
+ * Called after GID table is allocated and initialized. After this mark is set,
+ * netdevice event handlers can update the device's GID cache. This allows
+ * events that arrive during device registration to be processed, avoiding
+ * stale GID entries when netdev properties change during the device
+ * registration process.
+ */
+void ib_device_enable_gid_updates(struct ib_device *device)
+{
+	down_write(&devices_rwsem);
+	xa_set_mark(&devices, device->index, DEVICE_GID_UPDATES);
+	up_write(&devices_rwsem);
+}
+
+/**
+ * ib_device_disable_gid_updates - Clear the GID updates mark
+ * @device: Device to unmark
+ *
+ * Called before GID table cleanup to prevent event handlers from accessing
+ * the device while it's being torn down.
+ */
+void ib_device_disable_gid_updates(struct ib_device *device)
+{
+	down_write(&devices_rwsem);
+	xa_clear_mark(&devices, device->index, DEVICE_GID_UPDATES);
+	up_write(&devices_rwsem);
 }
 
 /*
@@ -2718,6 +2706,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 
 	dev_ops->uverbs_no_driver_id_binding |=
 		ops->uverbs_no_driver_id_binding;
+	dev_ops->uverbs_robust_udata |= ops->uverbs_robust_udata;
 
 	SET_DEVICE_OP(dev_ops, add_gid);
 	SET_DEVICE_OP(dev_ops, add_sub_dev);
@@ -2744,7 +2733,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, create_ah);
 	SET_DEVICE_OP(dev_ops, create_counters);
 	SET_DEVICE_OP(dev_ops, create_cq);
-	SET_DEVICE_OP(dev_ops, create_cq_umem);
+	SET_DEVICE_OP(dev_ops, create_user_cq);
 	SET_DEVICE_OP(dev_ops, create_flow);
 	SET_DEVICE_OP(dev_ops, create_qp);
 	SET_DEVICE_OP(dev_ops, create_rwq_ind_table);
@@ -2793,7 +2782,6 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, get_netdev);
 	SET_DEVICE_OP(dev_ops, get_numa_node);
 	SET_DEVICE_OP(dev_ops, get_port_immutable);
-	SET_DEVICE_OP(dev_ops, get_vector_affinity);
 	SET_DEVICE_OP(dev_ops, get_vf_config);
 	SET_DEVICE_OP(dev_ops, get_vf_guid);
 	SET_DEVICE_OP(dev_ops, get_vf_stats);
@@ -2808,6 +2796,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, map_mr_sg);
 	SET_DEVICE_OP(dev_ops, map_mr_sg_pi);
 	SET_DEVICE_OP(dev_ops, mmap);
+	SET_DEVICE_OP(dev_ops, mmap_get_pfns);
 	SET_DEVICE_OP(dev_ops, mmap_free);
 	SET_DEVICE_OP(dev_ops, modify_ah);
 	SET_DEVICE_OP(dev_ops, modify_cq);
@@ -2818,6 +2807,7 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
 	SET_DEVICE_OP(dev_ops, modify_srq);
 	SET_DEVICE_OP(dev_ops, modify_wq);
 	SET_DEVICE_OP(dev_ops, peek_cq);
+	SET_DEVICE_OP(dev_ops, pgoff_to_mmap_entry);
 	SET_DEVICE_OP(dev_ops, pre_destroy_cq);
 	SET_DEVICE_OP(dev_ops, poll_cq);
 	SET_DEVICE_OP(dev_ops, port_groups);

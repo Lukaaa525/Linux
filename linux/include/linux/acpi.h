@@ -66,7 +66,7 @@ static inline struct fwnode_handle *acpi_alloc_fwnode_static(void)
 {
 	struct fwnode_handle *fwnode;
 
-	fwnode = kzalloc(sizeof(struct fwnode_handle), GFP_KERNEL);
+	fwnode = kzalloc_obj(struct fwnode_handle);
 	if (!fwnode)
 		return NULL;
 
@@ -107,6 +107,7 @@ enum acpi_irq_model_id {
 	ACPI_IRQ_MODEL_IOSAPIC,
 	ACPI_IRQ_MODEL_PLATFORM,
 	ACPI_IRQ_MODEL_GIC,
+	ACPI_IRQ_MODEL_GIC_V5,
 	ACPI_IRQ_MODEL_LPIC,
 	ACPI_IRQ_MODEL_RINTC,
 	ACPI_IRQ_MODEL_COUNT
@@ -790,6 +791,14 @@ const char *acpi_get_subsystem_id(acpi_handle handle);
 int acpi_mrrm_max_mem_region(void);
 #endif
 
+#define ACPI_CMOS_RTC_IDS	\
+	{ "PNP0B00", },		\
+	{ "PNP0B01", },		\
+	{ "PNP0B02", },		\
+	{ "", }
+
+extern bool cmos_rtc_platform_device_present;
+
 #else	/* !CONFIG_ACPI */
 
 #define acpi_disabled 1
@@ -1114,6 +1123,8 @@ static inline int acpi_mrrm_max_mem_region(void)
 {
 	return 1;
 }
+
+#define cmos_rtc_platform_device_present	false
 
 #endif	/* !CONFIG_ACPI */
 

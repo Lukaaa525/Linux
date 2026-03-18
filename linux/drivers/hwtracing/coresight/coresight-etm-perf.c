@@ -260,7 +260,7 @@ static void *alloc_event_data(int cpu)
 	struct etm_event_data *event_data;
 
 	/* First get memory for the session's data */
-	event_data = kzalloc(sizeof(struct etm_event_data), GFP_KERNEL);
+	event_data = kzalloc_obj(struct etm_event_data);
 	if (!event_data)
 		return NULL;
 
@@ -902,7 +902,10 @@ int etm_perf_add_symlink_sink(struct coresight_device *csdev)
 
 	if (csdev->type != CORESIGHT_DEV_TYPE_SINK &&
 	    csdev->type != CORESIGHT_DEV_TYPE_LINKSINK)
-		return -EINVAL;
+		return -EOPNOTSUPP;
+
+	if (!sink_ops(csdev)->alloc_buffer)
+		return -EOPNOTSUPP;
 
 	if (csdev->ea != NULL)
 		return -EINVAL;

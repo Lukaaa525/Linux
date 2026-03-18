@@ -21,7 +21,6 @@
 #include <bpf/libbpf.h>
 #include <bpf/btf.h>
 #endif
-#include "util/bpf_map.h"
 #include "util/rlimit.h"
 #include "builtin.h"
 #include "util/cgroup.h"
@@ -1565,7 +1564,9 @@ static bool syscall_id_equal(long key1, long key2, void *ctx __maybe_unused)
 
 static struct hashmap *alloc_syscall_stats(void)
 {
-	return hashmap__new(syscall_id_hash, syscall_id_equal, NULL);
+	struct hashmap *result = hashmap__new(syscall_id_hash, syscall_id_equal, NULL);
+
+	return IS_ERR(result) ? NULL : result;
 }
 
 static void delete_syscall_stats(struct hashmap *syscall_stats)
@@ -1573,7 +1574,7 @@ static void delete_syscall_stats(struct hashmap *syscall_stats)
 	struct hashmap_entry *pos;
 	size_t bkt;
 
-	if (syscall_stats == NULL)
+	if (!syscall_stats)
 		return;
 
 	hashmap__for_each_entry(syscall_stats, pos, bkt)
@@ -1589,7 +1590,7 @@ static struct thread_trace *thread_trace__new(struct trace *trace)
 		ttrace->files.max = -1;
 		if (trace->summary) {
 			ttrace->syscall_stats = alloc_syscall_stats();
-			if (IS_ERR(ttrace->syscall_stats))
+			if (!ttrace->syscall_stats)
 				zfree(&ttrace);
 		}
 	}
@@ -2616,12 +2617,10 @@ static struct syscall *trace__syscall_info(struct trace *trace, struct evsel *ev
 		err = syscall__read_info(sc, trace);
 
 	if (err && verbose > 0) {
-		char sbuf[STRERR_BUFSIZE];
-
-		fprintf(trace->output, "Problems reading syscall %d: %d (%s)", id, -err,
-			str_error_r(-err, sbuf, sizeof(sbuf)));
+		errno = -err;
+		fprintf(trace->output, "Problems reading syscall %d: %m", id);
 		if (sc && sc->name)
-			fprintf(trace->output, "(%s)", sc->name);
+			fprintf(trace->output, " (%s)", sc->name);
 		fputs(" information\n", trace->output);
 	}
 	return err ? NULL : sc;
@@ -2791,7 +2790,7 @@ static int trace__sys_enter(struct trace *trace, struct evsel *evsel,
 	struct thread_trace *ttrace;
 
 	thread = machine__findnew_thread(trace->host, sample->pid, sample->tid);
-	e_machine = thread__e_machine(thread, trace->host);
+	e_machine = thread__e_machine(thread, trace->host, /*e_flags=*/NULL);
 	sc = trace__syscall_info(trace, evsel, e_machine, id);
 	if (sc == NULL)
 		goto out_put;
@@ -2870,7 +2869,7 @@ static int trace__fprintf_sys_enter(struct trace *trace, struct evsel *evsel,
 
 
 	thread = machine__findnew_thread(trace->host, sample->pid, sample->tid);
-	e_machine = thread__e_machine(thread, trace->host);
+	e_machine = thread__e_machine(thread, trace->host, /*e_flags=*/NULL);
 	sc = trace__syscall_info(trace, evsel, e_machine, id);
 	if (sc == NULL)
 		goto out_put;
@@ -2936,7 +2935,7 @@ static int trace__sys_exit(struct trace *trace, struct evsel *evsel,
 	struct thread_trace *ttrace;
 
 	thread = machine__findnew_thread(trace->host, sample->pid, sample->tid);
-	e_machine = thread__e_machine(thread, trace->host);
+	e_machine = thread__e_machine(thread, trace->host, /*e_flags=*/NULL);
 	sc = trace__syscall_info(trace, evsel, e_machine, id);
 	if (sc == NULL)
 		goto out_put;
@@ -3287,7 +3286,9 @@ static int trace__event_handler(struct trace *trace, struct evsel *evsel,
 
 	if (evsel == trace->syscalls.events.bpf_output) {
 		int id = perf_evsel__sc_tp_uint(evsel, id, sample);
-		int e_machine = thread ? thread__e_machine(thread, trace->host) : EM_HOST;
+		int e_machine = thread
+			? thread__e_machine(thread, trace->host, /*e_flags=*/NULL)
+			: EM_HOST;
 		struct syscall *sc = trace__syscall_info(trace, evsel, e_machine, id);
 
 		if (sc) {
@@ -4464,7 +4465,7 @@ create_maps:
 
 	if (trace->summary_mode == SUMMARY__BY_TOTAL && !trace->summary_bpf) {
 		trace->syscall_stats = alloc_syscall_stats();
-		if (IS_ERR(trace->syscall_stats))
+		if (!trace->syscall_stats)
 			goto out_delete_evlist;
 	}
 
@@ -4673,9 +4674,8 @@ out_error:
 
 out_error_apply_filters:
 	fprintf(trace->output,
-		"Failed to set filter \"%s\" on event %s with %d (%s)\n",
-		evsel->filter, evsel__name(evsel), errno,
-		str_error_r(errno, errbuf, sizeof(errbuf)));
+		"Failed to set filter \"%s\" on event %s: %m\n",
+		evsel->filter, evsel__name(evsel));
 	goto out_delete_evlist;
 }
 out_error_mem:
@@ -4683,7 +4683,7 @@ out_error_mem:
 	goto out_delete_evlist;
 
 out_errno:
-	fprintf(trace->output, "errno=%d,%s\n", errno, strerror(errno));
+	fprintf(trace->output, "%m\n");
 	goto out_delete_evlist;
 }
 
@@ -4772,7 +4772,7 @@ static int trace__replay(struct trace *trace)
 
 	if (trace->summary_mode == SUMMARY__BY_TOTAL) {
 		trace->syscall_stats = alloc_syscall_stats();
-		if (IS_ERR(trace->syscall_stats))
+		if (!trace->syscall_stats)
 			goto out;
 	}
 
@@ -4919,7 +4919,7 @@ static size_t trace__fprintf_thread(FILE *fp, struct thread *thread, struct trac
 {
 	size_t printed = 0;
 	struct thread_trace *ttrace = thread__priv(thread);
-	int e_machine = thread__e_machine(thread, trace->host);
+	int e_machine = thread__e_machine(thread, trace->host, /*e_flags=*/NULL);
 	double ratio;
 
 	if (ttrace == NULL)
@@ -5193,7 +5193,7 @@ static int trace__parse_events_option(const struct option *opt, const char *str,
 	}
 
 	while (1) {
-		if ((sep = strchr(s, ',')) != NULL)
+		if ((sep = strchr((char *)s, ',')) != NULL)
 			*sep = '\0';
 
 		list = 0;

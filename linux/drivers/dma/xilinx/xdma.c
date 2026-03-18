@@ -61,6 +61,8 @@ struct xdma_desc_block {
  * @dir: Transferring direction of the channel
  * @cfg: Transferring config of the channel
  * @irq: IRQ assigned to the channel
+ * @last_interrupt: task for comppleting last interrupt
+ * @stop_requested: stop request flag
  */
 struct xdma_chan {
 	struct virt_dma_chan		vchan;
@@ -275,7 +277,7 @@ xdma_alloc_desc(struct xdma_chan *chan, u32 desc_num, bool cyclic)
 	void *addr;
 	int i, j;
 
-	sw_desc = kzalloc(sizeof(*sw_desc), GFP_NOWAIT);
+	sw_desc = kzalloc_obj(*sw_desc, GFP_NOWAIT);
 	if (!sw_desc)
 		return NULL;
 
@@ -284,8 +286,8 @@ xdma_alloc_desc(struct xdma_chan *chan, u32 desc_num, bool cyclic)
 	sw_desc->cyclic = cyclic;
 	sw_desc->error = false;
 	dblk_num = DIV_ROUND_UP(desc_num, XDMA_DESC_ADJACENT);
-	sw_desc->desc_blocks = kcalloc(dblk_num, sizeof(*sw_desc->desc_blocks),
-				       GFP_NOWAIT);
+	sw_desc->desc_blocks = kzalloc_objs(*sw_desc->desc_blocks, dblk_num,
+					    GFP_NOWAIT);
 	if (!sw_desc->desc_blocks)
 		goto failed;
 
@@ -1234,8 +1236,8 @@ static int xdma_probe(struct platform_device *pdev)
 
 	xdev->rmap = devm_regmap_init_mmio(&pdev->dev, reg_base,
 					   &xdma_regmap_config);
-	if (!xdev->rmap) {
-		xdma_err(xdev, "config regmap failed: %d", ret);
+	if (IS_ERR(xdev->rmap)) {
+		xdma_err(xdev, "config regmap failed: %pe", xdev->rmap);
 		goto failed;
 	}
 	INIT_LIST_HEAD(&xdev->dma_dev.channels);

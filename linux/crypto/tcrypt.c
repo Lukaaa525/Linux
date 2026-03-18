@@ -180,7 +180,7 @@ static int test_mb_aead_jiffies(struct test_mb_aead_data *data, int enc,
 	int ret = 0;
 	int *rc;
 
-	rc = kcalloc(num_mb, sizeof(*rc), GFP_KERNEL);
+	rc = kzalloc_objs(*rc, num_mb);
 	if (!rc)
 		return -ENOMEM;
 
@@ -207,7 +207,7 @@ static int test_mb_aead_cycles(struct test_mb_aead_data *data, int enc,
 	int i;
 	int *rc;
 
-	rc = kcalloc(num_mb, sizeof(*rc), GFP_KERNEL);
+	rc = kzalloc_objs(*rc, num_mb);
 	if (!rc)
 		return -ENOMEM;
 
@@ -270,7 +270,7 @@ static void test_mb_aead_speed(const char *algo, int enc, int secs,
 	else
 		e = "decryption";
 
-	data = kcalloc(num_mb, sizeof(*data), GFP_KERNEL);
+	data = kzalloc_objs(*data, num_mb);
 	if (!data)
 		goto out_free_iv;
 
@@ -911,8 +911,14 @@ static void test_ahash_speed_common(const char *algo, unsigned int secs,
 			break;
 		}
 
-		if (klen)
-			crypto_ahash_setkey(tfm, tvmem[0], klen);
+		if (klen) {
+			ret = crypto_ahash_setkey(tfm, tvmem[0], klen);
+			if (ret) {
+				pr_err("setkey() failed flags=%x: %d\n",
+				       crypto_ahash_get_flags(tfm), ret);
+				break;
+			}
+		}
 
 		pr_info("test%3u "
 			"(%5u byte blocks,%5u bytes per update,%4u updates): ",
@@ -997,7 +1003,7 @@ static int test_mb_acipher_jiffies(struct test_mb_skcipher_data *data, int enc,
 	int ret = 0;
 	int *rc;
 
-	rc = kcalloc(num_mb, sizeof(*rc), GFP_KERNEL);
+	rc = kzalloc_objs(*rc, num_mb);
 	if (!rc)
 		return -ENOMEM;
 
@@ -1024,7 +1030,7 @@ static int test_mb_acipher_cycles(struct test_mb_skcipher_data *data, int enc,
 	int i;
 	int *rc;
 
-	rc = kcalloc(num_mb, sizeof(*rc), GFP_KERNEL);
+	rc = kzalloc_objs(*rc, num_mb);
 	if (!rc)
 		return -ENOMEM;
 
@@ -1075,7 +1081,7 @@ static void test_mb_skcipher_speed(const char *algo, int enc, int secs,
 	else
 		e = "decryption";
 
-	data = kcalloc(num_mb, sizeof(*data), GFP_KERNEL);
+	data = kzalloc_objs(*data, num_mb);
 	if (!data)
 		return;
 
@@ -2806,6 +2812,11 @@ static int __init tcrypt_mod_init(void)
 		tvmem[i] = (void *)__get_free_page(GFP_KERNEL);
 		if (!tvmem[i])
 			goto err_free_tv;
+	}
+
+	if (!num_mb) {
+		pr_warn("num_mb must be at least 1; forcing to 1\n");
+		num_mb = 1;
 	}
 
 	err = do_test(alg, type, mask, mode, num_mb);

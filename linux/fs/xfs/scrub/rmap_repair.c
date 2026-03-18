@@ -164,18 +164,15 @@ xrep_setup_ag_rmapbt(
 	struct xfs_scrub	*sc)
 {
 	struct xrep_rmap	*rr;
-	char			*descr;
 	int			error;
 
 	xchk_fsgates_enable(sc, XCHK_FSGATES_RMAP);
 
-	descr = xchk_xfile_ag_descr(sc, "reverse mapping records");
-	error = xrep_setup_xfbtree(sc, descr);
-	kfree(descr);
+	error = xrep_setup_xfbtree(sc, "reverse mapping records");
 	if (error)
 		return error;
 
-	rr = kzalloc(sizeof(struct xrep_rmap), XCHK_GFP_FLAGS);
+	rr = kzalloc_obj(struct xrep_rmap, XCHK_GFP_FLAGS);
 	if (!rr)
 		return -ENOMEM;
 

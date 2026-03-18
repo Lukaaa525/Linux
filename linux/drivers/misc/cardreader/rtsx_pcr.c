@@ -1385,8 +1385,7 @@ static int rtsx_pci_init_chip(struct rtsx_pcr *pcr)
 	pcr_dbg(pcr, "PID: 0x%04x, IC version: 0x%02x\n",
 			PCI_PID(pcr), pcr->ic_version);
 
-	pcr->slots = kcalloc(pcr->num_slots, sizeof(struct rtsx_slot),
-			GFP_KERNEL);
+	pcr->slots = kzalloc_objs(struct rtsx_slot, pcr->num_slots);
 	if (!pcr->slots)
 		return -ENOMEM;
 
@@ -1494,13 +1493,13 @@ static int rtsx_pci_probe(struct pci_dev *pcidev,
 	if (ret)
 		goto disable;
 
-	pcr = kzalloc(sizeof(*pcr), GFP_KERNEL);
+	pcr = kzalloc_obj(*pcr);
 	if (!pcr) {
 		ret = -ENOMEM;
 		goto release_pci;
 	}
 
-	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	handle = kzalloc_obj(*handle);
 	if (!handle) {
 		ret = -ENOMEM;
 		goto free_pcr;
@@ -1654,16 +1653,12 @@ static int __maybe_unused rtsx_pci_suspend(struct device *dev_d)
 	struct pci_dev *pcidev = to_pci_dev(dev_d);
 	struct pcr_handle *handle = pci_get_drvdata(pcidev);
 	struct rtsx_pcr *pcr = handle->pcr;
-	struct rtsx_slot *slot = &pcr->slots[RTSX_SD_CARD];
 
 	dev_dbg(&(pcidev->dev), "--> %s\n", __func__);
 
 	cancel_delayed_work_sync(&pcr->carddet_work);
 
 	mutex_lock(&pcr->pcr_mutex);
-
-	if (slot->p_dev && slot->power_off)
-		slot->power_off(slot->p_dev);
 
 	rtsx_pci_power_off(pcr, HOST_ENTER_S3, false);
 
@@ -1776,17 +1771,12 @@ static int rtsx_pci_runtime_suspend(struct device *device)
 	struct pci_dev *pcidev = to_pci_dev(device);
 	struct pcr_handle *handle = pci_get_drvdata(pcidev);
 	struct rtsx_pcr *pcr = handle->pcr;
-	struct rtsx_slot *slot = &pcr->slots[RTSX_SD_CARD];
 
 	dev_dbg(device, "--> %s\n", __func__);
 
 	cancel_delayed_work_sync(&pcr->carddet_work);
 
 	mutex_lock(&pcr->pcr_mutex);
-
-	if (slot->p_dev && slot->power_off)
-		slot->power_off(slot->p_dev);
-
 	rtsx_pci_power_off(pcr, HOST_ENTER_S3, true);
 
 	mutex_unlock(&pcr->pcr_mutex);

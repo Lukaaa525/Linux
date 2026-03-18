@@ -307,7 +307,7 @@ static const struct snd_soc_component_driver mpc5200_audio_dma_component = {
 	.close		= psc_dma_close,
 	.pointer	= psc_dma_pointer,
 	.trigger	= psc_dma_trigger,
-	.pcm_construct	= psc_dma_new,
+	.pcm_new	= psc_dma_new,
 };
 
 int mpc5200_audio_dma_create(struct platform_device *op)
@@ -333,7 +333,7 @@ int mpc5200_audio_dma_create(struct platform_device *op)
 	}
 
 	/* Allocate and initialize the driver private data */
-	psc_dma = kzalloc(sizeof *psc_dma, GFP_KERNEL);
+	psc_dma = kzalloc_obj(*psc_dma);
 	if (!psc_dma) {
 		ret = -ENOMEM;
 		goto out_unmap;

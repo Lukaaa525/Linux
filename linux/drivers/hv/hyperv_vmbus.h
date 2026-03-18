@@ -276,8 +276,9 @@ struct vmbus_connection {
 	struct list_head chn_list;
 	struct mutex channel_mutex;
 
-	/* Array of channels */
+	/* Array of channel pointers, indexed by relid */
 	struct vmbus_channel **channels;
+	u32 relid_hiwater;
 
 	/*
 	 * An offer message is handled first on the work_queue, and then
@@ -370,8 +371,8 @@ static inline void vmbus_signal_eom(struct hv_message *msg, u32 old_msg_type)
 	 * CHANNELMSG_UNLOAD_RESPONSE and we don't care about other messages
 	 * on crash.
 	 */
-	if (cmpxchg(&msg->header.message_type, old_msg_type,
-		    HVMSG_NONE) != old_msg_type)
+	if (!try_cmpxchg(&msg->header.message_type,
+			 &old_msg_type, HVMSG_NONE))
 		return;
 
 	/*

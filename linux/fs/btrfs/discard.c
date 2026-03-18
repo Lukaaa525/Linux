@@ -230,8 +230,8 @@ static bool block_group_is_empty(const struct btrfs_block_group *bg)
 {
 	if (bg->flags & BTRFS_BLOCK_GROUP_REMAPPED)
 		return bg->identity_remap_count == 0;
-	else
-		return bg->used == 0 && bg->remap_bytes == 0;
+
+	return bg->used == 0 && bg->remap_bytes == 0;
 }
 
 /*
@@ -260,7 +260,7 @@ again:
 	block_group = find_next_block_group(discard_ctl, now);
 
 	if (block_group && now >= block_group->discard_eligible_time) {
-		bool empty = block_group_is_empty(block_group);
+		const bool empty = block_group_is_empty(block_group);
 
 		if (block_group->discard_index == BTRFS_DISCARD_INDEX_UNUSED &&
 		    !empty) {

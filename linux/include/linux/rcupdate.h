@@ -406,7 +406,7 @@ static inline void rcu_preempt_sleep_check(void) { }
 
 // See RCU_LOCKDEP_WARN() for an explanation of the double call to
 // debug_lockdep_rcu_enabled().
-static inline bool lockdep_assert_rcu_helper(bool c, const struct __ctx_lock_RCU *ctx)
+static __always_inline bool lockdep_assert_rcu_helper(bool c, const struct __ctx_lock_RCU *ctx)
 	__assumes_shared_ctx_lock(RCU) __assumes_shared_ctx_lock(ctx)
 {
 	return debug_lockdep_rcu_enabled() &&
@@ -1074,8 +1074,8 @@ static inline void rcu_read_unlock_migrate(void)
  * either fall back to use of call_rcu() or rearrange the structure to
  * position the rcu_head structure into the first 4096 bytes.
  *
- * The object to be freed can be allocated either by kmalloc() or
- * kmem_cache_alloc().
+ * The object to be freed can be allocated either by kmalloc(),
+ * kmalloc_nolock(), or kmem_cache_alloc().
  *
  * Note that the allowable offset might decrease in the future.
  *

@@ -3168,11 +3168,12 @@ void rmap_walk_ksm(struct folio *folio, struct rmap_walk_control *rwc)
 		return;
 again:
 	hlist_for_each_entry(rmap_item, &stable_node->hlist, hlist) {
+		/* Ignore the stable/unstable/sqnr flags */
+		const unsigned long addr = rmap_item->address & PAGE_MASK;
+		const pgoff_t pgoff = rmap_item->address >> PAGE_SHIFT;
 		struct anon_vma *anon_vma = rmap_item->anon_vma;
 		struct anon_vma_chain *vmac;
 		struct vm_area_struct *vma;
-		unsigned long addr;
-		pgoff_t pgoff_start, pgoff_end;
 
 		cond_resched();
 		if (!anon_vma_trylock_read(anon_vma)) {
@@ -3183,14 +3184,12 @@ again:
 			anon_vma_lock_read(anon_vma);
 		}
 
-		/* Ignore the stable/unstable/sqnr flags */
-		addr = rmap_item->address & PAGE_MASK;
-
-		pgoff_start = rmap_item->address >> PAGE_SHIFT;
-		pgoff_end = pgoff_start + folio_nr_pages(folio) - 1;
-
+		/*
+		 * Currently KSM folios are order-0 normal pages, so pgoff_end
+		 * should be the same as pgoff_start.
+		 */
 		anon_vma_interval_tree_foreach(vmac, &anon_vma->rb_root,
-					       pgoff_start, pgoff_end) {
+					       pgoff, pgoff) {
 
 			cond_resched();
 			vma = vmac->vma;
@@ -3591,8 +3590,7 @@ static ssize_t merge_across_nodes_store(struct kobject *kobj,
 			 * Allocate stable and unstable together:
 			 * MAXSMP NODES_SHIFT 10 will use 16kB.
 			 */
-			buf = kcalloc(nr_node_ids + nr_node_ids, sizeof(*buf),
-				      GFP_KERNEL);
+			buf = kzalloc_objs(*buf, nr_node_ids + nr_node_ids);
 			/* Let us assume that RB_ROOT is NULL is zero */
 			if (!buf)
 				err = -ENOMEM;

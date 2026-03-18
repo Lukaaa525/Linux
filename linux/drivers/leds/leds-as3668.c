@@ -32,10 +32,10 @@
 #define AS3668_CURR3_REG		0x04
 #define AS3668_CURR4_REG		0x05
 
-#define AS3668_CURR_MODE_PACK(mode)	((mode) << 0) | \
+#define AS3668_CURR_MODE_PACK(mode)	(((mode) << 0) | \
 					((mode) << 2) | \
 					((mode) << 4) | \
-					((mode) << 6)
+					((mode) << 6))
 
 struct as3668_led {
 	struct led_classdev cdev;
@@ -50,23 +50,22 @@ struct as3668 {
 	struct as3668_led leds[AS3668_MAX_LEDS];
 };
 
-static void as3668_channel_mode_set(struct as3668_led *led, u8 mode)
+static int as3668_channel_mode_set(struct as3668_led *led, u8 mode)
 {
-	int err;
+	int ret;
 	u8 channel_modes;
 
-	channel_modes = i2c_smbus_read_byte_data(led->chip->client, AS3668_CURR_MODE_REG);
-	if (channel_modes < 0) {
+	ret = i2c_smbus_read_byte_data(led->chip->client, AS3668_CURR_MODE_REG);
+	if (ret < 0) {
 		dev_err(led->cdev.dev, "failed to read channel modes\n");
-		return;
+		return ret;
 	}
+	channel_modes = (u8)ret;
 
 	channel_modes &= ~led->mode_mask;
 	channel_modes |= led->mode_mask & (AS3668_CURR_MODE_PACK(mode));
 
-	err = i2c_smbus_write_byte_data(led->chip->client, AS3668_CURR_MODE_REG, channel_modes);
-	if (err)
-		dev_err(led->cdev.dev, "failed to set channel modes\n");
+	return i2c_smbus_write_byte_data(led->chip->client, AS3668_CURR_MODE_REG, channel_modes);
 }
 
 static enum led_brightness as3668_brightness_get(struct led_classdev *cdev)
@@ -81,10 +80,11 @@ static void as3668_brightness_set(struct led_classdev *cdev, enum led_brightness
 	struct as3668_led *led = container_of(cdev, struct as3668_led, cdev);
 	int err;
 
-	as3668_channel_mode_set(led, !!brightness);
+	err = as3668_channel_mode_set(led, !!brightness);
+	if (err)
+		dev_err(cdev->dev, "failed to set channel mode: %d\n", err);
 
 	err = i2c_smbus_write_byte_data(led->chip->client, led->current_reg, brightness);
-
 	if (err)
 		dev_err(cdev->dev, "failed to set brightness: %d\n", err);
 }

@@ -197,7 +197,7 @@ static struct rds_connection *__rds_conn_create(struct net *net,
 		conn = ERR_PTR(-ENOMEM);
 		goto out;
 	}
-	conn->c_path = kcalloc(npaths, sizeof(struct rds_conn_path), gfp);
+	conn->c_path = kzalloc_objs(struct rds_conn_path, npaths, gfp);
 	if (!conn->c_path) {
 		kmem_cache_free(rds_conn_slab, conn);
 		conn = ERR_PTR(-ENOMEM);
@@ -395,6 +395,8 @@ void rds_conn_shutdown(struct rds_conn_path *cp)
 		if (!rds_conn_path_transition(cp, RDS_CONN_UP,
 					      RDS_CONN_DISCONNECTING) &&
 		    !rds_conn_path_transition(cp, RDS_CONN_ERROR,
+					      RDS_CONN_DISCONNECTING) &&
+		    !rds_conn_path_transition(cp, RDS_CONN_RESETTING,
 					      RDS_CONN_DISCONNECTING)) {
 			rds_conn_path_error(cp,
 					    "shutdown called in state %d\n",
@@ -440,13 +442,24 @@ void rds_conn_shutdown(struct rds_conn_path *cp)
 	 * to the conn hash, so we never trigger a reconnect on this
 	 * conn - the reconnect is always triggered by the active peer. */
 	cancel_delayed_work_sync(&cp->cp_conn_w);
+
+	clear_bit(RDS_RECONNECT_PENDING, &cp->cp_flags);
 	rcu_read_lock();
 	if (!hlist_unhashed(&conn->c_hash_node)) {
 		rcu_read_unlock();
+		if (conn->c_trans->t_mp_capable &&
+		    cp->cp_index == 0)
+			rds_send_ping(conn, 0);
 		rds_queue_reconnect(cp);
 	} else {
 		rcu_read_unlock();
 	}
+
+	/* we do not hold the socket lock here but it is safe because
+	 * fan-out is disabled when calling conn_slots_available()
+	 */
+	if (conn->c_trans->conn_slots_available)
+		conn->c_trans->conn_slots_available(conn, false);
 }
 
 /* destroy a single rds_conn_path. rds_conn_destroy() iterates over

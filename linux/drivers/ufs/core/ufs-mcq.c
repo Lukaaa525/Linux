@@ -273,12 +273,17 @@ void ufshcd_mcq_write_cqis(struct ufs_hba *hba, u32 val, int i)
 EXPORT_SYMBOL_GPL(ufshcd_mcq_write_cqis);
 
 /*
- * Current MCQ specification doesn't provide a Task Tag or its equivalent in
+ * UFSHCI 4.0 MCQ specification doesn't provide a Task Tag or its equivalent in
  * the Completion Queue Entry. Find the Task Tag using an indirect method.
+ * UFSHCI 4.1 and above can directly return the Task Tag in the Completion Queue
+ * Entry.
  */
 static int ufshcd_mcq_get_tag(struct ufs_hba *hba, struct cq_entry *cqe)
 {
 	u64 addr;
+
+	if (hba->ufs_version >= ufshci_version(4, 1))
+		return cqe->task_tag;
 
 	/* sizeof(struct utp_transfer_cmd_desc) must be a multiple of 128 */
 	BUILD_BUG_ON(sizeof(struct utp_transfer_cmd_desc) & GENMASK(6, 0));
@@ -301,6 +306,8 @@ static void ufshcd_mcq_process_cqe(struct ufs_hba *hba,
 		ufshcd_compl_one_cqe(hba, tag, cqe);
 		/* After processed the cqe, mark it empty (invalid) entry */
 		cqe->command_desc_base_addr = 0;
+	} else {
+		dev_err(hba->dev, "Abnormal CQ entry!\n");
 	}
 }
 
@@ -444,7 +451,6 @@ EXPORT_SYMBOL_GPL(ufshcd_mcq_config_esi);
 
 int ufshcd_mcq_init(struct ufs_hba *hba)
 {
-	struct Scsi_Host *host = hba->host;
 	struct ufs_hw_queue *hwq;
 	int ret, i;
 
@@ -478,7 +484,6 @@ int ufshcd_mcq_init(struct ufs_hba *hba)
 		mutex_init(&hwq->sq_mutex);
 	}
 
-	host->host_tagset = 1;
 	return 0;
 }
 

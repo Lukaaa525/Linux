@@ -132,8 +132,8 @@ intel_uncore_forcewake_domain_to_str(const enum forcewake_domain_id id)
 }
 
 #define fw_ack(d) readl((d)->reg_ack)
-#define fw_set(d, val) writel(_MASKED_BIT_ENABLE((val)), (d)->reg_set)
-#define fw_clear(d, val) writel(_MASKED_BIT_DISABLE((val)), (d)->reg_set)
+#define fw_set(d, val) writel(REG_MASKED_FIELD_ENABLE((val)), (d)->reg_set)
+#define fw_clear(d, val) writel(REG_MASKED_FIELD_DISABLE((val)), (d)->reg_set)
 
 static inline void
 fw_domain_reset(const struct intel_uncore_forcewake_domain *d)
@@ -2072,7 +2072,7 @@ static int __fw_domain_init(struct intel_uncore *uncore,
 	GEM_BUG_ON(domain_id >= FW_DOMAIN_ID_COUNT);
 	GEM_BUG_ON(uncore->fw_domain[domain_id]);
 
-	d = kzalloc(sizeof(*d), GFP_KERNEL);
+	d = kzalloc_obj(*d);
 	if (!d)
 		return -ENOMEM;
 

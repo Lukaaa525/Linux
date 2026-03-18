@@ -7077,10 +7077,21 @@ static void calculate_excess_vactive_bandwidth_required(
 	}
 }
 
-static double uclk_khz_to_dram_bw_mbps(unsigned long uclk_khz, const struct dml2_dram_params *dram_config)
+static double uclk_khz_to_dram_bw_mbps(unsigned long uclk_khz, const struct dml2_dram_params *dram_config, const struct dml2_mcg_dram_bw_to_min_clk_table *dram_bw_table)
 {
 	double bw_mbps = 0;
-	bw_mbps = ((double)uclk_khz * dram_config->channel_count * dram_config->channel_width_bytes * dram_config->transactions_per_clock) / 1000.0;
+	unsigned int i;
+
+	if (!dram_config->alt_clock_bw_conversion)
+		bw_mbps = ((double)uclk_khz * dram_config->channel_count * dram_config->channel_width_bytes * dram_config->transactions_per_clock) / 1000.0;
+	else
+		for (i = 0; i < dram_bw_table->num_entries; i++)
+			if (dram_bw_table->entries[i].min_uclk_khz >= uclk_khz) {
+				bw_mbps = (double)dram_bw_table->entries[i].pre_derate_dram_bw_kbps / 1000.0;
+				break;
+			}
+
+	DML_ASSERT(bw_mbps > 0);
 
 	return bw_mbps;
 }
@@ -7964,7 +7975,9 @@ static bool dml_core_mode_support(struct dml2_core_calcs_mode_support_ex *in_out
 	mode_lib->ms.max_dispclk_freq_mhz = (double)min_clk_table->max_ss_clocks_khz.dispclk / 1000;
 	mode_lib->ms.max_dscclk_freq_mhz = (double)min_clk_table->max_clocks_khz.dscclk / 1000;
 	mode_lib->ms.max_dppclk_freq_mhz = (double)min_clk_table->max_ss_clocks_khz.dppclk / 1000;
-	mode_lib->ms.uclk_freq_mhz = dram_bw_kbps_to_uclk_mhz(min_clk_table->dram_bw_table.entries[in_out_params->min_clk_index].pre_derate_dram_bw_kbps, &mode_lib->soc.clk_table.dram_config);
+	mode_lib->ms.uclk_freq_mhz = (double)min_clk_table->dram_bw_table.entries[in_out_params->min_clk_index].min_uclk_khz / 1000.0;
+	if (!mode_lib->ms.uclk_freq_mhz)
+		mode_lib->ms.uclk_freq_mhz = dram_bw_kbps_to_uclk_mhz(min_clk_table->dram_bw_table.entries[in_out_params->min_clk_index].pre_derate_dram_bw_kbps, &mode_lib->soc.clk_table.dram_config);
 	mode_lib->ms.dram_bw_mbps = ((double)min_clk_table->dram_bw_table.entries[in_out_params->min_clk_index].pre_derate_dram_bw_kbps / 1000);
 	mode_lib->ms.max_dram_bw_mbps = ((double)min_clk_table->dram_bw_table.entries[min_clk_table->dram_bw_table.num_entries - 1].pre_derate_dram_bw_kbps / 1000);
 	mode_lib->ms.qos_param_index = get_qos_param_index((unsigned int) (mode_lib->ms.uclk_freq_mhz * 1000.0), mode_lib->soc.qos_parameters.qos_params.dcn4x.per_uclk_dpm_params);
@@ -10407,7 +10420,7 @@ static bool dml_core_mode_programming(struct dml2_core_calcs_mode_programming_ex
 
 	mode_lib->mp.Dcfclk = programming->min_clocks.dcn4x.active.dcfclk_khz / 1000.0;
 	mode_lib->mp.FabricClock = programming->min_clocks.dcn4x.active.fclk_khz / 1000.0;
-	mode_lib->mp.dram_bw_mbps = uclk_khz_to_dram_bw_mbps(programming->min_clocks.dcn4x.active.uclk_khz, &mode_lib->soc.clk_table.dram_config);
+	mode_lib->mp.dram_bw_mbps = uclk_khz_to_dram_bw_mbps(programming->min_clocks.dcn4x.active.uclk_khz, &mode_lib->soc.clk_table.dram_config, &min_clk_table->dram_bw_table);
 	mode_lib->mp.uclk_freq_mhz = programming->min_clocks.dcn4x.active.uclk_khz / 1000.0;
 	mode_lib->mp.GlobalDPPCLK = programming->min_clocks.dcn4x.dpprefclk_khz / 1000.0;
 	s->SOCCLK = (double)programming->min_clocks.dcn4x.socclk_khz / 1000;
@@ -10485,7 +10498,10 @@ static bool dml_core_mode_programming(struct dml2_core_calcs_mode_programming_ex
 	DML_LOG_VERBOSE("DML::%s: SOCCLK = %f\n", __func__, s->SOCCLK);
 	DML_LOG_VERBOSE("DML::%s: min_clk_index = %0d\n", __func__, in_out_params->min_clk_index);
 	DML_LOG_VERBOSE("DML::%s: min_clk_table min_fclk_khz = %ld\n", __func__, min_clk_table->dram_bw_table.entries[in_out_params->min_clk_index].min_fclk_khz);
-	DML_LOG_VERBOSE("DML::%s: min_clk_table uclk_mhz = %f\n", __func__, dram_bw_kbps_to_uclk_mhz(min_clk_table->dram_bw_table.entries[in_out_params->min_clk_index].pre_derate_dram_bw_kbps, &mode_lib->soc.clk_table.dram_config));
+	if (min_clk_table->dram_bw_table.entries[in_out_params->min_clk_index].min_uclk_khz)
+		DML_LOG_VERBOSE("DML::%s: min_clk_table uclk_mhz = %f\n", __func__, min_clk_table->dram_bw_table.entries[in_out_params->min_clk_index].min_uclk_khz / 1000.0);
+	else
+		DML_LOG_VERBOSE("DML::%s: min_clk_table uclk_mhz = %f\n", __func__, dram_bw_kbps_to_uclk_mhz(min_clk_table->dram_bw_table.entries[in_out_params->min_clk_index].pre_derate_dram_bw_kbps, &mode_lib->soc.clk_table.dram_config));
 	for (k = 0; k < mode_lib->mp.num_active_pipes; ++k) {
 		DML_LOG_VERBOSE("DML::%s: pipe=%d is in plane=%d\n", __func__, k, mode_lib->mp.pipe_plane[k]);
 		DML_LOG_VERBOSE("DML::%s: Per-plane DPPPerSurface[%0d] = %d\n", __func__, k, mode_lib->mp.NoOfDPP[k]);
@@ -12246,11 +12262,15 @@ static void rq_dlg_get_rq_reg(struct dml2_display_rq_regs *rq_regs,
 
 	unsigned int pixel_chunk_bytes = 0;
 	unsigned int min_pixel_chunk_bytes = 0;
+	unsigned int meta_chunk_bytes = 0;
+	unsigned int min_meta_chunk_bytes = 0;
 	unsigned int dpte_group_bytes = 0;
 	unsigned int mpte_group_bytes = 0;
 
 	unsigned int p1_pixel_chunk_bytes = 0;
 	unsigned int p1_min_pixel_chunk_bytes = 0;
+	unsigned int p1_meta_chunk_bytes = 0;
+	unsigned int p1_min_meta_chunk_bytes = 0;
 	unsigned int p1_dpte_group_bytes = 0;
 	unsigned int p1_mpte_group_bytes = 0;
 
@@ -12271,8 +12291,13 @@ static void rq_dlg_get_rq_reg(struct dml2_display_rq_regs *rq_regs,
 	dpte_group_bytes = (unsigned int)(dml_get_dpte_group_size_in_bytes(mode_lib, pipe_idx));
 	mpte_group_bytes = (unsigned int)(dml_get_vm_group_size_in_bytes(mode_lib, pipe_idx));
 
+	meta_chunk_bytes =  (unsigned int)(mode_lib->ip.meta_chunk_size_kbytes * 1024);
+	min_meta_chunk_bytes = (unsigned int)(mode_lib->ip.min_meta_chunk_size_bytes);
+
 	p1_pixel_chunk_bytes = pixel_chunk_bytes;
 	p1_min_pixel_chunk_bytes = min_pixel_chunk_bytes;
+	p1_meta_chunk_bytes =  meta_chunk_bytes;
+	p1_min_meta_chunk_bytes =  min_meta_chunk_bytes;
 	p1_dpte_group_bytes = dpte_group_bytes;
 	p1_mpte_group_bytes = mpte_group_bytes;
 
@@ -12292,6 +12317,19 @@ static void rq_dlg_get_rq_reg(struct dml2_display_rq_regs *rq_regs,
 		rq_regs->rq_regs_c.min_chunk_size = 0;
 	else
 		rq_regs->rq_regs_c.min_chunk_size = log_and_substract_if_non_zero(p1_min_pixel_chunk_bytes, 8 - 1);
+
+	rq_regs->rq_regs_l.meta_chunk_size = log_and_substract_if_non_zero(meta_chunk_bytes, 10);
+	rq_regs->rq_regs_c.meta_chunk_size = log_and_substract_if_non_zero(p1_meta_chunk_bytes, 10);
+
+	if (min_meta_chunk_bytes == 0)
+		rq_regs->rq_regs_l.min_meta_chunk_size = 0;
+	else
+		rq_regs->rq_regs_l.min_meta_chunk_size = log_and_substract_if_non_zero(min_meta_chunk_bytes, 6 - 1);
+
+	if (min_meta_chunk_bytes == 0)
+		rq_regs->rq_regs_c.min_meta_chunk_size = 0;
+	else
+		rq_regs->rq_regs_c.min_meta_chunk_size = log_and_substract_if_non_zero(p1_min_meta_chunk_bytes, 6 - 1);
 
 	rq_regs->rq_regs_l.dpte_group_size = log_and_substract_if_non_zero(dpte_group_bytes, 6);
 	rq_regs->rq_regs_l.mpte_group_size = log_and_substract_if_non_zero(mpte_group_bytes, 6);

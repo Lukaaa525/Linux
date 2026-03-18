@@ -49,6 +49,7 @@ static struct file *ovl_open_realfile(const struct file *file,
 				flags &= ~O_NOATIME;
 
 			realfile = backing_file_open(file_user_path(file),
+						     file_user_cred(file),
 						     flags, realpath, current_cred());
 		}
 	}
@@ -96,7 +97,7 @@ struct ovl_file {
 
 struct ovl_file *ovl_file_alloc(struct file *realfile)
 {
-	struct ovl_file *of = kzalloc(sizeof(struct ovl_file), GFP_KERNEL);
+	struct ovl_file *of = kzalloc_obj(struct ovl_file);
 
 	if (unlikely(!of))
 		return NULL;

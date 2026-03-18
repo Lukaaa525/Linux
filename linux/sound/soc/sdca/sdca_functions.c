@@ -911,10 +911,38 @@ static int find_sdca_control_value(struct device *dev, struct sdca_entity *entit
 	return 0;
 }
 
-/*
- * TODO: Add support for -cn- properties, allowing different channels to have
- * different defaults etc.
- */
+static int find_sdca_control_reset(const struct sdca_entity *entity,
+				   struct sdca_control *control)
+{
+	switch (SDCA_CTL_TYPE(entity->type, control->sel)) {
+	case SDCA_CTL_TYPE_S(FU, AGC):
+	case SDCA_CTL_TYPE_S(FU, BASS_BOOST):
+	case SDCA_CTL_TYPE_S(FU, LOUDNESS):
+	case SDCA_CTL_TYPE_S(SMPU, TRIGGER_ENABLE):
+	case SDCA_CTL_TYPE_S(GE, SELECTED_MODE):
+	case SDCA_CTL_TYPE_S(TG, TONE_DIVIDER):
+	case SDCA_CTL_TYPE_S(ENTITY_0, COMMIT_GROUP_MASK):
+		control->has_reset = true;
+		control->reset = 0;
+		break;
+	case SDCA_CTL_TYPE_S(XU, BYPASS):
+	case SDCA_CTL_TYPE_S(MFPU, BYPASS):
+	case SDCA_CTL_TYPE_S(FU, MUTE):
+	case SDCA_CTL_TYPE_S(CX, CLOCK_SELECT):
+		control->has_reset = true;
+		control->reset = 1;
+		break;
+	case SDCA_CTL_TYPE_S(PDE, REQUESTED_PS):
+		control->has_reset = true;
+		control->reset = 3;
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
 static int find_sdca_entity_control(struct device *dev, struct sdca_entity *entity,
 				    struct fwnode_handle *control_node,
 				    struct sdca_control *control)
@@ -989,6 +1017,10 @@ static int find_sdca_entity_control(struct device *dev, struct sdca_entity *enti
 	}
 
 	control->is_volatile = find_sdca_control_volatile(entity, control);
+
+	ret = find_sdca_control_reset(entity, control);
+	if (ret)
+		return ret;
 
 	ret = find_sdca_control_range(dev, control_node, &control->range);
 	if (ret) {
@@ -1124,9 +1156,12 @@ static int find_sdca_entity_iot(struct device *dev,
 	if (!terminal->is_dataport) {
 		const char *type_name = sdca_find_terminal_name(terminal->type);
 
-		if (type_name)
+		if (type_name) {
 			entity->label = devm_kasprintf(dev, GFP_KERNEL, "%s %s",
 						       entity->label, type_name);
+			if (!entity->label)
+				return -ENOMEM;
+		}
 	}
 
 	ret = fwnode_property_read_u32(entity_node,
@@ -2033,6 +2068,7 @@ static int find_sdca_filesets(struct device *dev, struct sdw_slave *sdw,
 	num_sets = fwnode_property_count_u32(function_node,
 					     "mipi-sdca-file-set-id-list");
 	if (num_sets == 0 || num_sets == -EINVAL) {
+		dev_dbg(dev, "%pfwP: file set id list missing\n", function_node);
 		return 0;
 	} else if (num_sets < 0) {
 		dev_err(dev, "%pfwP: failed to read file set list: %d\n",
@@ -2134,8 +2170,12 @@ int sdca_parse_function(struct device *dev, struct sdw_slave *sdw,
 
 	ret = fwnode_property_read_u32(function_desc->node,
 				       "mipi-sdca-function-reset-max-delay", &tmp);
-	if (!ret)
+	if (ret || tmp == 0) {
+		dev_dbg(dev, "reset delay missing, defaulting to 100mS\n");
+		function->reset_max_delay = 100000;
+	} else {
 		function->reset_max_delay = tmp;
+	}
 
 	dev_dbg(dev, "%pfwP: name %s busy delay %dus reset delay %dus\n",
 		function->desc->node, function->desc->name,

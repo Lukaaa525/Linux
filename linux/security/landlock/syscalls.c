@@ -60,6 +60,8 @@ static bool is_initialized(void)
  * @ksize_min: Minimal required size to be copied.
  * @src: User space pointer or NULL.
  * @usize: (Alleged) size of the data pointed to by @src.
+ *
+ * Return: 0 on success, -errno on failure.
  */
 static __always_inline int
 copy_min_struct_from_user(void *const dst, const size_t ksize,
@@ -158,11 +160,13 @@ static const struct file_operations ruleset_fops = {
 /*
  * The Landlock ABI version should be incremented for each new Landlock-related
  * user space visible change (e.g. Landlock syscalls).  This version should
- * only be incremented once per Linux release, and the date in
+ * only be incremented once per Linux release.  When incrementing, the date in
  * Documentation/userspace-api/landlock.rst should be updated to reflect the
  * UAPI change.
+ * If the change involves a fix that requires userspace awareness, also update
+ * the errata documentation in Documentation/userspace-api/landlock.rst .
  */
-const int landlock_abi_version = 9;
+const int landlock_abi_version = 8;
 
 /**
  * sys_landlock_create_ruleset - Create a new ruleset
@@ -176,16 +180,19 @@ const int landlock_abi_version = 9;
  *         - %LANDLOCK_CREATE_RULESET_VERSION
  *         - %LANDLOCK_CREATE_RULESET_ERRATA
  *
- * This system call enables to create a new Landlock ruleset, and returns the
- * related file descriptor on success.
+ * This system call enables to create a new Landlock ruleset.
  *
  * If %LANDLOCK_CREATE_RULESET_VERSION or %LANDLOCK_CREATE_RULESET_ERRATA is
  * set, then @attr must be NULL and @size must be 0.
  *
- * Possible returned errors are:
+ * Return: The ruleset file descriptor on success, the Landlock ABI version if
+ * %LANDLOCK_CREATE_RULESET_VERSION is set, the errata value if
+ * %LANDLOCK_CREATE_RULESET_ERRATA is set, or -errno on failure.  Possible
+ * returned errors are:
  *
  * - %EOPNOTSUPP: Landlock is supported by the kernel but disabled at boot time;
- * - %EINVAL: unknown @flags, or unknown access, or unknown scope, or too small @size;
+ * - %EINVAL: unknown @flags, or unknown access, or unknown scope, or too small
+ *   @size;
  * - %E2BIG: @attr or @size inconsistencies;
  * - %EFAULT: @attr or @size inconsistencies;
  * - %ENOMSG: empty &landlock_ruleset_attr.handled_access_fs.
@@ -396,7 +403,7 @@ static int add_rule_net_port(struct landlock_ruleset *ruleset,
  * This system call enables to define a new rule and add it to an existing
  * ruleset.
  *
- * Possible returned errors are:
+ * Return: 0 on success, or -errno on failure.  Possible returned errors are:
  *
  * - %EOPNOTSUPP: Landlock is supported by the kernel but disabled at boot time;
  * - %EAFNOSUPPORT: @rule_type is %LANDLOCK_RULE_NET_PORT but TCP/IP is not
@@ -462,7 +469,7 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
  * namespace or is running with no_new_privs.  This avoids scenarios where
  * unprivileged tasks can affect the behavior of privileged children.
  *
- * Possible returned errors are:
+ * Return: 0 on success, or -errno on failure.  Possible returned errors are:
  *
  * - %EOPNOTSUPP: Landlock is supported by the kernel but disabled at boot time;
  * - %EINVAL: @flags contains an unknown bit.
@@ -480,13 +487,11 @@ SYSCALL_DEFINE4(landlock_add_rule, const int, ruleset_fd,
 SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		flags)
 {
-	struct landlock_ruleset *new_dom,
-		*ruleset __free(landlock_put_ruleset) = NULL;
+	struct landlock_ruleset *ruleset __free(landlock_put_ruleset) = NULL;
 	struct cred *new_cred;
 	struct landlock_cred_security *new_llcred;
 	bool __maybe_unused log_same_exec, log_new_exec, log_subdomains,
 		prev_log_subdomains;
-	int err;
 
 	if (!is_initialized())
 		return -EOPNOTSUPP;
@@ -547,7 +552,8 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 		 * manipulating the current credentials because they are
 		 * dedicated per thread.
 		 */
-		new_dom = landlock_merge_ruleset(new_llcred->domain, ruleset);
+		struct landlock_ruleset *const new_dom =
+			landlock_merge_ruleset(new_llcred->domain, ruleset);
 		if (IS_ERR(new_dom)) {
 			abort_creds(new_cred);
 			return PTR_ERR(new_dom);
@@ -570,9 +576,9 @@ SYSCALL_DEFINE2(landlock_restrict_self, const int, ruleset_fd, const __u32,
 	}
 
 	if (flags & LANDLOCK_RESTRICT_SELF_TSYNC) {
-		err = landlock_restrict_sibling_threads(current_cred(),
-							new_cred);
-		if (err != 0) {
+		const int err = landlock_restrict_sibling_threads(
+			current_cred(), new_cred);
+		if (err) {
 			abort_creds(new_cred);
 			return err;
 		}

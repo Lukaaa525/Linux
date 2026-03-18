@@ -540,7 +540,7 @@ static struct parallel_data *padata_alloc_pd(struct padata_shell *ps)
 	struct padata_instance *pinst = ps->pinst;
 	struct parallel_data *pd;
 
-	pd = kzalloc(sizeof(struct parallel_data), GFP_KERNEL);
+	pd = kzalloc_obj(struct parallel_data);
 	if (!pd)
 		goto err;
 
@@ -732,32 +732,22 @@ EXPORT_SYMBOL(padata_set_cpumask);
 
 static int __padata_add_cpu(struct padata_instance *pinst, int cpu)
 {
-	int err = 0;
+	int err = padata_replace(pinst);
 
-	if (cpumask_test_cpu(cpu, cpu_online_mask)) {
-		err = padata_replace(pinst);
-
-		if (padata_validate_cpumask(pinst, pinst->cpumask.pcpu) &&
-		    padata_validate_cpumask(pinst, pinst->cpumask.cbcpu))
-			__padata_start(pinst);
-	}
+	if (padata_validate_cpumask(pinst, pinst->cpumask.pcpu) &&
+	    padata_validate_cpumask(pinst, pinst->cpumask.cbcpu))
+		__padata_start(pinst);
 
 	return err;
 }
 
 static int __padata_remove_cpu(struct padata_instance *pinst, int cpu)
 {
-	int err = 0;
+	if (!padata_validate_cpumask(pinst, pinst->cpumask.pcpu) ||
+	    !padata_validate_cpumask(pinst, pinst->cpumask.cbcpu))
+		__padata_stop(pinst);
 
-	if (!cpumask_test_cpu(cpu, cpu_online_mask)) {
-		if (!padata_validate_cpumask(pinst, pinst->cpumask.pcpu) ||
-		    !padata_validate_cpumask(pinst, pinst->cpumask.cbcpu))
-			__padata_stop(pinst);
-
-		err = padata_replace(pinst);
-	}
-
-	return err;
+	return padata_replace(pinst);
 }
 
 static inline int pinst_has_cpu(struct padata_instance *pinst, int cpu)
@@ -952,7 +942,7 @@ struct padata_instance *padata_alloc(const char *name)
 {
 	struct padata_instance *pinst;
 
-	pinst = kzalloc(sizeof(struct padata_instance), GFP_KERNEL);
+	pinst = kzalloc_obj(struct padata_instance);
 	if (!pinst)
 		goto err;
 
@@ -1038,7 +1028,7 @@ struct padata_shell *padata_alloc_shell(struct padata_instance *pinst)
 	struct parallel_data *pd;
 	struct padata_shell *ps;
 
-	ps = kzalloc(sizeof(*ps), GFP_KERNEL);
+	ps = kzalloc_obj(*ps);
 	if (!ps)
 		goto out;
 
@@ -1106,8 +1096,7 @@ void __init padata_init(void)
 #endif
 
 	possible_cpus = num_possible_cpus();
-	padata_works = kmalloc_array(possible_cpus, sizeof(struct padata_work),
-				     GFP_KERNEL);
+	padata_works = kmalloc_objs(struct padata_work, possible_cpus);
 	if (!padata_works)
 		goto remove_dead_state;
 

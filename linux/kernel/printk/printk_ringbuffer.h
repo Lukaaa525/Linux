@@ -23,6 +23,11 @@ struct printk_info {
 	u8	flags:5;	/* internal record flags */
 	u8	level:3;	/* syslog level */
 	u32	caller_id;	/* thread id or processor id */
+#ifdef CONFIG_PRINTK_EXECUTION_CTX
+	u32	caller_id2;	/* caller_id complement */
+	/* name of the task that generated the message */
+	char	comm[TASK_COMM_LEN];
+#endif
 
 	struct dev_printk_info	dev_info;
 };
@@ -122,7 +127,7 @@ enum desc_state {
 };
 
 #define _DATA_SIZE(sz_bits)	(1UL << (sz_bits))
-#define _DESCS_COUNT(ct_bits)	(1U << (ct_bits))
+#define _DESCS_COUNT(ct_bits)	(1UL << (ct_bits))
 #define DESC_SV_BITS		BITS_PER_LONG
 #define DESC_FLAGS_SHIFT	(DESC_SV_BITS - 2)
 #define DESC_FLAGS_MASK		(3UL << DESC_FLAGS_SHIFT)

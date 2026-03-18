@@ -60,6 +60,7 @@
 #define FIRMWARE_8125D_2	"rtl_nic/rtl8125d-2.fw"
 #define FIRMWARE_8125K_1	"rtl_nic/rtl8125k-1.fw"
 #define FIRMWARE_8125BP_2	"rtl_nic/rtl8125bp-2.fw"
+#define FIRMWARE_8125CP_1	"rtl_nic/rtl8125cp-1.fw"
 #define FIRMWARE_9151A_1	"rtl_nic/rtl9151a-1.fw"
 #define FIRMWARE_8126A_2	"rtl_nic/rtl8126a-2.fw"
 #define FIRMWARE_8126A_3	"rtl_nic/rtl8126a-3.fw"
@@ -96,8 +97,8 @@
 #define JUMBO_16K	(SZ_16K - VLAN_ETH_HLEN - ETH_FCS_LEN)
 
 static const struct rtl_chip_info {
-	u16 mask;
-	u16 val;
+	u32 mask;
+	u32 val;
 	enum mac_version mac_version;
 	const char *name;
 	const char *fw_name;
@@ -111,6 +112,9 @@ static const struct rtl_chip_info {
 
 	/* 8125BP family. */
 	{ 0x7cf, 0x681,	RTL_GIGA_MAC_VER_66, "RTL8125BP", FIRMWARE_8125BP_2 },
+
+	/* 8125CP family*/
+	{ 0x7cf, 0x708, RTL_GIGA_MAC_VER_65, "RTL8125CP", FIRMWARE_8125CP_1 },
 
 	/* 8125D family. */
 	{ 0x7cf, 0x68b, RTL_GIGA_MAC_VER_64, "RTL9151A", FIRMWARE_9151A_1 },
@@ -206,8 +210,19 @@ static const struct rtl_chip_info {
 	{ 0xfc8, 0x040,	RTL_GIGA_MAC_VER_03, "RTL8110s" },
 	{ 0xfc8, 0x008,	RTL_GIGA_MAC_VER_02, "RTL8169s" },
 
+	/* extended chip version*/
+	{ 0x7cf, 0x7c8, RTL_GIGA_MAC_VER_EXTENDED },
+
 	/* Catch-all */
 	{ 0x000, 0x000,	RTL_GIGA_MAC_NONE }
+};
+
+static const struct rtl_chip_info rtl_chip_infos_extended[] = {
+	{ 0x7fffffff, 0x00000000, RTL_GIGA_MAC_VER_64, "RTL9151AS",
+	  FIRMWARE_9151A_1},
+
+	/* Catch-all */
+	{ 0x00000000, 0x00000000, RTL_GIGA_MAC_NONE }
 };
 
 static const struct pci_device_id rtl8169_pci_tbl[] = {
@@ -256,6 +271,8 @@ enum rtl_registers {
 	IntrStatus	= 0x3e,
 
 	TxConfig	= 0x40,
+	/* Extended chip version id */
+	TX_CONFIG_V2	= 0x60b0,
 #define	TXCFG_AUTO_FIFO			(1 << 7)	/* 8111e-vl */
 #define	TXCFG_EMPTY			(1 << 11)	/* 8111e-vl */
 
@@ -789,6 +806,7 @@ MODULE_FIRMWARE(FIRMWARE_8125D_1);
 MODULE_FIRMWARE(FIRMWARE_8125D_2);
 MODULE_FIRMWARE(FIRMWARE_8125K_1);
 MODULE_FIRMWARE(FIRMWARE_8125BP_2);
+MODULE_FIRMWARE(FIRMWARE_8125CP_1);
 MODULE_FIRMWARE(FIRMWARE_9151A_1);
 MODULE_FIRMWARE(FIRMWARE_8126A_2);
 MODULE_FIRMWARE(FIRMWARE_8126A_3);
@@ -1771,12 +1789,11 @@ static void rtl8169_get_drvinfo(struct net_device *dev,
 	struct rtl8169_private *tp = netdev_priv(dev);
 	struct rtl_fw *rtl_fw = tp->rtl_fw;
 
-	strscpy(info->driver, KBUILD_MODNAME, sizeof(info->driver));
-	strscpy(info->bus_info, pci_name(tp->pci_dev), sizeof(info->bus_info));
+	strscpy(info->driver, KBUILD_MODNAME);
+	strscpy(info->bus_info, pci_name(tp->pci_dev));
 	BUILD_BUG_ON(sizeof(info->fw_version) < sizeof(rtl_fw->version));
 	if (rtl_fw)
-		strscpy(info->fw_version, rtl_fw->version,
-			sizeof(info->fw_version));
+		strscpy(info->fw_version, rtl_fw->version);
 }
 
 static int rtl8169_get_regs_len(struct net_device *dev)
@@ -2427,7 +2444,7 @@ static const struct ethtool_ops rtl8169_ethtool_ops = {
 	.get_eth_ctrl_stats	= rtl8169_get_eth_ctrl_stats,
 };
 
-static const struct rtl_chip_info *rtl8169_get_chip_version(u16 xid, bool gmii)
+static const struct rtl_chip_info *rtl8169_get_chip_version(u32 xid, bool gmii)
 {
 	/* Chips combining a 1Gbps MAC with a 100Mbps PHY */
 	static const struct rtl_chip_info rtl8106eus_info = {
@@ -2450,6 +2467,15 @@ static const struct rtl_chip_info *rtl8169_get_chip_version(u16 xid, bool gmii)
 	if (p->mac_version == RTL_GIGA_MAC_VER_46 && !gmii)
 		return &rtl8107e_info;
 
+	return p;
+}
+
+static const struct rtl_chip_info *rtl8169_get_extended_chip_version(u32 xid2)
+{
+	const struct rtl_chip_info *p = rtl_chip_infos_extended;
+
+	while ((xid2 & p->mask) != p->val)
+		p++;
 	return p;
 }
 
@@ -2662,7 +2688,7 @@ static void rtl_request_firmware(struct rtl8169_private *tp)
 	if (tp->rtl_fw || !tp->fw_name)
 		return;
 
-	rtl_fw = kzalloc(sizeof(*rtl_fw), GFP_KERNEL);
+	rtl_fw = kzalloc_obj(*rtl_fw);
 	if (!rtl_fw)
 		return;
 
@@ -4000,6 +4026,7 @@ static void rtl_hw_config(struct rtl8169_private *tp)
 		[RTL_GIGA_MAC_VER_61] = rtl_hw_start_8125a_2,
 		[RTL_GIGA_MAC_VER_63] = rtl_hw_start_8125b,
 		[RTL_GIGA_MAC_VER_64] = rtl_hw_start_8125d,
+		[RTL_GIGA_MAC_VER_65] = rtl_hw_start_8125d,
 		[RTL_GIGA_MAC_VER_66] = rtl_hw_start_8125d,
 		[RTL_GIGA_MAC_VER_70] = rtl_hw_start_8126a,
 		[RTL_GIGA_MAC_VER_80] = rtl_hw_start_8127a,
@@ -4019,6 +4046,7 @@ static void rtl_hw_start_8125(struct rtl8169_private *tp)
 	switch (tp->mac_version) {
 	case RTL_GIGA_MAC_VER_61:
 	case RTL_GIGA_MAC_VER_64:
+	case RTL_GIGA_MAC_VER_65:
 	case RTL_GIGA_MAC_VER_66:
 	case RTL_GIGA_MAC_VER_80:
 		for (i = 0xa00; i < 0xb00; i += 4)
@@ -5574,11 +5602,12 @@ static bool rtl_aspm_is_safe(struct rtl8169_private *tp)
 static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	const struct rtl_chip_info *chip;
+	const char *ext_xid_str = "";
 	struct rtl8169_private *tp;
 	int jumbo_max, region, rc;
 	struct net_device *dev;
 	u32 txconfig;
-	u16 xid;
+	u32 xid;
 
 	dev = devm_alloc_etherdev(&pdev->dev, sizeof (*tp));
 	if (!dev)
@@ -5626,10 +5655,16 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	/* Identify chip attached to board */
 	chip = rtl8169_get_chip_version(xid, tp->supports_gmii);
+
+	if (chip->mac_version == RTL_GIGA_MAC_VER_EXTENDED) {
+		ext_xid_str = "ext";
+		xid = RTL_R32(tp, TX_CONFIG_V2);
+		chip = rtl8169_get_extended_chip_version(xid);
+	}
 	if (chip->mac_version == RTL_GIGA_MAC_NONE)
 		return dev_err_probe(&pdev->dev, -ENODEV,
-				     "unknown chip XID %03x, contact r8169 maintainers (see MAINTAINERS file)\n",
-				     xid);
+				     "unknown chip %sXID %x, contact r8169 maintainers (see MAINTAINERS file)\n",
+				     ext_xid_str, xid);
 	tp->mac_version = chip->mac_version;
 	tp->fw_name = chip->fw_name;
 
@@ -5768,8 +5803,8 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			tp->leds = rtl8168_init_leds(dev);
 	}
 
-	netdev_info(dev, "%s, %pM, XID %03x, IRQ %d\n",
-		    chip->name, dev->dev_addr, xid, tp->irq);
+	netdev_info(dev, "%s, %pM, %sXID %x, IRQ %d\n",
+		    chip->name, dev->dev_addr, ext_xid_str, xid, tp->irq);
 
 	if (jumbo_max)
 		netdev_info(dev, "jumbo features [frames: %d bytes, tx checksumming: %s]\n",

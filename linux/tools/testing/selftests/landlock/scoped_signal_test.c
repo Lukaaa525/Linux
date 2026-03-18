@@ -463,7 +463,7 @@ TEST_F(fown, sigurg_socket)
 	pid_t child;
 
 	memset(&server_address, 0, sizeof(server_address));
-	set_unix_address(&server_address, 0, true);
+	set_unix_address(&server_address, 0);
 
 	ASSERT_EQ(0, pipe2(pipe_parent, O_CLOEXEC));
 	ASSERT_EQ(0, pipe2(pipe_child, O_CLOEXEC));

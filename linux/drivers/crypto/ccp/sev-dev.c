@@ -1105,14 +1105,11 @@ struct page *snp_alloc_hv_fixed_pages(unsigned int num_2mb_pages)
 {
 	struct psp_device *psp_master = psp_get_master_device();
 	struct snp_hv_fixed_pages_entry *entry;
-	struct sev_device *sev;
 	unsigned int order;
 	struct page *page;
 
-	if (!psp_master || !psp_master->sev_data)
+	if (!psp_master)
 		return NULL;
-
-	sev = psp_master->sev_data;
 
 	order = get_order(PMD_SIZE * num_2mb_pages);
 
@@ -1126,7 +1123,8 @@ struct page *snp_alloc_hv_fixed_pages(unsigned int num_2mb_pages)
 	 * This API uses SNP_INIT_EX to transition allocated pages to HV_Fixed
 	 * page state, fail if SNP is already initialized.
 	 */
-	if (sev->snp_initialized)
+	if (psp_master->sev_data &&
+	    ((struct sev_device *)psp_master->sev_data)->snp_initialized)
 		return NULL;
 
 	/* Re-use freed pages that match the request */
@@ -1144,7 +1142,7 @@ struct page *snp_alloc_hv_fixed_pages(unsigned int num_2mb_pages)
 	if (!page)
 		return NULL;
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc_obj(*entry);
 	if (!entry) {
 		__free_pages(page, order);
 		return NULL;
@@ -1162,7 +1160,7 @@ void snp_free_hv_fixed_pages(struct page *page)
 	struct psp_device *psp_master = psp_get_master_device();
 	struct snp_hv_fixed_pages_entry *entry, *nentry;
 
-	if (!psp_master || !psp_master->sev_data)
+	if (!psp_master)
 		return;
 
 	/*
@@ -1967,11 +1965,11 @@ static int sev_get_firmware(struct device *dev,
 /* Don't fail if SEV FW couldn't be updated. Continue with existing SEV FW */
 static int sev_update_firmware(struct device *dev)
 {
-	struct sev_data_download_firmware *data;
+	struct sev_data_download_firmware data;
 	const struct firmware *firmware;
 	int ret, error, order;
 	struct page *p;
-	u64 data_size;
+	void *fw_blob;
 
 	if (!sev_version_greater_or_equal(0, 15)) {
 		dev_dbg(dev, "DOWNLOAD_FIRMWARE not supported\n");
@@ -1983,16 +1981,7 @@ static int sev_update_firmware(struct device *dev)
 		return -1;
 	}
 
-	/*
-	 * SEV FW expects the physical address given to it to be 32
-	 * byte aligned. Memory allocated has structure placed at the
-	 * beginning followed by the firmware being passed to the SEV
-	 * FW. Allocate enough memory for data structure + alignment
-	 * padding + SEV FW.
-	 */
-	data_size = ALIGN(sizeof(struct sev_data_download_firmware), 32);
-
-	order = get_order(firmware->size + data_size);
+	order = get_order(firmware->size);
 	p = alloc_pages(GFP_KERNEL, order);
 	if (!p) {
 		ret = -1;
@@ -2003,20 +1992,20 @@ static int sev_update_firmware(struct device *dev)
 	 * Copy firmware data to a kernel allocated contiguous
 	 * memory region.
 	 */
-	data = page_address(p);
-	memcpy(page_address(p) + data_size, firmware->data, firmware->size);
+	fw_blob = page_address(p);
+	memcpy(fw_blob, firmware->data, firmware->size);
 
-	data->address = __psp_pa(page_address(p) + data_size);
-	data->len = firmware->size;
+	data.address = __psp_pa(fw_blob);
+	data.len = firmware->size;
 
-	ret = sev_do_cmd(SEV_CMD_DOWNLOAD_FIRMWARE, data, &error);
+	ret = sev_do_cmd(SEV_CMD_DOWNLOAD_FIRMWARE, &data, &error);
 
 	/*
 	 * A quirk for fixing the committed TCB version, when upgrading from
 	 * earlier firmware version than 1.50.
 	 */
 	if (!ret && !sev_version_greater_or_equal(1, 50))
-		ret = sev_do_cmd(SEV_CMD_DOWNLOAD_FIRMWARE, data, &error);
+		ret = sev_do_cmd(SEV_CMD_DOWNLOAD_FIRMWARE, &data, &error);
 
 	if (ret)
 		dev_dbg(dev, "Failed to update SEV firmware: %#x\n", error);
@@ -2410,10 +2399,8 @@ static int sev_ioctl_do_snp_platform_status(struct sev_issue_cmd *argp)
 		 * in Firmware state on failure. Use snp_reclaim_pages() to
 		 * transition either case back to Hypervisor-owned state.
 		 */
-		if (snp_reclaim_pages(__pa(data), 1, true)) {
-			snp_leak_pages(__page_to_pfn(status_page), 1);
+		if (snp_reclaim_pages(__pa(data), 1, true))
 			return -EFAULT;
-		}
 	}
 
 	if (ret)
@@ -2658,7 +2645,7 @@ static int sev_misc_init(struct sev_device *sev)
 	if (!misc_dev) {
 		struct miscdevice *misc;
 
-		misc_dev = kzalloc(sizeof(*misc_dev), GFP_KERNEL);
+		misc_dev = kzalloc_obj(*misc_dev);
 		if (!misc_dev)
 			return -ENOMEM;
 

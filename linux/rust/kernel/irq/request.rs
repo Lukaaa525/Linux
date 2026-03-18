@@ -27,7 +27,7 @@ pub enum IrqReturn {
 }
 
 /// Callbacks for an IRQ handler.
-pub trait Handler: Sync {
+pub trait Handler: Sync + 'static {
     /// The hard IRQ handler.
     ///
     /// This is executed in interrupt context, hence all corresponding
@@ -45,7 +45,7 @@ impl<T: ?Sized + Handler + Send> Handler for Arc<T> {
     }
 }
 
-impl<T: ?Sized + Handler, A: Allocator> Handler for Box<T, A> {
+impl<T: ?Sized + Handler, A: Allocator + 'static> Handler for Box<T, A> {
     fn handle(&self, device: &Device<Bound>) -> IrqReturn {
         T::handle(self, device)
     }
@@ -181,7 +181,7 @@ impl<'a> IrqRequest<'a> {
 ///
 /// * We own an irq handler whose cookie is a pointer to `Self`.
 #[pin_data]
-pub struct Registration<T: Handler + 'static> {
+pub struct Registration<T: Handler> {
     #[pin]
     inner: Devres<RegistrationInner>,
 
@@ -194,7 +194,7 @@ pub struct Registration<T: Handler + 'static> {
     _pin: PhantomPinned,
 }
 
-impl<T: Handler + 'static> Registration<T> {
+impl<T: Handler> Registration<T> {
     /// Registers the IRQ handler with the system for the given IRQ number.
     pub fn new<'a>(
         request: IrqRequest<'a>,
@@ -284,7 +284,7 @@ pub enum ThreadedIrqReturn {
 }
 
 /// Callbacks for a threaded IRQ handler.
-pub trait ThreadedHandler: Sync {
+pub trait ThreadedHandler: Sync + 'static {
     /// The hard IRQ handler.
     ///
     /// This is executed in interrupt context, hence all corresponding
@@ -315,7 +315,7 @@ impl<T: ?Sized + ThreadedHandler + Send> ThreadedHandler for Arc<T> {
     }
 }
 
-impl<T: ?Sized + ThreadedHandler, A: Allocator> ThreadedHandler for Box<T, A> {
+impl<T: ?Sized + ThreadedHandler, A: Allocator + 'static> ThreadedHandler for Box<T, A> {
     fn handle(&self, device: &Device<Bound>) -> ThreadedIrqReturn {
         T::handle(self, device)
     }
@@ -398,7 +398,7 @@ impl<T: ?Sized + ThreadedHandler, A: Allocator> ThreadedHandler for Box<T, A> {
 ///
 /// * We own an irq handler whose cookie is a pointer to `Self`.
 #[pin_data]
-pub struct ThreadedRegistration<T: ThreadedHandler + 'static> {
+pub struct ThreadedRegistration<T: ThreadedHandler> {
     #[pin]
     inner: Devres<RegistrationInner>,
 
@@ -411,7 +411,7 @@ pub struct ThreadedRegistration<T: ThreadedHandler + 'static> {
     _pin: PhantomPinned,
 }
 
-impl<T: ThreadedHandler + 'static> ThreadedRegistration<T> {
+impl<T: ThreadedHandler> ThreadedRegistration<T> {
     /// Registers the IRQ handler with the system for the given IRQ number.
     pub fn new<'a>(
         request: IrqRequest<'a>,

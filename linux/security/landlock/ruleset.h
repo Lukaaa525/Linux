@@ -224,7 +224,7 @@ static inline void landlock_get_ruleset(struct landlock_ruleset *const ruleset)
  *
  * @domain: Landlock ruleset (used as a domain)
  *
- * Returns: an access_masks result of the OR of all the domain's access masks.
+ * Return: An access_masks result of the OR of all the domain's access masks.
  */
 static inline struct access_masks
 landlock_union_access_masks(const struct landlock_ruleset *const domain)
@@ -300,18 +300,6 @@ landlock_get_scope_mask(const struct landlock_ruleset *const ruleset,
 {
 	return ruleset->access_masks[layer_level].scope;
 }
-
-/**
- * struct layer_accesses - A boolean matrix of layers and access rights
- *
- * This has a bit for each combination of layer numbers and access rights.
- * During access checks, it is used to represent the access rights for each
- * layer which still need to be fulfilled.  When all bits are 0, the access
- * request is considered to be fulfilled.
- */
-struct layer_access_masks {
-	access_mask_t access[LANDLOCK_MAX_NUM_LAYERS];
-};
 
 bool landlock_unmask_layers(const struct landlock_rule *const rule,
 			    struct layer_access_masks *masks);

@@ -682,6 +682,7 @@ struct hid_device {
 	__s32 battery_charge_status;
 	enum hid_battery_status battery_status;
 	bool battery_avoid_query;
+	bool battery_present;
 	ktime_t battery_ratelimit_time;
 #endif
 
@@ -698,6 +699,7 @@ struct hid_device {
 	char name[128];							/* Device name */
 	char phys[64];							/* Device physical location */
 	char uniq[64];							/* Device unique identifier (serial #) */
+	u64 firmware_version;						/* Firmware version */
 
 	void *driver_data;
 
@@ -835,6 +837,12 @@ struct hid_usage_id {
  *
  * raw_event and event should return negative on error, any other value will
  * pass the event on to .event() typically return 0 for success.
+ *
+ * report_fixup must return a report descriptor pointer whose lifetime is at
+ * least that of the input rdesc.  This is usually done by mutating the input
+ * rdesc and returning it or a sub-portion of it.  In case a new buffer is
+ * allocated and returned, the implementation of report_fixup is responsible for
+ * freeing it later.
  *
  * input_mapping shall return a negative value to completely ignore this usage
  * (e.g. doubled or invalid usage), zero to continue with parsing of this

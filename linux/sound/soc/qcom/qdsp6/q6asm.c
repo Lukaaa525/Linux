@@ -506,7 +506,7 @@ int q6asm_map_memory_regions(unsigned int dir, struct audio_client *ac,
 		return 0;
 	}
 
-	buf = kcalloc(periods, sizeof(*buf), GFP_ATOMIC);
+	buf = kzalloc_objs(*buf, periods, GFP_ATOMIC);
 	if (!buf) {
 		spin_unlock_irqrestore(&ac->lock, flags);
 		return -ENOMEM;
@@ -636,7 +636,6 @@ static int32_t q6asm_stream_callback(struct apr_device *adev,
 			client_event = ASM_CLIENT_EVENT_CMD_OUT_FLUSH_DONE;
 			break;
 		case ASM_STREAM_CMD_OPEN_WRITE_V3:
-		case ASM_DATA_CMD_WRITE_V2:
 		case ASM_STREAM_CMD_OPEN_READ_V3:
 		case ASM_STREAM_CMD_OPEN_READWRITE_V2:
 		case ASM_STREAM_CMD_SET_ENCDEC_PARAM:
@@ -655,8 +654,9 @@ static int32_t q6asm_stream_callback(struct apr_device *adev,
 			break;
 		case ASM_DATA_CMD_EOS:
 		case ASM_DATA_CMD_READ_V2:
+		case ASM_DATA_CMD_WRITE_V2:
 			/* response as result of close stream */
-			break;
+			goto done;
 		default:
 			dev_err(ac->dev, "command[0x%x] not expecting rsp\n",
 				result->opcode);
@@ -850,7 +850,7 @@ struct audio_client *q6asm_audio_client_alloc(struct device *dev, q6asm_cb cb,
 		return ac;
 	}
 
-	ac = kzalloc(sizeof(*ac), GFP_KERNEL);
+	ac = kzalloc_obj(*ac);
 	if (!ac)
 		return ERR_PTR(-ENOMEM);
 

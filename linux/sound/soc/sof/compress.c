@@ -101,7 +101,7 @@ static int sof_compr_open(struct snd_soc_component *component,
 	struct snd_sof_pcm *spcm;
 	int dir;
 
-	sstream = kzalloc(sizeof(*sstream), GFP_KERNEL);
+	sstream = kzalloc_obj(*sstream);
 	if (!sstream)
 		return -ENOMEM;
 
@@ -248,7 +248,7 @@ static int sof_compr_set_params(struct snd_soc_component *component,
 					     ipc_params_reply.posn_offset);
 	if (ret < 0) {
 		dev_err(component->dev, "Invalid stream data offset for Compr %d\n",
-			spcm->pcm.pcm_id);
+			le32_to_cpu(spcm->pcm.pcm_id));
 		goto out;
 	}
 

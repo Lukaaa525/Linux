@@ -76,12 +76,18 @@ MODULE_FIRMWARE("amdgpu/smu_13_0_14.bin");
 	[smu_feature] = { 1, (smu_13_0_6_feature) }
 
 #define FEATURE_MASK(feature) (1ULL << feature)
-#define SMC_DPM_FEATURE                                                        \
-	(FEATURE_MASK(FEATURE_DATA_CALCULATION) |                              \
-	 FEATURE_MASK(FEATURE_DPM_GFXCLK) | FEATURE_MASK(FEATURE_DPM_UCLK) |   \
-	 FEATURE_MASK(FEATURE_DPM_SOCCLK) | FEATURE_MASK(FEATURE_DPM_FCLK) |   \
-	 FEATURE_MASK(FEATURE_DPM_LCLK) | FEATURE_MASK(FEATURE_DPM_XGMI) |     \
-	 FEATURE_MASK(FEATURE_DPM_VCN))
+static const struct smu_feature_bits smu_v13_0_6_dpm_features = {
+	.bits = {
+		SMU_FEATURE_BIT_INIT(FEATURE_DATA_CALCULATION),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_GFXCLK),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_UCLK),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_SOCCLK),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_FCLK),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_LCLK),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_XGMI),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_VCN)
+	}
+};
 
 #define smnPCIE_ESM_CTRL 0x93D0
 #define smnPCIE_LC_LINK_WIDTH_CNTL 0x1a340288
@@ -367,6 +373,9 @@ static void smu_v13_0_12_init_caps(struct smu_context *smu)
 	} else {
 		smu_v13_0_12_tables_fini(smu);
 	}
+
+	if (fw_ver >= 0x04561000)
+		smu_v13_0_6_cap_set(smu, SMU_CAP(TEMP_AID_XCD_HBM));
 }
 
 static void smu_v13_0_6_init_caps(struct smu_context *smu)
@@ -472,7 +481,7 @@ static int smu_v13_0_6_check_fw_version(struct smu_context *smu)
 {
 	int r;
 
-	r = smu_v13_0_check_fw_version(smu);
+	r = smu_cmn_check_fw_version(smu);
 	/* Initialize caps flags once fw version is fetched */
 	if (!r)
 		smu_v13_0_x_init_caps(smu);
@@ -580,7 +589,7 @@ static int smu_v13_0_6_tables_init(struct smu_context *smu)
 		return -ENOMEM;
 	smu_table->metrics_time = 0;
 
-	driver_pptable = kzalloc(sizeof(struct PPTable_t), GFP_KERNEL);
+	driver_pptable = kzalloc_obj(struct PPTable_t);
 	if (!driver_pptable)
 		return -ENOMEM;
 
@@ -684,13 +693,13 @@ static int smu_v13_0_6_allocate_dpm_context(struct smu_context *smu)
 	struct smu_dpm_policy *policy;
 
 	smu_dpm->dpm_context =
-		kzalloc(sizeof(struct smu_13_0_dpm_context), GFP_KERNEL);
+		kzalloc_obj(struct smu_13_0_dpm_context);
 	if (!smu_dpm->dpm_context)
 		return -ENOMEM;
 	smu_dpm->dpm_context_size = sizeof(struct smu_13_0_dpm_context);
 
 	smu_dpm->dpm_policies =
-		kzalloc(sizeof(struct smu_dpm_policy_ctxt), GFP_KERNEL);
+		kzalloc_obj(struct smu_dpm_policy_ctxt);
 	if (!smu_dpm->dpm_policies) {
 		kfree(smu_dpm->dpm_context);
 		return -ENOMEM;
@@ -742,15 +751,9 @@ static int smu_v13_0_6_fini_smc_tables(struct smu_context *smu)
 	return smu_v13_0_fini_smc_tables(smu);
 }
 
-static int smu_v13_0_6_get_allowed_feature_mask(struct smu_context *smu,
-						uint32_t *feature_mask,
-						uint32_t num)
+static int smu_v13_0_6_init_allowed_features(struct smu_context *smu)
 {
-	if (num > 2)
-		return -EINVAL;
-
-	/* pptable will handle the features to enable */
-	memset(feature_mask, 0xFF, sizeof(uint32_t) * num);
+	smu_feature_list_set_all(smu, SMU_FEATURE_LIST_ALLOWED);
 
 	return 0;
 }
@@ -2272,14 +2275,14 @@ static int smu_v13_0_6_usr_edit_dpm_table(struct smu_context *smu,
 }
 
 static int smu_v13_0_6_get_enabled_mask(struct smu_context *smu,
-					uint64_t *feature_mask)
+					struct smu_feature_bits *feature_mask)
 {
 	int ret;
 
 	ret = smu_cmn_get_enabled_mask(smu, feature_mask);
 
 	if (ret == -EIO && !smu_v13_0_6_cap_supported(smu, SMU_CAP(DPM))) {
-		*feature_mask = 0;
+		smu_feature_bits_clearall(feature_mask);
 		ret = 0;
 	}
 
@@ -2289,7 +2292,7 @@ static int smu_v13_0_6_get_enabled_mask(struct smu_context *smu,
 static bool smu_v13_0_6_is_dpm_running(struct smu_context *smu)
 {
 	int ret;
-	uint64_t feature_enabled;
+	struct smu_feature_bits feature_enabled;
 
 	if (amdgpu_ip_version(smu->adev, MP1_HWIP, 0) == IP_VERSION(13, 0, 12))
 		return smu_v13_0_12_is_dpm_running(smu);
@@ -2299,7 +2302,8 @@ static bool smu_v13_0_6_is_dpm_running(struct smu_context *smu)
 	if (ret)
 		return false;
 
-	return !!(feature_enabled & SMC_DPM_FEATURE);
+	return smu_feature_bits_test_mask(&feature_enabled,
+					  smu_v13_0_6_dpm_features.bits);
 }
 
 static int smu_v13_0_6_request_i2c_xfer(struct smu_context *smu,
@@ -2340,7 +2344,7 @@ static int smu_v13_0_6_i2c_xfer(struct i2c_adapter *i2c_adap,
 	if (!adev->pm.dpm_enabled)
 		return -EBUSY;
 
-	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	req = kzalloc_obj(*req);
 	if (!req)
 		return -ENOMEM;
 
@@ -2563,9 +2567,10 @@ static ssize_t smu_v13_0_6_get_xcp_metrics(struct smu_context *smu, int xcp_id,
 	const u8 num_jpeg_rings = AMDGPU_MAX_JPEG_RINGS_4_0_3;
 	int version = smu_v13_0_6_get_metrics_version(smu);
 	struct smu_v13_0_6_partition_metrics *xcp_metrics;
-	MetricsTableV0_t *metrics_v0 __free(kfree) = NULL;
+	struct smu_table_context *smu_table = &smu->smu_table;
 	struct amdgpu_device *adev = smu->adev;
 	int ret, inst, i, j, k, idx;
+	MetricsTableV0_t *metrics_v0;
 	MetricsTableV1_t *metrics_v1;
 	MetricsTableV2_t *metrics_v2;
 	struct amdgpu_xcp *xcp;
@@ -2585,13 +2590,11 @@ static ssize_t smu_v13_0_6_get_xcp_metrics(struct smu_context *smu, int xcp_id,
 	xcp_metrics = (struct smu_v13_0_6_partition_metrics *)table;
 	smu_v13_0_6_partition_metrics_init(xcp_metrics, 1, 1);
 
-	metrics_v0 = kzalloc(METRICS_TABLE_SIZE, GFP_KERNEL);
-	if (!metrics_v0)
-		return -ENOMEM;
-
-	ret = smu_v13_0_6_get_metrics_table(smu, metrics_v0, false);
+	ret = smu_v13_0_6_get_metrics_table(smu, NULL, false);
 	if (ret)
 		return ret;
+
+	metrics_v0 = (MetricsTableV0_t *)smu_table->metrics_table;
 
 	if (amdgpu_ip_version(smu->adev, MP1_HWIP, 0) ==
 		    IP_VERSION(13, 0, 12) &&
@@ -2599,8 +2602,8 @@ static ssize_t smu_v13_0_6_get_xcp_metrics(struct smu_context *smu, int xcp_id,
 		return smu_v13_0_12_get_xcp_metrics(smu, xcp, table,
 						    metrics_v0);
 
-	metrics_v1 = (MetricsTableV1_t *)metrics_v0;
-	metrics_v2 = (MetricsTableV2_t *)metrics_v0;
+	metrics_v1 = (MetricsTableV1_t *)smu_table->metrics_table;
+	metrics_v2 = (MetricsTableV2_t *)smu_table->metrics_table;
 
 	per_inst = smu_v13_0_6_cap_supported(smu, SMU_CAP(PER_INST_METRICS));
 
@@ -2668,6 +2671,8 @@ static ssize_t smu_v13_0_6_get_xcp_metrics(struct smu_context *smu, int xcp_id,
 			idx++;
 		}
 	}
+	xcp_metrics->accumulation_counter = GET_METRIC_FIELD(AccumulationCounter, version);
+	xcp_metrics->firmware_timestamp = GET_METRIC_FIELD(Timestamp, version);
 
 	return sizeof(*xcp_metrics);
 }
@@ -2676,21 +2681,21 @@ static ssize_t smu_v13_0_6_get_gpu_metrics(struct smu_context *smu, void **table
 {
 	struct smu_v13_0_6_gpu_metrics *gpu_metrics;
 	int version = smu_v13_0_6_get_metrics_version(smu);
-	MetricsTableV0_t *metrics_v0 __free(kfree) = NULL;
+	struct smu_table_context *smu_table = &smu->smu_table;
 	struct amdgpu_device *adev = smu->adev;
 	int ret = 0, xcc_id, inst, i, j;
+	MetricsTableV0_t *metrics_v0;
 	MetricsTableV1_t *metrics_v1;
 	MetricsTableV2_t *metrics_v2;
 	u16 link_width_level;
 	u8 num_jpeg_rings;
 	bool per_inst;
 
-	metrics_v0 = kzalloc(METRICS_TABLE_SIZE, GFP_KERNEL);
-	ret = smu_v13_0_6_get_metrics_table(smu, metrics_v0, false);
+	ret = smu_v13_0_6_get_metrics_table(smu, NULL, false);
 	if (ret)
 		return ret;
 
-	metrics_v2 = (MetricsTableV2_t *)metrics_v0;
+	metrics_v0 = (MetricsTableV0_t *)smu_table->metrics_table;
 	gpu_metrics = (struct smu_v13_0_6_gpu_metrics *)smu_driver_table_ptr(
 		smu, SMU_DRIVER_TABLE_GPU_METRICS);
 
@@ -2701,8 +2706,8 @@ static ssize_t smu_v13_0_6_get_gpu_metrics(struct smu_context *smu, void **table
 		goto fill;
 	}
 
-	metrics_v1 = (MetricsTableV1_t *)metrics_v0;
-	metrics_v2 = (MetricsTableV2_t *)metrics_v0;
+	metrics_v1 = (MetricsTableV1_t *)smu_table->metrics_table;
+	metrics_v2 = (MetricsTableV2_t *)smu_table->metrics_table;
 
 	gpu_metrics->temperature_hotspot =
 		SMUQ10_ROUND(GET_METRIC_FIELD(MaxSocketTemperature, version));
@@ -3158,7 +3163,11 @@ static int smu_v13_0_6_reset_vcn(struct smu_context *smu, uint32_t inst_mask)
 
 static int smu_v13_0_6_ras_send_msg(struct smu_context *smu, enum smu_message_type msg, uint32_t param, uint32_t *read_arg)
 {
+	struct amdgpu_device *adev = smu->adev;
 	int ret;
+
+	if (amdgpu_sriov_vf(adev))
+		return -EOPNOTSUPP;
 
 	switch (msg) {
 	case SMU_MSG_QueryValidMcaCount:
@@ -3166,6 +3175,13 @@ static int smu_v13_0_6_ras_send_msg(struct smu_context *smu, enum smu_message_ty
 	case SMU_MSG_McaBankDumpDW:
 	case SMU_MSG_McaBankCeDumpDW:
 	case SMU_MSG_ClearMcaOnRead:
+	case SMU_MSG_GetRASTableVersion:
+	case SMU_MSG_GetBadPageCount:
+	case SMU_MSG_GetBadPageMcaAddr:
+	case SMU_MSG_SetTimestamp:
+	case SMU_MSG_GetTimestamp:
+	case SMU_MSG_GetBadPageIpid:
+	case SMU_MSG_EraseRasTable:
 		ret = smu_cmn_send_smc_msg_with_param(smu, msg, param, read_arg);
 		break;
 	default:
@@ -3836,7 +3852,7 @@ static int smu_v13_0_6_get_ras_smu_drv(struct smu_context *smu, const struct ras
 
 static const struct pptable_funcs smu_v13_0_6_ppt_funcs = {
 	/* init dpm */
-	.get_allowed_feature_mask = smu_v13_0_6_get_allowed_feature_mask,
+	.init_allowed_features = smu_v13_0_6_init_allowed_features,
 	/* dpm/clk tables */
 	.set_default_dpm_table = smu_v13_0_6_set_default_dpm_table,
 	.populate_umd_state_clk = smu_v13_0_6_populate_umd_state_clk,

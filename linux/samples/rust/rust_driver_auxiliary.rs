@@ -18,7 +18,6 @@ use kernel::{
 };
 
 use core::any::TypeId;
-use pin_init::PinInit;
 
 const MODULE_NAME: &CStr = <LocalModule as kernel::ModuleMetadata>::NAME;
 const AUXILIARY_NAME: &CStr = c"auxiliary";
@@ -39,7 +38,7 @@ impl auxiliary::Driver for AuxiliaryDriver {
 
     fn probe(adev: &auxiliary::Device<Core>, _info: &Self::IdInfo) -> impl PinInit<Self, Error> {
         dev_info!(
-            adev.as_ref(),
+            adev,
             "Probing auxiliary driver for auxiliary device with id={}\n",
             adev.id()
         );

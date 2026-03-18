@@ -1151,7 +1151,6 @@ static void tsc_cs_mark_unstable(struct clocksource *cs)
 	tsc_unstable = 1;
 	if (using_native_sched_clock())
 		clear_sched_clock_stable();
-	disable_sched_clock_irqtime();
 	pr_info("Marking TSC unstable due to clocksource watchdog\n");
 }
 
@@ -1201,9 +1200,10 @@ static struct clocksource clocksource_tsc = {
 	.read			= read_tsc,
 	.mask			= CLOCKSOURCE_MASK(64),
 	.flags			= CLOCK_SOURCE_IS_CONTINUOUS |
-				  CLOCK_SOURCE_VALID_FOR_HRES |
+				  CLOCK_SOURCE_CAN_INLINE_READ |
 				  CLOCK_SOURCE_MUST_VERIFY |
-				  CLOCK_SOURCE_VERIFY_PERCPU,
+				  CLOCK_SOURCE_VERIFY_PERCPU |
+				  CLOCK_SOURCE_HAS_COUPLED_CLOCK_EVENT,
 	.id			= CSID_X86_TSC,
 	.vdso_clock_mode	= VDSO_CLOCKMODE_TSC,
 	.enable			= tsc_cs_enable,
@@ -1221,7 +1221,6 @@ void mark_tsc_unstable(char *reason)
 	tsc_unstable = 1;
 	if (using_native_sched_clock())
 		clear_sched_clock_stable();
-	disable_sched_clock_irqtime();
 	pr_info("Marking TSC unstable due to %s\n", reason);
 
 	clocksource_mark_unstable(&clocksource_tsc_early);
@@ -1411,6 +1410,15 @@ out:
 		have_art = true;
 		clocksource_tsc.base = &art_base_clk;
 	}
+
+	/*
+	 * Transfer the valid for high resolution flag if it was set on the
+	 * early TSC already. That guarantees that there is no intermediate
+	 * clocksource selected once the early TSC is unregistered.
+	 */
+	if (clocksource_tsc_early.flags & CLOCK_SOURCE_VALID_FOR_HRES)
+		clocksource_tsc.flags |= CLOCK_SOURCE_VALID_FOR_HRES;
+
 	clocksource_register_khz(&clocksource_tsc, tsc_khz);
 unreg:
 	clocksource_unregister(&clocksource_tsc_early);

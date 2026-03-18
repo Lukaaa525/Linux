@@ -23,7 +23,6 @@
 #include "common.h"
 #include "domain.h"
 #include "id.h"
-#include "limits.h"
 
 #ifdef CONFIG_AUDIT
 
@@ -35,7 +34,7 @@
  * @exe_size: Returned size of @exe_str (including the trailing null
  *            character), if any.
  *
- * Returns: A pointer to an allocated buffer where @exe_str point to, %NULL if
+ * Return: A pointer to an allocated buffer where @exe_str point to, %NULL if
  * there is no executable path, or an error otherwise.
  */
 static const void *get_current_exe(const char **const exe_str,
@@ -74,7 +73,7 @@ static const void *get_current_exe(const char **const exe_str,
 }
 
 /*
- * Returns: A newly allocated object describing a domain, or an error
+ * Return: A newly allocated object describing a domain, or an error
  * otherwise.
  */
 static struct landlock_details *get_current_details(void)
@@ -95,8 +94,7 @@ static struct landlock_details *get_current_details(void)
 	 * allocate with GFP_KERNEL_ACCOUNT because it is independent from the
 	 * caller.
 	 */
-	details =
-		kzalloc(struct_size(details, exe_path, path_size), GFP_KERNEL);
+	details = kzalloc_flex(*details, exe_path, path_size);
 	if (!details)
 		return ERR_PTR(-ENOMEM);
 
@@ -116,6 +114,8 @@ static struct landlock_details *get_current_details(void)
  * restriction.  The subjective credentials must not be in an overridden state.
  *
  * @hierarchy->parent and @hierarchy->usage should already be set.
+ *
+ * Return: 0 on success, -errno on failure.
  */
 int landlock_init_hierarchy_log(struct landlock_hierarchy *const hierarchy)
 {
@@ -134,27 +134,92 @@ int landlock_init_hierarchy_log(struct landlock_hierarchy *const hierarchy)
 	return 0;
 }
 
-deny_masks_t
-landlock_get_fs_deny_masks(const access_mask_t optional_access,
-			   const struct layer_access_masks *layer_masks)
+static deny_masks_t
+get_layer_deny_mask(const access_mask_t all_existing_optional_access,
+		    const unsigned long access_bit, const size_t layer)
 {
-	u8 truncate_layer = 0;
-	u8 ioctl_dev_layer = 0;
+	unsigned long access_weight;
 
-	for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
-		if (layer_masks->access[i] & optional_access &
-		    LANDLOCK_ACCESS_FS_TRUNCATE)
-			truncate_layer = i;
-		if (layer_masks->access[i] & optional_access &
-		    LANDLOCK_ACCESS_FS_IOCTL_DEV)
-			ioctl_dev_layer = i;
-	}
-	return ((ioctl_dev_layer << 4) & 0xf0) | (truncate_layer & 0x0f);
+	/* This may require change with new object types. */
+	WARN_ON_ONCE(all_existing_optional_access !=
+		     _LANDLOCK_ACCESS_FS_OPTIONAL);
+
+	if (WARN_ON_ONCE(layer >= LANDLOCK_MAX_NUM_LAYERS))
+		return 0;
+
+	access_weight = hweight_long(all_existing_optional_access &
+				     GENMASK(access_bit, 0));
+	if (WARN_ON_ONCE(access_weight < 1))
+		return 0;
+
+	return layer
+	       << ((access_weight - 1) * HWEIGHT(LANDLOCK_MAX_NUM_LAYERS - 1));
 }
 
 #ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
 
-static void test_landlock_get_fs_deny_masks(struct kunit *const test)
+static void test_get_layer_deny_mask(struct kunit *const test)
+{
+	const unsigned long truncate = BIT_INDEX(LANDLOCK_ACCESS_FS_TRUNCATE);
+	const unsigned long ioctl_dev = BIT_INDEX(LANDLOCK_ACCESS_FS_IOCTL_DEV);
+
+	KUNIT_EXPECT_EQ(test, 0,
+			get_layer_deny_mask(_LANDLOCK_ACCESS_FS_OPTIONAL,
+					    truncate, 0));
+	KUNIT_EXPECT_EQ(test, 0x3,
+			get_layer_deny_mask(_LANDLOCK_ACCESS_FS_OPTIONAL,
+					    truncate, 3));
+
+	KUNIT_EXPECT_EQ(test, 0,
+			get_layer_deny_mask(_LANDLOCK_ACCESS_FS_OPTIONAL,
+					    ioctl_dev, 0));
+	KUNIT_EXPECT_EQ(test, 0xf0,
+			get_layer_deny_mask(_LANDLOCK_ACCESS_FS_OPTIONAL,
+					    ioctl_dev, 15));
+}
+
+#endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
+
+deny_masks_t
+landlock_get_deny_masks(const access_mask_t all_existing_optional_access,
+			const access_mask_t optional_access,
+			const struct layer_access_masks *const masks)
+{
+	const unsigned long access_opt = optional_access;
+	unsigned long access_bit;
+	deny_masks_t deny_masks = 0;
+	access_mask_t all_denied = 0;
+
+	/* This may require change with new object types. */
+	WARN_ON_ONCE(!access_mask_subset(optional_access,
+					 all_existing_optional_access));
+
+	if (WARN_ON_ONCE(!masks))
+		return 0;
+
+	if (WARN_ON_ONCE(!access_opt))
+		return 0;
+
+	for (ssize_t i = ARRAY_SIZE(masks->access) - 1; i >= 0; i--) {
+		const access_mask_t denied = masks->access[i] & optional_access;
+		const unsigned long newly_denied = denied & ~all_denied;
+
+		if (!newly_denied)
+			continue;
+
+		for_each_set_bit(access_bit, &newly_denied,
+				 8 * sizeof(access_mask_t)) {
+			deny_masks |= get_layer_deny_mask(
+				all_existing_optional_access, access_bit, i);
+		}
+		all_denied |= denied;
+	}
+	return deny_masks;
+}
+
+#ifdef CONFIG_SECURITY_LANDLOCK_KUNIT_TEST
+
+static void test_landlock_get_deny_masks(struct kunit *const test)
 {
 	const struct layer_access_masks layers1 = {
 		.access[0] = LANDLOCK_ACCESS_FS_EXECUTE |
@@ -165,16 +230,19 @@ static void test_landlock_get_fs_deny_masks(struct kunit *const test)
 	};
 
 	KUNIT_EXPECT_EQ(test, 0x1,
-			landlock_get_fs_deny_masks(LANDLOCK_ACCESS_FS_TRUNCATE,
-						   &layers1));
+			landlock_get_deny_masks(_LANDLOCK_ACCESS_FS_OPTIONAL,
+						LANDLOCK_ACCESS_FS_TRUNCATE,
+						&layers1));
 	KUNIT_EXPECT_EQ(test, 0x20,
-			landlock_get_fs_deny_masks(LANDLOCK_ACCESS_FS_IOCTL_DEV,
-						   &layers1));
+			landlock_get_deny_masks(_LANDLOCK_ACCESS_FS_OPTIONAL,
+						LANDLOCK_ACCESS_FS_IOCTL_DEV,
+						&layers1));
 	KUNIT_EXPECT_EQ(
 		test, 0x21,
-		landlock_get_fs_deny_masks(LANDLOCK_ACCESS_FS_TRUNCATE |
-						   LANDLOCK_ACCESS_FS_IOCTL_DEV,
-					   &layers1));
+		landlock_get_deny_masks(_LANDLOCK_ACCESS_FS_OPTIONAL,
+					LANDLOCK_ACCESS_FS_TRUNCATE |
+						LANDLOCK_ACCESS_FS_IOCTL_DEV,
+					&layers1));
 }
 
 #endif /* CONFIG_SECURITY_LANDLOCK_KUNIT_TEST */
@@ -183,7 +251,8 @@ static void test_landlock_get_fs_deny_masks(struct kunit *const test)
 
 static struct kunit_case test_cases[] = {
 	/* clang-format off */
-	KUNIT_CASE(test_landlock_get_fs_deny_masks),
+	KUNIT_CASE(test_get_layer_deny_mask),
+	KUNIT_CASE(test_landlock_get_deny_masks),
 	{}
 	/* clang-format on */
 };

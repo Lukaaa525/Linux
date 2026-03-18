@@ -10,7 +10,5 @@ obj-y				+= probes/
 obj-y				+= net/
 obj-y				+= crypto/
 
-subdir-y += boot/dts
-
 # for cleaning
 subdir- += boot

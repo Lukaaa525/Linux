@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2012-2014, 2018-2025 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2026 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -460,7 +460,7 @@ static int iwl_mvm_wowlan_config_rsc_tsc(struct iwl_mvm *mvm,
 		struct wowlan_key_rsc_v5_data data = {};
 		int i;
 
-		data.rsc = kzalloc(sizeof(*data.rsc), GFP_KERNEL);
+		data.rsc = kzalloc_obj(*data.rsc);
 		if (!data.rsc)
 			return -ENOMEM;
 
@@ -483,7 +483,7 @@ static int iwl_mvm_wowlan_config_rsc_tsc(struct iwl_mvm *mvm,
 	} else if (ver == 2 || ver == IWL_FW_CMD_VER_UNKNOWN) {
 		struct wowlan_key_rsc_tsc_data data = {};
 
-		data.rsc_tsc = kzalloc(sizeof(*data.rsc_tsc), GFP_KERNEL);
+		data.rsc_tsc = kzalloc_obj(*data.rsc_tsc);
 		if (!data.rsc_tsc)
 			return -ENOMEM;
 
@@ -2605,8 +2605,7 @@ static void iwl_mvm_query_netdetect_reasons(struct iwl_mvm *mvm,
 		n_matches = 0;
 	}
 
-	net_detect = kzalloc(struct_size(net_detect, matches, n_matches),
-			     GFP_KERNEL);
+	net_detect = kzalloc_flex(*net_detect, matches, n_matches);
 	if (!net_detect || !n_matches)
 		goto out_report_nd;
 	net_detect->n_matches = n_matches;
@@ -2620,8 +2619,7 @@ static void iwl_mvm_query_netdetect_reasons(struct iwl_mvm *mvm,
 							   d3_data->nd_results,
 							   i);
 
-		match = kzalloc(struct_size(match, channels, n_channels),
-				GFP_KERNEL);
+		match = kzalloc_flex(*match, channels, n_channels);
 		if (!match)
 			goto out_report_nd;
 		match->n_channels = n_channels;
@@ -3093,7 +3091,7 @@ static int __iwl_mvm_resume(struct iwl_mvm *mvm)
 	}
 
 	if (resume_notif_based) {
-		d3_data.status = kzalloc(sizeof(*d3_data.status), GFP_KERNEL);
+		d3_data.status = kzalloc_obj(*d3_data.status);
 		if (!d3_data.status) {
 			IWL_ERR(mvm, "Failed to allocate wowlan status\n");
 			ret = -ENOMEM;
@@ -3214,6 +3212,8 @@ void iwl_mvm_fast_suspend(struct iwl_mvm *mvm)
 
 	IWL_DEBUG_WOWLAN(mvm, "Starting fast suspend flow\n");
 
+	iwl_mvm_pause_tcm(mvm, true);
+
 	mvm->fast_resume = true;
 	set_bit(IWL_MVM_STATUS_IN_D3, &mvm->status);
 
@@ -3269,6 +3269,8 @@ int iwl_mvm_fast_resume(struct iwl_mvm *mvm)
 		IWL_ERR(mvm, "Couldn't get the d3 notif %d\n", ret);
 		mvm->trans->state = IWL_TRANS_NO_FW;
 	}
+
+	iwl_mvm_resume_tcm(mvm);
 
 out:
 	clear_bit(IWL_MVM_STATUS_IN_D3, &mvm->status);

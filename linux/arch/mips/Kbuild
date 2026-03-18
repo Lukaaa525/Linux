@@ -21,7 +21,5 @@ ifdef CONFIG_KVM
 obj-y += kvm/
 endif
 
-subdir-y += boot/dts
-
 # for cleaning
 subdir- += boot

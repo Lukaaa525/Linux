@@ -877,7 +877,7 @@ static int adxl380_set_fifo_samples(struct adxl380_state *st)
 	ret = regmap_update_bits(st->regmap, ADXL380_FIFO_CONFIG_0_REG,
 				 ADXL380_FIFO_SAMPLES_8_MSK,
 				 FIELD_PREP(ADXL380_FIFO_SAMPLES_8_MSK,
-					    (fifo_samples & BIT(8))));
+					    !!(fifo_samples & BIT(8))));
 	if (ret)
 		return ret;
 
@@ -966,14 +966,13 @@ static irqreturn_t adxl380_irq_handler(int irq, void  *p)
 	if (ret)
 		return IRQ_HANDLED;
 
-	for (i = 0; i < fifo_entries; i += st->fifo_set_size) {
-		ret = regmap_noinc_read(st->regmap, ADXL380_FIFO_DATA,
-					&st->fifo_buf[i],
-					2 * st->fifo_set_size);
-		if (ret)
-			return IRQ_HANDLED;
+	fifo_entries = rounddown(fifo_entries, st->fifo_set_size);
+	ret = regmap_noinc_read(st->regmap, ADXL380_FIFO_DATA, &st->fifo_buf,
+				sizeof(*st->fifo_buf) * fifo_entries);
+	if (ret)
+		return IRQ_HANDLED;
+	for (i = 0; i < fifo_entries; i += st->fifo_set_size)
 		iio_push_to_buffers(indio_dev, &st->fifo_buf[i]);
-	}
 
 	return IRQ_HANDLED;
 }

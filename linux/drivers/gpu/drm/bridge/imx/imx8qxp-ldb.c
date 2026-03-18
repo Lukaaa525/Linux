@@ -65,9 +65,12 @@ static inline struct imx8qxp_ldb *base_to_imx8qxp_ldb(struct ldb *base)
 static void imx8qxp_ldb_bridge_destroy(struct drm_bridge *bridge)
 {
 	struct ldb_channel *ldb_ch = bridge->driver_private;
-	struct ldb *ldb = ldb_ch->ldb;
-	struct imx8qxp_ldb *imx8qxp_ldb = base_to_imx8qxp_ldb(ldb);
+	struct imx8qxp_ldb *imx8qxp_ldb;
 
+	if (!ldb_ch)
+		return;
+
+	imx8qxp_ldb = base_to_imx8qxp_ldb(ldb_ch->ldb);
 	drm_bridge_put(imx8qxp_ldb->companion);
 }
 
@@ -330,7 +333,7 @@ imx8qxp_ldb_bridge_atomic_get_input_bus_fmts(struct drm_bridge *bridge,
 
 	*num_input_fmts = 1;
 
-	input_fmts = kmalloc(sizeof(*input_fmts), GFP_KERNEL);
+	input_fmts = kmalloc_obj(*input_fmts);
 	if (!input_fmts)
 		return NULL;
 

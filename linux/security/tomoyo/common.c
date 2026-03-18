@@ -493,7 +493,7 @@ static struct tomoyo_profile *tomoyo_assign_profile
 	ptr = ns->profile_ptr[profile];
 	if (ptr)
 		return ptr;
-	entry = kzalloc(sizeof(*entry), GFP_NOFS | __GFP_NOWARN);
+	entry = kzalloc_obj(*entry, GFP_NOFS | __GFP_NOWARN);
 	if (mutex_lock_interruptible(&tomoyo_policy_lock))
 		goto out;
 	ptr = ns->profile_ptr[profile];
@@ -2553,11 +2553,11 @@ static int tomoyo_write_stat(struct tomoyo_io_buffer *head)
  */
 int tomoyo_open_control(const u8 type, struct file *file)
 {
-	struct tomoyo_io_buffer *head = kzalloc(sizeof(*head), GFP_NOFS);
+	struct tomoyo_io_buffer *head = kzalloc_obj(*head, GFP_NOFS);
 
 	if (!head)
 		return -ENOMEM;
-	mutex_init(&head->io_sem);
+	guard(mutex_init)(&head->io_sem);
 	head->type = type;
 	switch (type) {
 	case TOMOYO_DOMAINPOLICY:

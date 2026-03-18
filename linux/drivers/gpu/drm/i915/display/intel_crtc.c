@@ -168,7 +168,7 @@ struct intel_crtc_state *intel_crtc_state_alloc(struct intel_crtc *crtc)
 {
 	struct intel_crtc_state *crtc_state;
 
-	crtc_state = kmalloc(sizeof(*crtc_state), GFP_KERNEL);
+	crtc_state = kmalloc_obj(*crtc_state);
 
 	if (crtc_state)
 		intel_crtc_state_reset(crtc_state, crtc);
@@ -196,7 +196,7 @@ static struct intel_crtc *intel_crtc_alloc(void)
 	struct intel_crtc_state *crtc_state;
 	struct intel_crtc *crtc;
 
-	crtc = kzalloc(sizeof(*crtc), GFP_KERNEL);
+	crtc = kzalloc_obj(*crtc);
 	if (!crtc)
 		return ERR_PTR(-ENOMEM);
 
@@ -747,7 +747,9 @@ void intel_pipe_update_end(struct intel_atomic_state *state,
 	 * which would cause the next frame to terminate already at vmin
 	 * vblank start instead of vmax vblank start.
 	 */
-	if (!state->base.legacy_cursor_update)
+	if (!state->base.legacy_cursor_update ||
+	    (intel_psr_use_trans_push(new_crtc_state) &&
+	     !new_crtc_state->vrr.enable))
 		intel_vrr_send_push(NULL, new_crtc_state);
 
 	local_irq_enable();

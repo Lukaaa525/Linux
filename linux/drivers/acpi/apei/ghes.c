@@ -272,7 +272,7 @@ static struct ghes *ghes_new(struct acpi_hest_generic *generic)
 	unsigned int error_block_length;
 	int rc;
 
-	ghes = kzalloc(sizeof(*ghes), GFP_KERNEL);
+	ghes = kzalloc_obj(*ghes);
 	if (!ghes)
 		return ERR_PTR(-ENOMEM);
 
@@ -1897,6 +1897,8 @@ void __init acpi_ghes_init(void)
  */
 static struct acpi_platform_list plat_list[] = {
 	{"HPE   ", "Server  ", 0, ACPI_SIG_FADT, all_versions},
+	{"__ZX__", "EDK2    ", 3, ACPI_SIG_FADT, greater_than_or_equal},
+	{"_BYO_ ", "BYOSOFT ", 3, ACPI_SIG_FADT, greater_than_or_equal},
 	{ } /* End */
 };
 

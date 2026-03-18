@@ -84,7 +84,8 @@ static int temp_read(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 		     int channel, long *val)
 {
 	struct mgb4_dev *mgbdev = dev_get_drvdata(dev);
-	u32 val10, raw;
+	u32 raw;
+	int val10;
 
 	if (type != hwmon_temp || attr != hwmon_temp_input)
 		return -EOPNOTSUPP;
@@ -522,7 +523,7 @@ static int mgb4_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	};
 	int irqs = pci_msix_vec_count(pdev);
 
-	mgbdev = kzalloc(sizeof(*mgbdev), GFP_KERNEL);
+	mgbdev = kzalloc_obj(*mgbdev);
 	if (!mgbdev)
 		return -ENOMEM;
 

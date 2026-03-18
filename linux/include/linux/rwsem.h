@@ -57,7 +57,7 @@ context_lock_struct(rw_semaphore) {
 	struct optimistic_spin_queue osq; /* spinner MCS lock */
 #endif
 	raw_spinlock_t wait_lock;
-	struct list_head wait_list;
+	struct rwsem_waiter *first_waiter __guarded_by(&wait_lock);
 #ifdef CONFIG_DEBUG_RWSEMS
 	void *magic;
 #endif
@@ -106,7 +106,7 @@ static inline void rwsem_assert_held_write_nolockdep(const struct rw_semaphore *
 	  .owner = ATOMIC_LONG_INIT(0),				\
 	  __RWSEM_OPT_INIT(name)				\
 	  .wait_lock = __RAW_SPIN_LOCK_UNLOCKED(name.wait_lock),\
-	  .wait_list = LIST_HEAD_INIT((name).wait_list),	\
+	  .first_waiter = NULL,					\
 	  __RWSEM_DEBUG_INIT(name)				\
 	  __RWSEM_DEP_MAP_INIT(name) }
 
@@ -121,7 +121,6 @@ do {								\
 	static struct lock_class_key __key;			\
 								\
 	__init_rwsem((sem), #sem, &__key);			\
-	__assume_ctx_lock(sem);					\
 } while (0)
 
 /*
@@ -130,9 +129,9 @@ do {								\
  * rwsem to see if somebody from an incompatible type is wanting access to the
  * lock.
  */
-static inline int rwsem_is_contended(struct rw_semaphore *sem)
+static inline bool rwsem_is_contended(struct rw_semaphore *sem)
 {
-	return !list_empty(&sem->wait_list);
+	return data_race(sem->first_waiter != NULL);
 }
 
 #if defined(CONFIG_DEBUG_RWSEMS) || defined(CONFIG_DETECT_HUNG_TASK_BLOCKER)
@@ -175,7 +174,6 @@ do {								\
 	static struct lock_class_key __key;			\
 								\
 	__init_rwsem((sem), #sem, &__key);			\
-	__assume_ctx_lock(sem);					\
 } while (0)
 
 static __always_inline int rwsem_is_locked(const struct rw_semaphore *sem)
@@ -279,6 +277,10 @@ DECLARE_LOCK_GUARD_1_ATTRS(rwsem_write_try, __acquires(_T), __releases(*(struct 
 #define class_rwsem_write_try_constructor(_T) WITH_LOCK_GUARD_1_ATTRS(rwsem_write_try, _T)
 DECLARE_LOCK_GUARD_1_ATTRS(rwsem_write_kill, __acquires(_T), __releases(*(struct rw_semaphore **)_T))
 #define class_rwsem_write_kill_constructor(_T) WITH_LOCK_GUARD_1_ATTRS(rwsem_write_kill, _T)
+
+DEFINE_LOCK_GUARD_1(rwsem_init, struct rw_semaphore, init_rwsem(_T->lock), /* */)
+DECLARE_LOCK_GUARD_1_ATTRS(rwsem_init, __acquires(_T), __releases(*(struct rw_semaphore **)_T))
+#define class_rwsem_init_constructor(_T) WITH_LOCK_GUARD_1_ATTRS(rwsem_init, _T)
 
 /*
  * downgrade write lock to read lock

@@ -14,6 +14,7 @@
 #include <linux/dmi.h>
 #include <linux/init.h>
 #include <linux/iommu.h>
+#include <linux/lockdep.h>
 #include <linux/msi.h>
 #include <linux/of.h>
 #include <linux/pci.h>
@@ -100,12 +101,6 @@ bool pci_reset_supported(struct pci_dev *dev)
 #ifdef CONFIG_PCI_DOMAINS
 int pci_domains_supported = 1;
 #endif
-
-#define DEFAULT_CARDBUS_IO_SIZE		(256)
-#define DEFAULT_CARDBUS_MEM_SIZE	(64*1024*1024)
-/* pci=cbmemsize=nnM,cbiosize=nn can override this */
-unsigned long pci_cardbus_io_size = DEFAULT_CARDBUS_IO_SIZE;
-unsigned long pci_cardbus_mem_size = DEFAULT_CARDBUS_MEM_SIZE;
 
 #define DEFAULT_HOTPLUG_IO_SIZE		(256)
 #define DEFAULT_HOTPLUG_MMIO_SIZE	(2*1024*1024)
@@ -894,7 +889,6 @@ static const char *disable_acs_redir_param;
 static const char *config_acs_param;
 
 struct pci_acs {
-	u16 cap;
 	u16 ctrl;
 	u16 fw_ctrl;
 };
@@ -955,7 +949,7 @@ static void __pci_config_acs(struct pci_dev *dev, struct pci_acs *caps,
 
 		ret = pci_dev_str_match(dev, p, &p);
 		if (ret < 0) {
-			pr_info_once("PCI: Can't parse ACS command line parameter\n");
+			pr_warn_once("PCI: Can't parse ACS command line parameter\n");
 			break;
 		} else if (ret == 1) {
 			/* Found a match */
@@ -997,27 +991,27 @@ static void __pci_config_acs(struct pci_dev *dev, struct pci_acs *caps,
 static void pci_std_enable_acs(struct pci_dev *dev, struct pci_acs *caps)
 {
 	/* Source Validation */
-	caps->ctrl |= (caps->cap & PCI_ACS_SV);
+	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_SV);
 
 	/* P2P Request Redirect */
-	caps->ctrl |= (caps->cap & PCI_ACS_RR);
+	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_RR);
 
 	/* P2P Completion Redirect */
-	caps->ctrl |= (caps->cap & PCI_ACS_CR);
+	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_CR);
 
 	/* Upstream Forwarding */
-	caps->ctrl |= (caps->cap & PCI_ACS_UF);
+	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_UF);
 
 	/* Enable Translation Blocking for external devices and noats */
 	if (pci_ats_disabled() || dev->external_facing || dev->untrusted)
-		caps->ctrl |= (caps->cap & PCI_ACS_TB);
+		caps->ctrl |= (dev->acs_capabilities & PCI_ACS_TB);
 }
 
 /**
  * pci_enable_acs - enable ACS if hardware support it
  * @dev: the PCI device
  */
-static void pci_enable_acs(struct pci_dev *dev)
+void pci_enable_acs(struct pci_dev *dev)
 {
 	struct pci_acs caps;
 	bool enable_acs = false;
@@ -1033,7 +1027,6 @@ static void pci_enable_acs(struct pci_dev *dev)
 	if (!pos)
 		return;
 
-	pci_read_config_word(dev, pos + PCI_ACS_CAP, &caps.cap);
 	pci_read_config_word(dev, pos + PCI_ACS_CTRL, &caps.ctrl);
 	caps.fw_ctrl = caps.ctrl;
 
@@ -2248,10 +2241,9 @@ EXPORT_SYMBOL_GPL(pci_set_pcie_reset_state);
 #ifdef CONFIG_PCIEAER
 void pcie_clear_device_status(struct pci_dev *dev)
 {
-	u16 sta;
-
-	pcie_capability_read_word(dev, PCI_EXP_DEVSTA, &sta);
-	pcie_capability_write_word(dev, PCI_EXP_DEVSTA, sta);
+	pcie_capability_write_word(dev, PCI_EXP_DEVSTA,
+				   PCI_EXP_DEVSTA_CED | PCI_EXP_DEVSTA_NFED |
+				   PCI_EXP_DEVSTA_FED | PCI_EXP_DEVSTA_URD);
 }
 #endif
 
@@ -2261,7 +2253,7 @@ void pcie_clear_device_status(struct pci_dev *dev)
  */
 void pcie_clear_root_pme_status(struct pci_dev *dev)
 {
-	pcie_capability_set_dword(dev, PCI_EXP_RTSTA, PCI_EXP_RTSTA_PME);
+	pcie_capability_write_dword(dev, PCI_EXP_RTSTA, PCI_EXP_RTSTA_PME);
 }
 
 /**
@@ -2469,8 +2461,7 @@ void pci_pme_active(struct pci_dev *dev, bool enable)
 	if (dev->pme_poll) {
 		struct pci_pme_device *pme_dev;
 		if (enable) {
-			pme_dev = kmalloc(sizeof(struct pci_pme_device),
-					  GFP_KERNEL);
+			pme_dev = kmalloc_obj(struct pci_pme_device);
 			if (!pme_dev) {
 				pci_warn(dev, "can't enable PME#\n");
 				return;
@@ -3201,8 +3192,14 @@ void pci_pm_init(struct pci_dev *dev)
 poweron:
 	pci_pm_power_up_and_verify_state(dev);
 	pm_runtime_forbid(&dev->dev);
+
+	/*
+	 * Runtime PM will be enabled for the device when it has been fully
+	 * configured, but since its parent and suppliers may suspend in
+	 * the meantime, prevent them from doing so by changing the
+	 * device's runtime PM status to "active".
+	 */
 	pm_runtime_set_active(&dev->dev);
-	pm_runtime_enable(&dev->dev);
 }
 
 static unsigned long pci_ea_flags(struct pci_dev *dev, u8 prop)
@@ -3519,7 +3516,7 @@ void pci_configure_ari(struct pci_dev *dev)
 static bool pci_acs_flags_enabled(struct pci_dev *pdev, u16 acs_flags)
 {
 	int pos;
-	u16 cap, ctrl;
+	u16 ctrl;
 
 	pos = pdev->acs_cap;
 	if (!pos)
@@ -3530,8 +3527,7 @@ static bool pci_acs_flags_enabled(struct pci_dev *pdev, u16 acs_flags)
 	 * or only required if controllable.  Features missing from the
 	 * capability field can therefore be assumed as hard-wired enabled.
 	 */
-	pci_read_config_word(pdev, pos + PCI_ACS_CAP, &cap);
-	acs_flags &= (cap | PCI_ACS_EC);
+	acs_flags &= (pdev->acs_capabilities | PCI_ACS_EC);
 
 	pci_read_config_word(pdev, pos + PCI_ACS_CTRL, &ctrl);
 	return (ctrl & acs_flags) == acs_flags;
@@ -3652,15 +3648,15 @@ bool pci_acs_path_enabled(struct pci_dev *start,
  */
 void pci_acs_init(struct pci_dev *dev)
 {
-	dev->acs_cap = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ACS);
+	int pos;
 
-	/*
-	 * Attempt to enable ACS regardless of capability because some Root
-	 * Ports (e.g. those quirked with *_intel_pch_acs_*) do not have
-	 * the standard ACS capability but still support ACS via those
-	 * quirks.
-	 */
-	pci_enable_acs(dev);
+	dev->acs_cap = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ACS);
+	pos = dev->acs_cap;
+	if (!pos)
+		return;
+
+	pci_read_config_word(dev, pos + PCI_ACS_CAP, &dev->acs_capabilities);
+	pci_disable_broken_acs_cap(dev);
 }
 
 /**
@@ -3982,7 +3978,7 @@ int pci_register_io_range(const struct fwnode_handle *fwnode, phys_addr_t addr,
 	if (!size || addr + size < addr)
 		return -EINVAL;
 
-	range = kzalloc(sizeof(*range), GFP_ATOMIC);
+	range = kzalloc_obj(*range, GFP_ATOMIC);
 	if (!range)
 		return -ENOMEM;
 
@@ -4659,13 +4655,15 @@ bool pcie_wait_for_link(struct pci_dev *pdev, bool active)
  * spec says 100 ms, but firmware can lower it and we allow drivers to
  * increase it as well.
  *
- * Called with @pci_bus_sem locked for reading.
+ * Context: Called with @pci_bus_sem locked for reading.
  */
 static int pci_bus_max_d3cold_delay(const struct pci_bus *bus)
 {
 	const struct pci_dev *pdev;
 	int min_delay = 100;
 	int max_delay = 0;
+
+	lockdep_assert_held(&pci_bus_sem);
 
 	list_for_each_entry(pdev, &bus->devices, bus_list) {
 		if (pdev->d3cold_delay < min_delay)
@@ -5021,6 +5019,7 @@ static void pci_dev_save_and_disable(struct pci_dev *dev)
 	 * races with ->remove() by the device lock, which must be held by
 	 * the caller.
 	 */
+	device_lock_assert(&dev->dev);
 	if (err_handler && err_handler->reset_prepare)
 		err_handler->reset_prepare(dev);
 	else if (dev->driver)
@@ -5091,7 +5090,9 @@ const struct pci_reset_fn_method pci_reset_fn_methods[] = {
  * device including MSI, bus mastering, BARs, decoding IO and memory spaces,
  * etc.
  *
- * Returns 0 if the device function was successfully reset or negative if the
+ * Context: The caller must hold the device lock.
+ *
+ * Return: 0 if the device function was successfully reset or negative if the
  * device doesn't support resetting a single function.
  */
 int __pci_reset_function_locked(struct pci_dev *dev)
@@ -5100,6 +5101,7 @@ int __pci_reset_function_locked(struct pci_dev *dev)
 	const struct pci_reset_fn_method *method;
 
 	might_sleep();
+	device_lock_assert(&dev->dev);
 
 	/*
 	 * A reset method returns -ENOTTY if it doesn't support this device and
@@ -5222,12 +5224,16 @@ EXPORT_SYMBOL_GPL(pci_reset_function);
  * over the reset.  It also differs from pci_reset_function() in that it
  * requires the PCI device lock to be held.
  *
- * Returns 0 if the device function was successfully reset or negative if the
+ * Context: The caller must hold the device lock.
+ *
+ * Return: 0 if the device function was successfully reset or negative if the
  * device doesn't support resetting a single function.
  */
 int pci_reset_function_locked(struct pci_dev *dev)
 {
 	int rc;
+
+	device_lock_assert(&dev->dev);
 
 	if (!pci_reset_supported(dev))
 		return -ENOTTY;
@@ -5285,13 +5291,21 @@ static bool pci_bus_resettable(struct pci_bus *bus)
 	return true;
 }
 
-/* Lock devices from the top of the tree down */
-static void pci_bus_lock(struct pci_bus *bus)
-{
-	struct pci_dev *dev;
+static void pci_bus_lock(struct pci_bus *bus);
+static void pci_bus_unlock(struct pci_bus *bus);
+static int pci_bus_trylock(struct pci_bus *bus);
 
-	pci_dev_lock(bus->self);
+/* Lock devices from the top of the tree down */
+static void __pci_bus_lock(struct pci_bus *bus, struct pci_slot *slot)
+{
+	struct pci_dev *dev, *bridge = bus->self;
+
+	if (bridge)
+		pci_dev_lock(bridge);
+
 	list_for_each_entry(dev, &bus->devices, bus_list) {
+		if (slot && (!dev->slot || dev->slot != slot))
+			continue;
 		if (dev->subordinate)
 			pci_bus_lock(dev->subordinate);
 		else
@@ -5300,28 +5314,34 @@ static void pci_bus_lock(struct pci_bus *bus)
 }
 
 /* Unlock devices from the bottom of the tree up */
-static void pci_bus_unlock(struct pci_bus *bus)
+static void __pci_bus_unlock(struct pci_bus *bus, struct pci_slot *slot)
 {
-	struct pci_dev *dev;
+	struct pci_dev *dev, *bridge = bus->self;
 
 	list_for_each_entry(dev, &bus->devices, bus_list) {
+		if (slot && (!dev->slot || dev->slot != slot))
+			continue;
 		if (dev->subordinate)
 			pci_bus_unlock(dev->subordinate);
 		else
 			pci_dev_unlock(dev);
 	}
-	pci_dev_unlock(bus->self);
+
+	if (bridge)
+		pci_dev_unlock(bridge);
 }
 
 /* Return 1 on successful lock, 0 on contention */
-static int pci_bus_trylock(struct pci_bus *bus)
+static int __pci_bus_trylock(struct pci_bus *bus, struct pci_slot *slot)
 {
-	struct pci_dev *dev;
+	struct pci_dev *dev, *bridge = bus->self;
 
-	if (!pci_dev_trylock(bus->self))
+	if (bridge && !pci_dev_trylock(bridge))
 		return 0;
 
 	list_for_each_entry(dev, &bus->devices, bus_list) {
+		if (slot && (!dev->slot || dev->slot != slot))
+			continue;
 		if (dev->subordinate) {
 			if (!pci_bus_trylock(dev->subordinate))
 				goto unlock;
@@ -5332,22 +5352,43 @@ static int pci_bus_trylock(struct pci_bus *bus)
 
 unlock:
 	list_for_each_entry_continue_reverse(dev, &bus->devices, bus_list) {
+		if (slot && (!dev->slot || dev->slot != slot))
+			continue;
 		if (dev->subordinate)
 			pci_bus_unlock(dev->subordinate);
 		else
 			pci_dev_unlock(dev);
 	}
-	pci_dev_unlock(bus->self);
+
+	if (bridge)
+		pci_dev_unlock(bridge);
 	return 0;
+}
+
+/* Lock devices from the top of the tree down */
+static void pci_bus_lock(struct pci_bus *bus)
+{
+	__pci_bus_lock(bus, NULL);
+}
+
+/* Unlock devices from the bottom of the tree up */
+static void pci_bus_unlock(struct pci_bus *bus)
+{
+	__pci_bus_unlock(bus, NULL);
+}
+
+/* Return 1 on successful lock, 0 on contention */
+static int pci_bus_trylock(struct pci_bus *bus)
+{
+	return __pci_bus_trylock(bus, NULL);
 }
 
 /* Do any devices on or below this slot prevent a bus reset? */
 static bool pci_slot_resettable(struct pci_slot *slot)
 {
-	struct pci_dev *dev;
+	struct pci_dev *dev, *bridge = slot->bus->self;
 
-	if (slot->bus->self &&
-	    (slot->bus->self->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET))
+	if (bridge && (bridge->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET))
 		return false;
 
 	list_for_each_entry(dev, &slot->bus->devices, bus_list) {
@@ -5364,62 +5405,19 @@ static bool pci_slot_resettable(struct pci_slot *slot)
 /* Lock devices from the top of the tree down */
 static void pci_slot_lock(struct pci_slot *slot)
 {
-	struct pci_dev *dev;
-
-	list_for_each_entry(dev, &slot->bus->devices, bus_list) {
-		if (!dev->slot || dev->slot != slot)
-			continue;
-		if (dev->subordinate)
-			pci_bus_lock(dev->subordinate);
-		else
-			pci_dev_lock(dev);
-	}
+	__pci_bus_lock(slot->bus, slot);
 }
 
 /* Unlock devices from the bottom of the tree up */
 static void pci_slot_unlock(struct pci_slot *slot)
 {
-	struct pci_dev *dev;
-
-	list_for_each_entry(dev, &slot->bus->devices, bus_list) {
-		if (!dev->slot || dev->slot != slot)
-			continue;
-		if (dev->subordinate)
-			pci_bus_unlock(dev->subordinate);
-		else
-			pci_dev_unlock(dev);
-	}
+	__pci_bus_unlock(slot->bus, slot);
 }
 
 /* Return 1 on successful lock, 0 on contention */
 static int pci_slot_trylock(struct pci_slot *slot)
 {
-	struct pci_dev *dev;
-
-	list_for_each_entry(dev, &slot->bus->devices, bus_list) {
-		if (!dev->slot || dev->slot != slot)
-			continue;
-		if (dev->subordinate) {
-			if (!pci_bus_trylock(dev->subordinate)) {
-				pci_dev_unlock(dev);
-				goto unlock;
-			}
-		} else if (!pci_dev_trylock(dev))
-			goto unlock;
-	}
-	return 1;
-
-unlock:
-	list_for_each_entry_continue_reverse(dev,
-					     &slot->bus->devices, bus_list) {
-		if (!dev->slot || dev->slot != slot)
-			continue;
-		if (dev->subordinate)
-			pci_bus_unlock(dev->subordinate);
-		else
-			pci_dev_unlock(dev);
-	}
-	return 0;
+	return __pci_bus_trylock(slot->bus, slot);
 }
 
 /*
@@ -5525,7 +5523,7 @@ int pci_probe_reset_slot(struct pci_slot *slot)
 EXPORT_SYMBOL_GPL(pci_probe_reset_slot);
 
 /**
- * __pci_reset_slot - Try to reset a PCI slot
+ * pci_try_reset_slot - Try to reset a PCI slot
  * @slot: PCI slot to reset
  *
  * A PCI bus may host multiple slots, each slot may support a reset mechanism
@@ -5539,7 +5537,7 @@ EXPORT_SYMBOL_GPL(pci_probe_reset_slot);
  *
  * Same as above except return -EAGAIN if the slot cannot be locked
  */
-static int __pci_reset_slot(struct pci_slot *slot)
+static int pci_try_reset_slot(struct pci_slot *slot)
 {
 	int rc;
 
@@ -5581,59 +5579,12 @@ static int pci_bus_reset(struct pci_bus *bus, bool probe)
 }
 
 /**
- * pci_bus_error_reset - reset the bridge's subordinate bus
- * @bridge: The parent device that connects to the bus to reset
- *
- * This function will first try to reset the slots on this bus if the method is
- * available. If slot reset fails or is not available, this will fall back to a
- * secondary bus reset.
- */
-int pci_bus_error_reset(struct pci_dev *bridge)
-{
-	struct pci_bus *bus = bridge->subordinate;
-	struct pci_slot *slot;
-
-	if (!bus)
-		return -ENOTTY;
-
-	mutex_lock(&pci_slot_mutex);
-	if (list_empty(&bus->slots))
-		goto bus_reset;
-
-	list_for_each_entry(slot, &bus->slots, list)
-		if (pci_probe_reset_slot(slot))
-			goto bus_reset;
-
-	list_for_each_entry(slot, &bus->slots, list)
-		if (pci_slot_reset(slot, PCI_RESET_DO_RESET))
-			goto bus_reset;
-
-	mutex_unlock(&pci_slot_mutex);
-	return 0;
-bus_reset:
-	mutex_unlock(&pci_slot_mutex);
-	return pci_bus_reset(bridge->subordinate, PCI_RESET_DO_RESET);
-}
-
-/**
- * pci_probe_reset_bus - probe whether a PCI bus can be reset
- * @bus: PCI bus to probe
- *
- * Return 0 if bus can be reset, negative if a bus reset is not supported.
- */
-int pci_probe_reset_bus(struct pci_bus *bus)
-{
-	return pci_bus_reset(bus, PCI_RESET_PROBE);
-}
-EXPORT_SYMBOL_GPL(pci_probe_reset_bus);
-
-/**
- * __pci_reset_bus - Try to reset a PCI bus
+ * pci_try_reset_bus - Try to reset a PCI bus
  * @bus: top level PCI bus to reset
  *
  * Same as above except return -EAGAIN if the bus cannot be locked
  */
-int __pci_reset_bus(struct pci_bus *bus)
+static int pci_try_reset_bus(struct pci_bus *bus)
 {
 	int rc;
 
@@ -5653,6 +5604,82 @@ int __pci_reset_bus(struct pci_bus *bus)
 	return rc;
 }
 
+#define PCI_RESET_RESTORE true
+#define PCI_RESET_NO_RESTORE false
+/**
+ * pci_reset_bridge - reset a bridge's subordinate bus
+ * @bridge: bridge that connects to the bus to reset
+ * @restore: when true use a reset method that invokes pci_dev_restore() post
+ *           reset for affected devices
+ *
+ * This function will first try to reset the slots on this bus if the method is
+ * available. If slot reset fails or is not available, this will fall back to a
+ * secondary bus reset.
+ */
+static int pci_reset_bridge(struct pci_dev *bridge, bool restore)
+{
+	struct pci_bus *bus = bridge->subordinate;
+	struct pci_slot *slot;
+
+	if (!bus)
+		return -ENOTTY;
+
+	mutex_lock(&pci_slot_mutex);
+	if (list_empty(&bus->slots))
+		goto bus_reset;
+
+	list_for_each_entry(slot, &bus->slots, list)
+		if (pci_probe_reset_slot(slot))
+			goto bus_reset;
+
+	list_for_each_entry(slot, &bus->slots, list) {
+		int ret;
+
+		if (restore)
+			ret = pci_try_reset_slot(slot);
+		else
+			ret = pci_slot_reset(slot, PCI_RESET_DO_RESET);
+
+		if (ret)
+			goto bus_reset;
+	}
+
+	mutex_unlock(&pci_slot_mutex);
+	return 0;
+bus_reset:
+	mutex_unlock(&pci_slot_mutex);
+
+	if (restore)
+		return pci_try_reset_bus(bus);
+	return pci_bus_reset(bridge->subordinate, PCI_RESET_DO_RESET);
+}
+
+/**
+ * pci_bus_error_reset - reset the bridge's subordinate bus
+ * @bridge: The parent device that connects to the bus to reset
+ */
+int pci_bus_error_reset(struct pci_dev *bridge)
+{
+	return pci_reset_bridge(bridge, PCI_RESET_NO_RESTORE);
+}
+
+int pci_try_reset_bridge(struct pci_dev *bridge)
+{
+	return pci_reset_bridge(bridge, PCI_RESET_RESTORE);
+}
+
+/**
+ * pci_probe_reset_bus - probe whether a PCI bus can be reset
+ * @bus: PCI bus to probe
+ *
+ * Return 0 if bus can be reset, negative if a bus reset is not supported.
+ */
+int pci_probe_reset_bus(struct pci_bus *bus)
+{
+	return pci_bus_reset(bus, PCI_RESET_PROBE);
+}
+EXPORT_SYMBOL_GPL(pci_probe_reset_bus);
+
 /**
  * pci_reset_bus - Try to reset a PCI bus
  * @pdev: top level PCI device to reset via slot/bus
@@ -5662,7 +5689,7 @@ int __pci_reset_bus(struct pci_bus *bus)
 int pci_reset_bus(struct pci_dev *pdev)
 {
 	return (!pci_probe_reset_slot(pdev->slot)) ?
-	    __pci_reset_slot(pdev->slot) : __pci_reset_bus(pdev->bus);
+	    pci_try_reset_slot(pdev->slot) : pci_try_reset_bus(pdev->bus);
 }
 EXPORT_SYMBOL_GPL(pci_reset_bus);
 
@@ -6645,7 +6672,7 @@ static void of_pci_bus_release_domain_nr(struct device *parent, int domain_nr)
 		return;
 
 	/* Release domain from IDA where it was allocated. */
-	if (of_get_pci_domain_nr(parent->of_node) == domain_nr)
+	if (parent && of_get_pci_domain_nr(parent->of_node) == domain_nr)
 		ida_free(&pci_domain_nr_static_ida, domain_nr);
 	else
 		ida_free(&pci_domain_nr_dynamic_ida, domain_nr);
@@ -6684,7 +6711,9 @@ static int __init pci_setup(char *str)
 		if (k)
 			*k++ = 0;
 		if (*str && (str = pcibios_setup(str)) && *str) {
-			if (!strcmp(str, "nomsi")) {
+			if (!pci_setup_cardbus(str)) {
+				/* Function handled the parameters */
+			} else if (!strcmp(str, "nomsi")) {
 				pci_no_msi();
 			} else if (!strncmp(str, "noats", 5)) {
 				pr_info("PCIe: ATS is disabled\n");
@@ -6703,10 +6732,6 @@ static int __init pci_setup(char *str)
 				pcie_ari_disabled = true;
 			} else if (!strncmp(str, "notph", 5)) {
 				pci_no_tph();
-			} else if (!strncmp(str, "cbiosize=", 9)) {
-				pci_cardbus_io_size = memparse(str + 9, &str);
-			} else if (!strncmp(str, "cbmemsize=", 10)) {
-				pci_cardbus_mem_size = memparse(str + 10, &str);
 			} else if (!strncmp(str, "resource_alignment=", 19)) {
 				resource_alignment_param = str + 19;
 			} else if (!strncmp(str, "ecrc=", 5)) {

@@ -1156,19 +1156,19 @@ struct xfrm_offload {
 #define CRYPTO_INVALID_PROTOCOL			128
 
 	/* Used to keep whole l2 header for transport mode GRO */
-	__u32			orig_mac_len;
+	__u16			orig_mac_len;
 
 	__u8			proto;
 	__u8			inner_ipproto;
 };
 
 struct sec_path {
-	int			len;
-	int			olen;
-	int			verified_cnt;
-
 	struct xfrm_state	*xvec[XFRM_MAX_DEPTH];
 	struct xfrm_offload	ovec[XFRM_MAX_OFFLOAD_DEPTH];
+
+	u8			len;
+	u8			olen;
+	u8			verified_cnt;
 };
 
 struct sec_path *secpath_set(struct sk_buff *skb);
@@ -1765,8 +1765,9 @@ struct xfrmk_spdinfo {
 struct xfrm_state *xfrm_find_acq_byseq(struct net *net, u32 mark, u32 seq, u32 pcpu_num);
 int xfrm_state_delete(struct xfrm_state *x);
 int xfrm_state_flush(struct net *net, u8 proto, bool task_valid);
-int xfrm_dev_state_flush(struct net *net, struct net_device *dev, bool task_valid, bool forced);
-int xfrm_dev_policy_flush(struct net *net, struct net_device *dev, bool task_valid, bool forced);
+int xfrm_dev_state_flush(struct net *net, struct net_device *dev, bool task_valid);
+int xfrm_dev_policy_flush(struct net *net, struct net_device *dev,
+			  bool task_valid);
 void xfrm_sad_getinfo(struct net *net, struct xfrmk_sadinfo *si);
 void xfrm_spd_getinfo(struct net *net, struct xfrmk_spdinfo *si);
 u32 xfrm_replay_seqhi(struct xfrm_state *x, __be32 net_seq);

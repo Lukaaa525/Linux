@@ -32,7 +32,6 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-#define pr_fmt(fmt) "infiniband: " fmt
 
 #include <linux/if_vlan.h>
 #include <linux/errno.h>
@@ -121,104 +120,6 @@ struct ib_gid_table {
 	/* bit field, each bit indicates the index of default GID */
 	u32				default_gid_indices;
 };
-
-#ifdef CONFIG_NET_DEV_REFCNT_TRACKER
-#define IB_GID_TABLE_ENTRY_TRACE_BUFFER_SIZE 1024
-static struct ib_gid_table_entry_trace_buffer {
-	struct ib_gid_table_entry *entry; // no-ref
-	struct net_device *ndev; // no-ref
-	bool registered;
-	atomic_t count;
-	int nr_entries;
-	unsigned long entries[20];
-} ib_gid_table_entry_trace_buffer[IB_GID_TABLE_ENTRY_TRACE_BUFFER_SIZE];
-static bool ib_gid_table_entry_trace_buffer_exhausted;
-
-void dump_ib_gid_table_entry_trace_buffer(const struct net_device *ndev)
-{
-	struct ib_gid_table_entry_trace_buffer *ptr;
-	int count, balance = 0;
-	int i;
-
-	for (i = 0; i < IB_GID_TABLE_ENTRY_TRACE_BUFFER_SIZE; i++) {
-		ptr = &ib_gid_table_entry_trace_buffer[i];
-		if (!ptr->entry || ptr->ndev != ndev)
-			continue;
-		count = atomic_read(&ptr->count);
-		balance += count;
-		printk(KERN_INFO "Call trace for %s@%p %+d %sat\n", ndev->name, ptr->entry, count,
-			ptr->registered ? "" : "!NETREG_REGISTERED ");
-		stack_trace_print(ptr->entries, ptr->nr_entries, 4);
-	}
-	if (!ib_gid_table_entry_trace_buffer_exhausted)
-		pr_info("balance for %s@ib_gid_table_entry is %d\n", ndev->name, balance);
-	else
-		pr_info("balance for %s@ib_gid_table_entry is unknown\n", ndev->name);
-}
-
-static void erase_ib_gid_table_entry_trace_buffer(struct ib_gid_table_entry *entry)
-{
-	int i, balance = 0;
-
-	for (i = 0; i < IB_GID_TABLE_ENTRY_TRACE_BUFFER_SIZE; i++)
-		if (ib_gid_table_entry_trace_buffer[i].entry == entry)
-			balance += atomic_read(&ib_gid_table_entry_trace_buffer[i].count);
-	if (balance)
-		return;
-	for (i = 0; i < IB_GID_TABLE_ENTRY_TRACE_BUFFER_SIZE; i++)
-		if (ib_gid_table_entry_trace_buffer[i].entry == entry)
-			ib_gid_table_entry_trace_buffer[i].entry = NULL;
-}
-
-static void save_ib_gid_table_entry_trace_buffer(struct ib_gid_table_entry *entry,
-						 struct net_device *ndev, int delta)
-{
-	struct ib_gid_table_entry_trace_buffer *ptr;
-	unsigned long entries[ARRAY_SIZE(ptr->entries)];
-	unsigned long nr_entries;
-	int i;
-	bool registered;
-
-	if (!delta) {
-		for (i = 0; i < IB_GID_TABLE_ENTRY_TRACE_BUFFER_SIZE; i++)
-			if (ib_gid_table_entry_trace_buffer[i].entry == entry)
-				ib_gid_table_entry_trace_buffer[i].entry = NULL;
-		delta = 1;
-	}
-	if (!ndev)
-		return;
-	if (in_nmi())
-		return;
-	registered = ndev->reg_state == NETREG_REGISTERED;
-	nr_entries = stack_trace_save(entries, ARRAY_SIZE(ptr->entries), 1);
-	nr_entries = trim_netdev_trace(entries, nr_entries);
-	for (i = 0; i < IB_GID_TABLE_ENTRY_TRACE_BUFFER_SIZE; i++) {
-		ptr = &ib_gid_table_entry_trace_buffer[i];
-		if (ptr->entry == entry && ptr->nr_entries == nr_entries &&
-		    ptr->registered == registered &&
-		    !memcmp(ptr->entries, entries, nr_entries * sizeof(unsigned long))) {
-			atomic_add(delta, &ptr->count);
-			return;
-		}
-	}
-	for (i = 0; i < IB_GID_TABLE_ENTRY_TRACE_BUFFER_SIZE; i++) {
-		ptr = &ib_gid_table_entry_trace_buffer[i];
-		if (!ptr->entry && !cmpxchg(&ptr->entry, NULL, entry)) {
-			ptr->ndev = ndev;
-			ptr->registered = registered;
-			atomic_set(&ptr->count, delta);
-			ptr->nr_entries = nr_entries;
-			memmove(ptr->entries, entries, nr_entries * sizeof(unsigned long));
-			return;
-		}
-	}
-	ib_gid_table_entry_trace_buffer_exhausted = true;
-}
-#else
-static inline void erase_ib_gid_table_entry_trace_buffer(struct ib_gid_table_entry *entry) { };
-static inline void save_ib_gid_table_entry_trace_buffer(struct ib_gid_table_entry *entry,
-							struct net_device *ndev, int delta) { };
-#endif
 
 static void dispatch_gid_change_event(struct ib_device *ib_dev, u32 port)
 {
@@ -355,11 +256,8 @@ static void free_gid_entry_locked(struct ib_gid_table_entry *entry)
 	/* Now this index is ready to be allocated */
 	write_unlock_irq(&table->rwlock);
 
-	if (entry->ndev_storage) {
-		save_ib_gid_table_entry_trace_buffer(entry, entry->ndev_storage->ndev, -1);
+	if (entry->ndev_storage)
 		call_rcu(&entry->ndev_storage->rcu_head, put_gid_ndev);
-	}
-	erase_ib_gid_table_entry_trace_buffer(entry);
 	kfree(entry);
 }
 
@@ -398,14 +296,13 @@ alloc_gid_entry(const struct ib_gid_attr *attr)
 	struct ib_gid_table_entry *entry;
 	struct net_device *ndev;
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc_obj(*entry);
 	if (!entry)
 		return NULL;
 
 	ndev = rcu_dereference_protected(attr->ndev, 1);
 	if (ndev) {
-		entry->ndev_storage = kzalloc(sizeof(*entry->ndev_storage),
-					      GFP_KERNEL);
+		entry->ndev_storage = kzalloc_obj(*entry->ndev_storage);
 		if (!entry->ndev_storage) {
 			kfree(entry);
 			return NULL;
@@ -414,7 +311,6 @@ alloc_gid_entry(const struct ib_gid_attr *attr)
 		entry->ndev_storage->ndev = ndev;
 	}
 	kref_init(&entry->kref);
-	save_ib_gid_table_entry_trace_buffer(entry, ndev, 0);
 	memcpy(&entry->attr, attr, sizeof(*attr));
 	INIT_WORK(&entry->del_work, free_gid_work);
 	entry->state = GID_TABLE_ENTRY_INVALID;
@@ -439,21 +335,15 @@ static void store_gid_entry(struct ib_gid_table *table,
 static void get_gid_entry(struct ib_gid_table_entry *entry)
 {
 	kref_get(&entry->kref);
-	save_ib_gid_table_entry_trace_buffer(entry, entry->ndev_storage ?
-					     entry->ndev_storage->ndev : NULL, 1);
 }
 
 static void put_gid_entry(struct ib_gid_table_entry *entry)
 {
-	save_ib_gid_table_entry_trace_buffer(entry, entry->ndev_storage ?
-					     entry->ndev_storage->ndev : NULL, -1);
 	kref_put(&entry->kref, schedule_free_gid);
 }
 
 static void put_gid_entry_locked(struct ib_gid_table_entry *entry)
 {
-	save_ib_gid_table_entry_trace_buffer(entry, entry->ndev_storage ?
-					     entry->ndev_storage->ndev : NULL, -1);
 	kref_put(&entry->kref, free_gid_entry);
 }
 
@@ -516,7 +406,6 @@ static void del_gid(struct ib_device *ib_dev, u32 port,
 	if (ndev_storage) {
 		entry->ndev_storage = NULL;
 		rcu_assign_pointer(entry->attr.ndev, NULL);
-		save_ib_gid_table_entry_trace_buffer(entry, ndev_storage->ndev, -1);
 		call_rcu(&ndev_storage->rcu_head, put_gid_ndev);
 	}
 
@@ -881,12 +770,12 @@ const struct ib_gid_attr *rdma_find_gid_by_filter(
 
 static struct ib_gid_table *alloc_gid_table(int sz)
 {
-	struct ib_gid_table *table = kzalloc(sizeof(*table), GFP_KERNEL);
+	struct ib_gid_table *table = kzalloc_obj(*table);
 
 	if (!table)
 		return NULL;
 
-	table->data_vec = kcalloc(sz, sizeof(*table->data_vec), GFP_KERNEL);
+	table->data_vec = kzalloc_objs(*table->data_vec, sz);
 	if (!table->data_vec)
 		goto err_free_table;
 
@@ -1036,6 +925,13 @@ static int gid_table_setup_one(struct ib_device *ib_dev)
 
 	if (err)
 		return err;
+
+	/*
+	 * Mark the device as ready for GID cache updates. This allows netdev
+	 * event handlers to update the GID cache even before the device is
+	 * fully registered.
+	 */
+	ib_device_enable_gid_updates(ib_dev);
 
 	rdma_roce_rescan_device(ib_dev);
 
@@ -1562,7 +1458,7 @@ ib_cache_update(struct ib_device *device, u32 port, bool update_gids,
 	if (!rdma_is_port_valid(device, port))
 		return -EINVAL;
 
-	tprops = kmalloc(sizeof *tprops, GFP_KERNEL);
+	tprops = kmalloc_obj(*tprops);
 	if (!tprops)
 		return -ENOMEM;
 
@@ -1582,9 +1478,8 @@ ib_cache_update(struct ib_device *device, u32 port, bool update_gids,
 	update_pkeys &= !!tprops->pkey_tbl_len;
 
 	if (update_pkeys) {
-		pkey_cache = kmalloc(struct_size(pkey_cache, table,
-						 tprops->pkey_tbl_len),
-				     GFP_KERNEL);
+		pkey_cache = kmalloc_flex(*pkey_cache, table,
+					  tprops->pkey_tbl_len);
 		if (!pkey_cache) {
 			ret = -ENOMEM;
 			goto err;
@@ -1693,7 +1588,7 @@ void ib_dispatch_event(const struct ib_event *event)
 {
 	struct ib_update_work *work;
 
-	work = kzalloc(sizeof(*work), GFP_ATOMIC);
+	work = kzalloc_obj(*work, GFP_ATOMIC);
 	if (!work)
 		return;
 
@@ -1749,6 +1644,12 @@ void ib_cache_release_one(struct ib_device *device)
 
 void ib_cache_cleanup_one(struct ib_device *device)
 {
+	/*
+	 * Clear the GID updates mark first to prevent event handlers from
+	 * accessing the device while it's being torn down.
+	 */
+	ib_device_disable_gid_updates(device);
+
 	/* The cleanup function waits for all in-progress workqueue
 	 * elements and cleans up the GID cache. This function should be
 	 * called after the device was removed from the devices list and

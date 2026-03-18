@@ -480,8 +480,7 @@ int ext4_htree_store_dirent(struct file *dir_file, __u32 hash,
 	p = &info->root.rb_node;
 
 	/* Create and allocate the fname structure */
-	new_fn = kzalloc(struct_size(new_fn, name, ent_name->len + 1),
-			 GFP_KERNEL);
+	new_fn = kzalloc_flex(*new_fn, name, ent_name->len + 1);
 	if (!new_fn)
 		return -ENOMEM;
 	new_fn->hash = hash;
@@ -536,7 +535,7 @@ static int call_filldir(struct file *file, struct dir_context *ctx,
 	struct super_block *sb = inode->i_sb;
 
 	if (!fname) {
-		ext4_msg(sb, KERN_ERR, "%s:%d: inode #%lu: comm %s: "
+		ext4_msg(sb, KERN_ERR, "%s:%d: inode #%llu: comm %s: "
 			 "called with null fname?!?", __func__, __LINE__,
 			 inode->i_ino, current->comm);
 		return 0;
@@ -673,7 +672,7 @@ static int ext4_dir_open(struct inode *inode, struct file *file)
 {
 	struct dir_private_info *info;
 
-	info = kzalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc_obj(*info);
 	if (!info)
 		return -ENOMEM;
 	file->private_data = info;

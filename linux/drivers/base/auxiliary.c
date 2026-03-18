@@ -420,7 +420,7 @@ struct auxiliary_device *auxiliary_device_create(struct device *dev,
 	struct auxiliary_device *auxdev;
 	int ret;
 
-	auxdev = kzalloc(sizeof(*auxdev), GFP_KERNEL);
+	auxdev = kzalloc_obj(*auxdev);
 	if (!auxdev)
 		return NULL;
 
@@ -501,6 +501,16 @@ struct auxiliary_device *__devm_auxiliary_device_create(struct device *dev,
 	return auxdev;
 }
 EXPORT_SYMBOL_GPL(__devm_auxiliary_device_create);
+
+/**
+ * dev_is_auxiliary - check if the device is an auxiliary one
+ * @dev: device to check
+ */
+bool dev_is_auxiliary(struct device *dev)
+{
+	return dev->bus == &auxiliary_bus_type;
+}
+EXPORT_SYMBOL_GPL(dev_is_auxiliary);
 
 void __init auxiliary_bus_init(void)
 {

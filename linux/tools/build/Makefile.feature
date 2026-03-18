@@ -149,7 +149,8 @@ FEATURE_DISPLAY ?=              \
          bpf			\
          libaio			\
          libzstd		\
-         libopenssl
+         libopenssl		\
+         rust
 
 #
 # Declare group members of a feature to display the logical OR of the detection

@@ -109,6 +109,11 @@ static inline struct xe_gt *xe_root_mmio_gt(struct xe_device *xe)
 	return xe_device_get_root_tile(xe)->primary_gt;
 }
 
+static inline struct xe_mmio *xe_root_tile_mmio(struct xe_device *xe)
+{
+	return &xe->tiles[0].mmio;
+}
+
 static inline bool xe_device_uc_enabled(struct xe_device *xe)
 {
 	return !xe->info.force_execlist;
@@ -125,6 +130,10 @@ static inline bool xe_device_uc_enabled(struct xe_device *xe)
 #define for_each_gt(gt__, xe__, id__) \
 	for ((id__) = 0; (id__) < (xe__)->info.tile_count * (xe__)->info.max_gt_per_tile; (id__)++) \
 		for_each_if((gt__) = xe_device_get_gt((xe__), (id__)))
+
+#define for_each_gt_with_type(gt__, xe__, id__, typemask__) \
+	for_each_gt((gt__), (xe__), (id__)) \
+		for_each_if((typemask__) & BIT((gt__)->info.type))
 
 #define for_each_gt_on_tile(gt__, tile__, id__) \
 	for_each_gt((gt__), (tile__)->xe, (id__)) \

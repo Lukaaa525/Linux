@@ -303,7 +303,7 @@ static long arena_map_update_elem(struct bpf_map *map, void *key,
 	return -EOPNOTSUPP;
 }
 
-static int arena_map_check_btf(const struct bpf_map *map, const struct btf *btf,
+static int arena_map_check_btf(struct bpf_map *map, const struct btf *btf,
 			       const struct btf_type *key_type, const struct btf_type *value_type)
 {
 	return 0;
@@ -324,7 +324,7 @@ static int remember_vma(struct bpf_arena *arena, struct vm_area_struct *vma)
 {
 	struct vma_list *vml;
 
-	vml = kmalloc(sizeof(*vml), GFP_KERNEL);
+	vml = kmalloc_obj(*vml);
 	if (!vml)
 		return -ENOMEM;
 	refcount_set(&vml->mmap_count, 1);
@@ -656,8 +656,7 @@ static void zap_pages(struct bpf_arena *arena, long uaddr, long page_cnt)
 	guard(mutex)(&arena->lock);
 	/* iterate link list under lock */
 	list_for_each_entry(vml, &arena->vma_list, head)
-		zap_page_range_single(vml->vma, uaddr,
-				      PAGE_SIZE * page_cnt, NULL);
+		zap_vma_range(vml->vma, uaddr, PAGE_SIZE * page_cnt);
 }
 
 static void arena_free_pages(struct bpf_arena *arena, long uaddr, long page_cnt, bool sleepable)

@@ -27,6 +27,7 @@
 #include "core_types.h"
 #include "dcn401_dccg.h"
 #include "dcn31/dcn31_dccg.h"
+#include "dcn20/dcn20_dccg.h"
 
 /*
 #include "dmub_common.h"
@@ -595,22 +596,17 @@ void dccg401_set_dp_dto(
 
 	bool enable = false;
 
-	if (params->otg_inst > 3) {
-		/* dcn401 only has 4 instances */
-		BREAK_TO_DEBUGGER();
-		return;
-	}
-	if (!params->refclk_hz) {
-		BREAK_TO_DEBUGGER();
-		return;
-	}
-
 	if (!dc_is_tmds_signal(params->signal)) {
 		uint64_t dto_integer;
 		uint64_t dto_phase_hz;
 		uint64_t dto_modulo_hz = params->refclk_hz;
 
 		enable = true;
+
+		if (!params->refclk_hz) {
+			BREAK_TO_DEBUGGER();
+			return;
+		}
 
 		/* Set DTO values:
 		 * int = target_pix_rate / reference_clock
@@ -831,6 +827,16 @@ void dccg401_enable_symclk_se(struct dccg *dccg, uint32_t stream_enc_inst, uint3
 		if (dccg->ctx->dc->debug.root_clock_optimization.bits.symclk32_se)
 			REG_UPDATE(DCCG_GATE_DISABLE_CNTL5, SYMCLKD_FE_ROOT_GATE_DISABLE, 1);
 		break;
+	case 4:
+		if (dccg_dcn->dccg_mask->SYMCLKE_FE_ROOT_GATE_DISABLE) {
+			REG_UPDATE_2(SYMCLKE_CLOCK_ENABLE,
+					SYMCLKE_FE_EN, 1,
+					SYMCLKE_FE_SRC_SEL, link_enc_inst);
+			REG_UPDATE(DCCG_GATE_DISABLE_CNTL5, SYMCLKE_FE_ROOT_GATE_DISABLE, 1);
+		}
+		break;
+	default:
+		return;
 	}
 }
 
@@ -859,6 +865,16 @@ void dccg401_disable_symclk_se(struct dccg *dccg, uint32_t stream_enc_inst, uint
 				SYMCLKD_FE_EN, 0,
 				SYMCLKD_FE_SRC_SEL, 0);
 		break;
+	case 4:
+		if (dccg_dcn->dccg_mask->SYMCLKE_FE_ROOT_GATE_DISABLE) {
+			REG_UPDATE(DCCG_GATE_DISABLE_CNTL5, SYMCLKE_FE_ROOT_GATE_DISABLE, 0);
+			REG_UPDATE_2(SYMCLKE_CLOCK_ENABLE,
+					SYMCLKE_FE_EN, 0,
+					SYMCLKE_FE_SRC_SEL, 0);
+		}
+		break;
+	default:
+		return;
 	}
 }
 
@@ -866,6 +882,7 @@ static const struct dccg_funcs dccg401_funcs = {
 	.update_dpp_dto = dccg401_update_dpp_dto,
 	.get_dccg_ref_freq = dccg401_get_dccg_ref_freq,
 	.dccg_init = dccg401_init,
+	.allow_clock_gating = dccg2_allow_clock_gating,
 	.set_dpstreamclk = dccg401_set_dpstreamclk,
 	.enable_symclk32_se = dccg31_enable_symclk32_se,
 	.disable_symclk32_se = dccg31_disable_symclk32_se,
@@ -895,7 +912,7 @@ struct dccg *dccg401_create(
 	const struct dccg_shift *dccg_shift,
 	const struct dccg_mask *dccg_mask)
 {
-	struct dcn_dccg *dccg_dcn = kzalloc(sizeof(*dccg_dcn), GFP_KERNEL);
+	struct dcn_dccg *dccg_dcn = kzalloc_obj(*dccg_dcn);
 	struct dccg *base;
 
 	if (dccg_dcn == NULL) {

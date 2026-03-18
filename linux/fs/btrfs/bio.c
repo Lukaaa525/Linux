@@ -97,7 +97,13 @@ static struct btrfs_bio *btrfs_split_bio(struct btrfs_fs_info *fs_info,
 		bbio->orig_logical = orig_bbio->orig_logical;
 		orig_bbio->orig_logical += map_length;
 	}
+
 	bbio->csum_search_commit_root = orig_bbio->csum_search_commit_root;
+	bbio->can_use_append = orig_bbio->can_use_append;
+	bbio->is_scrub = orig_bbio->is_scrub;
+	bbio->is_remap = orig_bbio->is_remap;
+	bbio->async_csum = orig_bbio->async_csum;
+
 	atomic_inc(&orig_bbio->pending_ios);
 	return bbio;
 }
@@ -346,8 +352,7 @@ static void btrfs_log_dev_io_error(const struct bio *bio, struct btrfs_device *d
 {
 	if (!dev || !dev->bdev)
 		return;
-	if (bio->bi_status != BLK_STS_IOERR && bio->bi_status != BLK_STS_TARGET)
-		return;
+	ASSERT(bio->bi_status);
 
 	if (btrfs_op(bio) == BTRFS_MAP_WRITE)
 		btrfs_dev_stat_inc_and_print(dev, BTRFS_DEV_STAT_WRITE_ERRS);
@@ -703,7 +708,7 @@ static bool btrfs_wq_submit_bio(struct btrfs_bio *bbio,
 	struct btrfs_fs_info *fs_info = bbio->inode->root->fs_info;
 	struct async_submit_bio *async;
 
-	async = kmalloc(sizeof(*async), GFP_NOFS);
+	async = kmalloc_obj(*async, GFP_NOFS);
 	if (!async)
 		return false;
 
@@ -928,7 +933,6 @@ int btrfs_repair_io_failure(struct btrfs_fs_info *fs_info, u64 ino, u64 fileoff,
 	struct bio *bio = NULL;
 	int ret = 0;
 
-	ASSERT(!(fs_info->sb->s_flags & SB_RDONLY));
 	BUG_ON(!mirror_num);
 
 	/* Basic alignment checks. */
@@ -939,6 +943,13 @@ int btrfs_repair_io_failure(struct btrfs_fs_info *fs_info, u64 ino, u64 fileoff,
 	ASSERT(length <= BTRFS_MAX_BLOCKSIZE);
 	ASSERT(step <= length);
 	ASSERT(is_power_of_2(step));
+
+	/*
+	 * The fs either mounted RO or hit critical errors, no need
+	 * to continue repairing.
+	 */
+	if (unlikely(sb_rdonly(fs_info->sb)))
+		return 0;
 
 	if (btrfs_repair_one_zone(fs_info, logical))
 		return 0;

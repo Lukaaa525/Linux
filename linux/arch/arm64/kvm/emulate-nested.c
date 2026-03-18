@@ -1174,6 +1174,7 @@ static const struct encoding_to_trap_config encoding_to_cgt[] __initconst = {
 	SR_TRAP(SYS_DBGWCRn_EL1(12),	CGT_MDCR_TDE_TDA),
 	SR_TRAP(SYS_DBGWCRn_EL1(13),	CGT_MDCR_TDE_TDA),
 	SR_TRAP(SYS_DBGWCRn_EL1(14),	CGT_MDCR_TDE_TDA),
+	SR_TRAP(SYS_DBGWCRn_EL1(15),	CGT_MDCR_TDE_TDA),
 	SR_TRAP(SYS_DBGCLAIMSET_EL1,	CGT_MDCR_TDE_TDA),
 	SR_TRAP(SYS_DBGCLAIMCLR_EL1,	CGT_MDCR_TDE_TDA),
 	SR_TRAP(SYS_DBGAUTHSTATUS_EL1,	CGT_MDCR_TDE_TDA),
@@ -2435,15 +2436,7 @@ static enum trap_behaviour compute_trap_behaviour(struct kvm_vcpu *vcpu,
 
 static u64 kvm_get_sysreg_res0(struct kvm *kvm, enum vcpu_sysreg sr)
 {
-	struct kvm_sysreg_masks *masks;
-
-	/* Only handle the VNCR-backed regs for now */
-	if (sr < __VNCR_START__)
-		return 0;
-
-	masks = kvm->arch.sysreg_masks;
-
-	return masks->mask[sr - __SANITISED_REG_START__].res0;
+	return kvm_get_sysreg_resx(kvm, sr).res0;
 }
 
 static bool check_fgt_bit(struct kvm_vcpu *vcpu, enum vcpu_sysreg sr,

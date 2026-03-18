@@ -59,18 +59,31 @@
 
 #define to_amdgpu_device(x) (container_of(x, struct amdgpu_device, pm.smu_i2c))
 
-#define FEATURE_MASK(feature) (1ULL << feature)
-#define SMC_DPM_FEATURE ( \
-	FEATURE_MASK(FEATURE_DPM_GFXCLK_BIT)     | \
-	FEATURE_MASK(FEATURE_DPM_UCLK_BIT)	 | \
-	FEATURE_MASK(FEATURE_DPM_LINK_BIT)       | \
-	FEATURE_MASK(FEATURE_DPM_SOCCLK_BIT)     | \
-	FEATURE_MASK(FEATURE_DPM_FCLK_BIT)	 | \
-	FEATURE_MASK(FEATURE_DPM_MP0CLK_BIT))
+static const struct smu_feature_bits smu_v13_0_7_dpm_features = {
+	.bits = {
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_GFXCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_UCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_LINK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_SOCCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_FCLK_BIT),
+		SMU_FEATURE_BIT_INIT(FEATURE_DPM_MP0CLK_BIT)
+	}
+};
 
 #define smnMP1_FIRMWARE_FLAGS_SMU_13_0_7   0x3b10028
 
 #define MP0_MP1_DATA_REGION_SIZE_COMBOPPTABLE	0x4000
+
+#define mmMP1_SMN_C2PMSG_75                                                                            0x028b
+#define mmMP1_SMN_C2PMSG_75_BASE_IDX                                                                   0
+
+#define mmMP1_SMN_C2PMSG_53                                                                            0x0275
+#define mmMP1_SMN_C2PMSG_53_BASE_IDX                                                                   0
+
+#define mmMP1_SMN_C2PMSG_54                                                                            0x0276
+#define mmMP1_SMN_C2PMSG_54_BASE_IDX                                                                   0
+
+#define DEBUGSMC_MSG_Mode1Reset    2
 
 #define PP_OD_FEATURE_GFXCLK_FMIN			0
 #define PP_OD_FEATURE_GFXCLK_FMAX			1
@@ -265,71 +278,67 @@ static const uint8_t smu_v13_0_7_throttler_map[] = {
 };
 
 static int
-smu_v13_0_7_get_allowed_feature_mask(struct smu_context *smu,
-				  uint32_t *feature_mask, uint32_t num)
+smu_v13_0_7_init_allowed_features(struct smu_context *smu)
 {
 	struct amdgpu_device *adev = smu->adev;
 
-	if (num > 2)
-		return -EINVAL;
+	smu_feature_list_clear_all(smu, SMU_FEATURE_LIST_ALLOWED);
 
-	memset(feature_mask, 0, sizeof(uint32_t) * num);
-
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_FW_DATA_READ_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_FW_DATA_READ_BIT);
 
 	if (adev->pm.pp_feature & PP_SCLK_DPM_MASK) {
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_GFXCLK_BIT);
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_GFX_IMU_BIT);
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_GFX_POWER_OPTIMIZER_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_GFXCLK_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_GFX_IMU_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_GFX_POWER_OPTIMIZER_BIT);
 	}
 
 	if (adev->pm.pp_feature & PP_GFXOFF_MASK)
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_GFXOFF_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_GFXOFF_BIT);
 
 	if (adev->pm.pp_feature & PP_MCLK_DPM_MASK) {
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_UCLK_BIT);
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_FCLK_BIT);
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_VMEMP_SCALING_BIT);
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_VDDIO_MEM_SCALING_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_UCLK_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_FCLK_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_VMEMP_SCALING_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_VDDIO_MEM_SCALING_BIT);
 	}
 
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_SOCCLK_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_SOCCLK_BIT);
 
 	if (adev->pm.pp_feature & PP_PCIE_DPM_MASK)
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_LINK_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_LINK_BIT);
 
 	if (adev->pm.pp_feature & PP_SCLK_DEEP_SLEEP_MASK)
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DS_GFXCLK_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DS_GFXCLK_BIT);
 
 	if (adev->pm.pp_feature & PP_ULV_MASK)
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_GFX_ULV_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_GFX_ULV_BIT);
 
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DS_LCLK_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_MP0CLK_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_MM_DPM_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DS_VCN_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DS_FCLK_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DF_CSTATE_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_THROTTLERS_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_VR0HOT_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_FW_CTF_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_FAN_CONTROL_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DS_SOCCLK_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_GFXCLK_SPREAD_SPECTRUM_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_MEM_TEMP_READ_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_FW_DSTATE_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_SOC_MPCLK_DS_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_BACO_MPCLK_DS_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_GFX_PCC_DFLL_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_SOC_CG_BIT);
-	*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_BACO_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DS_LCLK_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_MP0CLK_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_MM_DPM_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DS_VCN_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DS_FCLK_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DF_CSTATE_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_THROTTLERS_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_VR0HOT_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_FW_CTF_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_FAN_CONTROL_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DS_SOCCLK_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_GFXCLK_SPREAD_SPECTRUM_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_MEM_TEMP_READ_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_FW_DSTATE_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_SOC_MPCLK_DS_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_BACO_MPCLK_DS_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_GFX_PCC_DFLL_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_SOC_CG_BIT);
+	smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_BACO_BIT);
 
 	if (adev->pm.pp_feature & PP_DCEFCLK_DPM_MASK)
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_DPM_DCN_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_DPM_DCN_BIT);
 
 	if ((adev->pg_flags & AMD_PG_SUPPORT_ATHUB) &&
 	    (adev->pg_flags & AMD_PG_SUPPORT_MMHUB))
-		*(uint64_t *)feature_mask |= FEATURE_MASK(FEATURE_ATHUB_MMHUB_PG_BIT);
+		smu_feature_list_set_bit(smu, SMU_FEATURE_LIST_ALLOWED, FEATURE_ATHUB_MMHUB_PG_BIT);
 
 	return 0;
 }
@@ -521,7 +530,7 @@ static int smu_v13_0_7_tables_init(struct smu_context *smu)
 		       sizeof(WifiBandEntryTable_t), PAGE_SIZE,
 		       AMDGPU_GEM_DOMAIN_VRAM);
 
-	smu_table->metrics_table = kzalloc(sizeof(SmuMetricsExternal_t), GFP_KERNEL);
+	smu_table->metrics_table = kzalloc_obj(SmuMetricsExternal_t);
 	if (!smu_table->metrics_table)
 		goto err0_out;
 	smu_table->metrics_time = 0;
@@ -532,7 +541,7 @@ static int smu_v13_0_7_tables_init(struct smu_context *smu)
 	if (ret)
 		goto err1_out;
 
-	smu_table->watermarks_table = kzalloc(sizeof(Watermarks_t), GFP_KERNEL);
+	smu_table->watermarks_table = kzalloc_obj(Watermarks_t);
 	if (!smu_table->watermarks_table)
 		goto err2_out;
 
@@ -550,8 +559,7 @@ static int smu_v13_0_7_allocate_dpm_context(struct smu_context *smu)
 {
 	struct smu_dpm_context *smu_dpm = &smu->smu_dpm;
 
-	smu_dpm->dpm_context = kzalloc(sizeof(struct smu_13_0_dpm_context),
-				       GFP_KERNEL);
+	smu_dpm->dpm_context = kzalloc_obj(struct smu_13_0_dpm_context);
 	if (!smu_dpm->dpm_context)
 		return -ENOMEM;
 
@@ -701,13 +709,14 @@ static int smu_v13_0_7_set_default_dpm_table(struct smu_context *smu)
 static bool smu_v13_0_7_is_dpm_running(struct smu_context *smu)
 {
 	int ret = 0;
-	uint64_t feature_enabled;
+	struct smu_feature_bits feature_enabled;
 
 	ret = smu_cmn_get_enabled_mask(smu, &feature_enabled);
 	if (ret)
 		return false;
 
-	return !!(feature_enabled & SMC_DPM_FEATURE);
+	return smu_feature_bits_test_mask(&feature_enabled,
+					  smu_v13_0_7_dpm_features.bits);
 }
 
 static uint32_t smu_v13_0_7_get_throttler_status(SmuMetrics_t *metrics)
@@ -2056,7 +2065,8 @@ static ssize_t smu_v13_0_7_get_gpu_metrics(struct smu_context *smu,
 					       metrics->Vcn1ActivityPercentage);
 
 	gpu_metrics->average_socket_power = metrics->AverageSocketPower;
-	gpu_metrics->energy_accumulator = metrics->EnergyAccumulator;
+	gpu_metrics->energy_accumulator = smu->smc_fw_version <= 0x00521400 ?
+		metrics->EnergyAccumulator : UINT_MAX;
 
 	if (metrics->AverageGfxActivity <= SMU_13_0_7_BUSY_THRESHOLD)
 		gpu_metrics->average_gfxclk_frequency = metrics->AverageGfxclkFrequencyPostDs;
@@ -2214,7 +2224,8 @@ static int smu_v13_0_7_restore_user_od_settings(struct smu_context *smu)
 	user_od_table->OverDriveTable.FeatureCtrlMask = BIT(PP_OD_FEATURE_GFXCLK_BIT) |
 							BIT(PP_OD_FEATURE_UCLK_BIT) |
 							BIT(PP_OD_FEATURE_GFX_VF_CURVE_BIT) |
-							BIT(PP_OD_FEATURE_FAN_CURVE_BIT);
+							BIT(PP_OD_FEATURE_FAN_CURVE_BIT) |
+							BIT(PP_OD_FEATURE_ZERO_FAN_BIT);
 	res = smu_v13_0_7_upload_overdrive_table(smu, user_od_table);
 	user_od_table->OverDriveTable.FeatureCtrlMask = 0;
 	if (res == 0)
@@ -2390,9 +2401,8 @@ static int smu_v13_0_7_get_power_profile_mode(struct smu_context *smu, char *buf
 	if (!buf)
 		return -EINVAL;
 
-	activity_monitor_external = kcalloc(PP_SMC_POWER_PROFILE_COUNT,
-					    sizeof(*activity_monitor_external),
-					    GFP_KERNEL);
+	activity_monitor_external = kzalloc_objs(*activity_monitor_external,
+						 PP_SMC_POWER_PROFILE_COUNT);
 	if (!activity_monitor_external)
 		return -ENOMEM;
 
@@ -2735,8 +2745,38 @@ static int smu_v13_0_7_update_pcie_parameters(struct smu_context *smu,
 	return ret;
 }
 
+static int smu_v13_0_7_mode1_reset(struct smu_context *smu)
+{
+   int ret;
+
+   ret = smu_cmn_send_debug_smc_msg(smu, DEBUGSMC_MSG_Mode1Reset);
+   if (!ret) {
+       /* disable mmio access while doing mode 1 reset*/
+       smu->adev->no_hw_access = true;
+       /* ensure no_hw_access is globally visible before any MMIO */
+       smp_mb();
+       msleep(SMU13_MODE1_RESET_WAIT_TIME_IN_MS);
+   }
+
+   return ret;
+}
+
+static void smu_v13_0_7_init_msg_ctl(struct smu_context *smu)
+{
+	struct amdgpu_device *adev = smu->adev;
+	struct smu_msg_ctl *ctl = &smu->msg_ctl;
+
+	smu_v13_0_init_msg_ctl(smu, smu_v13_0_7_message_map);
+
+	/* Set up debug mailbox registers */
+	ctl->config.debug_param_reg = SOC15_REG_OFFSET(MP1, 0, mmMP1_SMN_C2PMSG_53);
+	ctl->config.debug_msg_reg = SOC15_REG_OFFSET(MP1, 0, mmMP1_SMN_C2PMSG_75);
+	ctl->config.debug_resp_reg = SOC15_REG_OFFSET(MP1, 0, mmMP1_SMN_C2PMSG_54);
+	ctl->flags |= SMU_MSG_CTL_DEBUG_MAILBOX;
+}
+
 static const struct pptable_funcs smu_v13_0_7_ppt_funcs = {
-	.get_allowed_feature_mask = smu_v13_0_7_get_allowed_feature_mask,
+	.init_allowed_features = smu_v13_0_7_init_allowed_features,
 	.set_default_dpm_table = smu_v13_0_7_set_default_dpm_table,
 	.is_dpm_running = smu_v13_0_7_is_dpm_running,
 	.init_microcode = smu_v13_0_init_microcode,
@@ -2748,7 +2788,7 @@ static const struct pptable_funcs smu_v13_0_7_ppt_funcs = {
 	.fini_power = smu_v13_0_fini_power,
 	.check_fw_status = smu_v13_0_7_check_fw_status,
 	.setup_pptable = smu_v13_0_7_setup_pptable,
-	.check_fw_version = smu_v13_0_check_fw_version,
+	.check_fw_version = smu_cmn_check_fw_version,
 	.write_pptable = smu_cmn_write_pptable,
 	.set_driver_table_location = smu_v13_0_set_driver_table_location,
 	.system_features_control = smu_v13_0_system_features_control,
@@ -2796,7 +2836,7 @@ static const struct pptable_funcs smu_v13_0_7_ppt_funcs = {
 	.baco_enter = smu_v13_0_baco_enter,
 	.baco_exit = smu_v13_0_baco_exit,
 	.mode1_reset_is_support = smu_v13_0_7_is_mode1_reset_supported,
-	.mode1_reset = smu_v13_0_mode1_reset,
+	.mode1_reset = smu_v13_0_7_mode1_reset,
 	.set_mp1_state = smu_v13_0_7_set_mp1_state,
 	.set_df_cstate = smu_v13_0_7_set_df_cstate,
 	.gpo_control = smu_v13_0_gpo_control,
@@ -2815,5 +2855,5 @@ void smu_v13_0_7_set_ppt_funcs(struct smu_context *smu)
 	smu->pwr_src_map = smu_v13_0_7_pwr_src_map;
 	smu->workload_map = smu_v13_0_7_workload_map;
 	smu->smc_driver_if_version = SMU13_0_7_DRIVER_IF_VERSION;
-	smu_v13_0_init_msg_ctl(smu, smu_v13_0_7_message_map);
+	smu_v13_0_7_init_msg_ctl(smu);
 }

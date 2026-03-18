@@ -155,7 +155,7 @@ static int swsusp_extents_insert(unsigned long swap_offset)
 		}
 	}
 	/* Add the new node and rebalance the tree. */
-	ext = kzalloc(sizeof(struct swsusp_extent), GFP_KERNEL);
+	ext = kzalloc_obj(struct swsusp_extent);
 	if (!ext)
 		return -ENOMEM;
 
@@ -577,7 +577,7 @@ static struct crc_data *alloc_crc_data(int nr_threads)
 {
 	struct crc_data *crc;
 
-	crc = kzalloc(sizeof(*crc), GFP_KERNEL);
+	crc = kzalloc_obj(*crc);
 	if (!crc)
 		return NULL;
 
@@ -585,7 +585,7 @@ static struct crc_data *alloc_crc_data(int nr_threads)
 	if (!crc->unc)
 		goto err_free_crc;
 
-	crc->unc_len = kcalloc(nr_threads, sizeof(*crc->unc_len), GFP_KERNEL);
+	crc->unc_len = kzalloc_objs(*crc->unc_len, nr_threads);
 	if (!crc->unc_len)
 		goto err_free_unc;
 
@@ -904,8 +904,8 @@ out_clean:
 		for (thr = 0; thr < nr_threads; thr++) {
 			if (data[thr].thr)
 				kthread_stop(data[thr].thr);
-			if (data[thr].cr)
-				acomp_request_free(data[thr].cr);
+
+			acomp_request_free(data[thr].cr);
 
 			if (!IS_ERR_OR_NULL(data[thr].cc))
 				crypto_free_acomp(data[thr].cc);
@@ -1016,7 +1016,7 @@ static int get_swap_reader(struct swap_map_handle *handle,
 	last = handle->maps = NULL;
 	offset = swsusp_header->image;
 	while (offset) {
-		tmp = kzalloc(sizeof(*handle->maps), GFP_KERNEL);
+		tmp = kzalloc_obj(*handle->maps);
 		if (!tmp) {
 			release_swap_reader(handle);
 			return -ENOMEM;
@@ -1504,8 +1504,8 @@ out_clean:
 		for (thr = 0; thr < nr_threads; thr++) {
 			if (data[thr].thr)
 				kthread_stop(data[thr].thr);
-			if (data[thr].cr)
-				acomp_request_free(data[thr].cr);
+
+			acomp_request_free(data[thr].cr);
 
 			if (!IS_ERR_OR_NULL(data[thr].cc))
 				crypto_free_acomp(data[thr].cc);

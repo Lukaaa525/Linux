@@ -126,7 +126,7 @@ static unsigned long calc_shstk_size(unsigned long size)
  * shadow stack. To keep it simple, we plan to use `ssamoswap` to perform writes on shadow
  * stack.
  */
-static noinline unsigned long amo_user_shstk(unsigned long *addr, unsigned long val)
+static noinline unsigned long amo_user_shstk(unsigned long __user *addr, unsigned long val)
 {
 	/*
 	 * Never expect -1 on shadow stack. Expect return addresses and zero
@@ -139,7 +139,7 @@ static noinline unsigned long amo_user_shstk(unsigned long *addr, unsigned long 
 		"1: ssamoswap.d %[swap], %[val], %[addr]\n"
 		_ASM_EXTABLE(1b, %l[fault])
 		".option pop\n"
-		: [swap] "=r" (swap), [addr] "+A" (*addr)
+		 : [swap] "=r" (swap), [addr] "+A" (*(__force unsigned long *)addr)
 		: [val] "r" (val)
 		: "memory"
 		: fault
@@ -230,27 +230,15 @@ int restore_user_shstk(struct task_struct *tsk, unsigned long shstk_ptr)
 static unsigned long allocate_shadow_stack(unsigned long addr, unsigned long size,
 					   unsigned long token_offset, bool set_tok)
 {
-	int flags = MAP_ANONYMOUS | MAP_PRIVATE;
-	struct mm_struct *mm = current->mm;
-	unsigned long populate, tok_loc = 0;
-
-	if (addr)
-		flags |= MAP_FIXED_NOREPLACE;
-
-	mmap_write_lock(mm);
-	addr = do_mmap(NULL, addr, size, PROT_READ, flags,
-		       VM_SHADOW_STACK | VM_WRITE, 0, &populate, NULL);
-	mmap_write_unlock(mm);
+	addr = vm_mmap_shadow_stack(addr, size, 0);
 
 	if (!set_tok || IS_ERR_VALUE(addr))
 		goto out;
 
-	if (create_rstor_token(addr + token_offset, &tok_loc)) {
+	if (create_rstor_token(addr + token_offset, NULL)) {
 		vm_munmap(addr, size);
 		return -EINVAL;
 	}
-
-	addr = tok_loc;
 
 out:
 	return addr;

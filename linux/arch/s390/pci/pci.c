@@ -523,7 +523,7 @@ static struct resource *__alloc_res(struct zpci_dev *zdev, unsigned long start,
 {
 	struct resource *r;
 
-	r = kzalloc(sizeof(*r), GFP_KERNEL);
+	r = kzalloc_obj(*r);
 	if (!r)
 		return NULL;
 
@@ -824,7 +824,7 @@ struct zpci_dev *zpci_create_device(u32 fid, u32 fh, enum zpci_state state)
 	struct zpci_dev *zdev;
 	int rc;
 
-	zdev = kzalloc(sizeof(*zdev), GFP_KERNEL);
+	zdev = kzalloc_obj(*zdev);
 	if (!zdev)
 		return ERR_PTR(-ENOMEM);
 
@@ -1065,14 +1065,15 @@ static int zpci_mem_init(void)
 {
 	BUILD_BUG_ON(!is_power_of_2(__alignof__(struct zpci_fmb)) ||
 		     __alignof__(struct zpci_fmb) < sizeof(struct zpci_fmb));
+	BUILD_BUG_ON((CONFIG_ILLEGAL_POINTER_VALUE + 0x10000 > ZPCI_IOMAP_ADDR_BASE) &&
+		     (CONFIG_ILLEGAL_POINTER_VALUE <= ZPCI_IOMAP_ADDR_MAX));
 
 	zdev_fmb_cache = kmem_cache_create("PCI_FMB_cache", sizeof(struct zpci_fmb),
 					   __alignof__(struct zpci_fmb), 0, NULL);
 	if (!zdev_fmb_cache)
 		goto error_fmb;
 
-	zpci_iomap_start = kcalloc(ZPCI_IOMAP_ENTRIES,
-				   sizeof(*zpci_iomap_start), GFP_KERNEL);
+	zpci_iomap_start = kzalloc_objs(*zpci_iomap_start, ZPCI_IOMAP_ENTRIES);
 	if (!zpci_iomap_start)
 		goto error_iomap;
 

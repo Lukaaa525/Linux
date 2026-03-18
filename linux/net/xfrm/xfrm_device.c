@@ -537,8 +537,8 @@ static int xfrm_api_check(struct net_device *dev)
 static int xfrm_dev_down(struct net_device *dev)
 {
 	if (dev->features & NETIF_F_HW_ESP) {
-		xfrm_dev_state_flush(dev_net(dev), dev, true, false);
-		xfrm_dev_policy_flush(dev_net(dev), dev, true, false);
+		xfrm_dev_state_flush(dev_net(dev), dev, true);
+		xfrm_dev_policy_flush(dev_net(dev), dev, true);
 	}
 
 	return NOTIFY_DONE;
@@ -546,14 +546,8 @@ static int xfrm_dev_down(struct net_device *dev)
 
 static int xfrm_dev_unregister(struct net_device *dev)
 {
-	const int before = netdev_refcnt_read(dev);
-	int after;
-
-	xfrm_dev_state_flush(dev_net(dev), dev, true, true);
-	xfrm_dev_policy_flush(dev_net(dev), dev, true, true);
-	after = netdev_refcnt_read(dev);
-	if (before != after)
-		pr_info("***** Refcount for %s changed from %d to %d\n", dev->name, before, after);
+	xfrm_dev_state_flush(dev_net(dev), dev, true);
+	xfrm_dev_policy_flush(dev_net(dev), dev, true);
 
 	return NOTIFY_DONE;
 }
@@ -570,9 +564,9 @@ static int xfrm_dev_event(struct notifier_block *this, unsigned long event, void
 		return xfrm_api_check(dev);
 
 	case NETDEV_DOWN:
-	case NETDEV_UNREGISTER:
 		return xfrm_dev_down(dev);
-	case NETDEV_DEBUG_UNREGISTER:
+
+	case NETDEV_UNREGISTER:
 		return xfrm_dev_unregister(dev);
 	}
 	return NOTIFY_DONE;

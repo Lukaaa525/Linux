@@ -41,6 +41,7 @@
 #include <linux/mempolicy.h>
 #include <linux/freezer.h>
 #include <linux/debug_locks.h>
+#include <linux/device/devres.h>
 #include <linux/lockdep.h>
 #include <linux/idr.h>
 #include <linux/jhash.h>
@@ -190,7 +191,7 @@ struct worker_pool {
 	int			id;		/* I: pool ID */
 	unsigned int		flags;		/* L: flags */
 
-	unsigned long		watchdog_ts;	/* L: watchdog timestamp */
+	unsigned long		last_progress_ts;	/* L: last forward progress timestamp */
 	bool			cpu_stall;	/* WD: stalled cpu bound pool */
 
 	/*
@@ -404,7 +405,7 @@ struct work_offq_data {
 	u32			flags;
 };
 
-static const char *wq_affn_names[WQ_AFFN_NR_TYPES] = {
+static const char * const wq_affn_names[WQ_AFFN_NR_TYPES] = {
 	[WQ_AFFN_DFL]		= "default",
 	[WQ_AFFN_CPU]		= "cpu",
 	[WQ_AFFN_SMT]		= "smt",
@@ -530,6 +531,8 @@ struct workqueue_struct *system_bh_wq;
 EXPORT_SYMBOL_GPL(system_bh_wq);
 struct workqueue_struct *system_bh_highpri_wq;
 EXPORT_SYMBOL_GPL(system_bh_highpri_wq);
+struct workqueue_struct *system_dfl_long_wq __ro_after_init;
+EXPORT_SYMBOL_GPL(system_dfl_long_wq);
 
 static int worker_thread(void *__worker);
 static void workqueue_sysfs_unregister(struct workqueue_struct *wq);
@@ -1697,7 +1700,7 @@ static void __pwq_activate_work(struct pool_workqueue *pwq,
 	WARN_ON_ONCE(!(*wdb & WORK_STRUCT_INACTIVE));
 	trace_workqueue_activate_work(work);
 	if (list_empty(&pwq->pool->worklist))
-		pwq->pool->watchdog_ts = jiffies;
+		pwq->pool->last_progress_ts = jiffies;
 	move_linked_works(work, &pwq->pool->worklist, NULL);
 	__clear_bit(WORK_STRUCT_INACTIVE_BIT, wdb);
 }
@@ -2348,7 +2351,7 @@ retry:
 	 */
 	if (list_empty(&pwq->inactive_works) && pwq_tryinc_nr_active(pwq, false)) {
 		if (list_empty(&pool->worklist))
-			pool->watchdog_ts = jiffies;
+			pool->last_progress_ts = jiffies;
 
 		trace_workqueue_activate_work(work);
 		insert_work(pwq, work, &pool->worklist, work_flags);
@@ -2507,7 +2510,6 @@ static void __queue_delayed_work(int cpu, struct workqueue_struct *wq,
 	struct timer_list *timer = &dwork->timer;
 	struct work_struct *work = &dwork->work;
 
-	WARN_ON_ONCE(!wq);
 	WARN_ON_ONCE(timer->function != delayed_work_timer_fn);
 	WARN_ON_ONCE(timer_pending(timer));
 	WARN_ON_ONCE(!list_empty(&work->entry));
@@ -3184,6 +3186,9 @@ __acquires(&pool->lock)
 	unsigned long work_data;
 	int lockdep_start_depth, rcu_start_depth;
 	bool bh_draining = pool->flags & POOL_BH_DRAINING;
+#ifdef CONFIG_KCOV
+	unsigned int old_kcov_mode, new_kcov_mode;
+#endif
 #ifdef CONFIG_LOCKDEP
 	/*
 	 * It is permissible to free the struct work_struct from
@@ -3208,6 +3213,7 @@ __acquires(&pool->lock)
 	worker->current_pwq = pwq;
 	if (worker->task)
 		worker->current_at = worker->task->se.sum_exec_runtime;
+	worker->current_start = jiffies;
 	work_data = *work_data_bits(work);
 	worker->current_color = get_work_color(work_data);
 
@@ -3276,7 +3282,13 @@ __acquires(&pool->lock)
 	 */
 	lockdep_invariant_state(true);
 	trace_workqueue_execute_start(work);
+#ifdef CONFIG_KCOV
+	old_kcov_mode = READ_ONCE(current->kcov_mode);
+#endif
 	worker->current_func(work);
+#ifdef CONFIG_KCOV
+	new_kcov_mode = READ_ONCE(current->kcov_mode);
+#endif
 	/*
 	 * While we must be careful to not use "work" after this, the trace
 	 * point will only record its address.
@@ -3299,6 +3311,11 @@ __acquires(&pool->lock)
 		debug_show_held_locks(current);
 		dump_stack();
 	}
+#ifdef CONFIG_KCOV
+	if (unlikely((old_kcov_mode & ~(1 << 30)) != (new_kcov_mode & ~(1 << 30))))
+		pr_err("BUG: workqueue function %ps changed kcov_mode from %u to %u\n",
+		       worker->current_func, old_kcov_mode, new_kcov_mode);
+#endif
 
 	/*
 	 * The following prevents a kworker from hogging CPU on !PREEMPTION
@@ -3356,7 +3373,7 @@ static void process_scheduled_works(struct worker *worker)
 	while ((work = list_first_entry_or_null(&worker->scheduled,
 						struct work_struct, entry))) {
 		if (first) {
-			worker->pool->watchdog_ts = jiffies;
+			worker->pool->last_progress_ts = jiffies;
 			first = false;
 		}
 		process_one_work(worker, work);
@@ -3389,6 +3406,11 @@ static int worker_thread(void *__worker)
 {
 	struct worker *worker = __worker;
 	struct worker_pool *pool = worker->pool;
+
+#ifdef CONFIG_KCOV
+	if (unlikely(current->kcov_mode & ~(1 << 30)))
+		pr_err("BUG: %s started with kcov_mode=%u\n", __func__, current->kcov_mode);
+#endif
 
 	/* tell the scheduler that this is a workqueue worker */
 	set_pf_worker(true);
@@ -3541,6 +3563,11 @@ static int rescuer_thread(void *__rescuer)
 	struct worker *rescuer = __rescuer;
 	struct workqueue_struct *wq = rescuer->rescue_wq;
 	bool should_stop;
+
+#ifdef CONFIG_KCOV
+	if (unlikely(current->kcov_mode & ~(1 << 30)))
+		pr_err("BUG: %s started with kcov_mode=%u\n", __func__, current->kcov_mode);
+#endif
 
 	set_user_nice(current, RESCUER_NICE_LEVEL);
 
@@ -4718,7 +4745,7 @@ struct workqueue_attrs *alloc_workqueue_attrs_noprof(void)
 {
 	struct workqueue_attrs *attrs;
 
-	attrs = kzalloc(sizeof(*attrs), GFP_KERNEL);
+	attrs = kzalloc_obj(*attrs);
 	if (!attrs)
 		goto fail;
 	if (!alloc_cpumask_var(&attrs->cpumask, GFP_KERNEL))
@@ -4854,7 +4881,7 @@ static int init_worker_pool(struct worker_pool *pool)
 	pool->cpu = -1;
 	pool->node = NUMA_NO_NODE;
 	pool->flags |= POOL_DISASSOCIATED;
-	pool->watchdog_ts = jiffies;
+	pool->last_progress_ts = jiffies;
 	INIT_LIST_HEAD(&pool->worklist);
 	INIT_LIST_HEAD(&pool->idle_list);
 	hash_init(pool->busy_hash);
@@ -5374,7 +5401,7 @@ apply_wqattrs_prepare(struct workqueue_struct *wq,
 		    attrs->affn_scope >= WQ_AFFN_NR_TYPES))
 		return ERR_PTR(-EINVAL);
 
-	ctx = kzalloc(struct_size(ctx, pwq_tbl, nr_cpu_ids), GFP_KERNEL);
+	ctx = kzalloc_flex(*ctx, pwq_tbl, nr_cpu_ids);
 
 	new_attrs = alloc_workqueue_attrs();
 	if (!ctx || !new_attrs)
@@ -5895,6 +5922,33 @@ struct workqueue_struct *alloc_workqueue_noprof(const char *fmt,
 }
 EXPORT_SYMBOL_GPL(alloc_workqueue_noprof);
 
+static void devm_workqueue_release(void *res)
+{
+	destroy_workqueue(res);
+}
+
+__printf(2, 5) struct workqueue_struct *
+devm_alloc_workqueue(struct device *dev, const char *fmt, unsigned int flags,
+		     int max_active, ...)
+{
+	struct workqueue_struct *wq;
+	va_list args;
+	int ret;
+
+	va_start(args, max_active);
+	wq = alloc_workqueue(fmt, flags, max_active, args);
+	va_end(args);
+	if (!wq)
+		return NULL;
+
+	ret = devm_add_action_or_reset(dev, devm_workqueue_release, wq);
+	if (ret)
+		return NULL;
+
+	return wq;
+}
+EXPORT_SYMBOL_GPL(devm_alloc_workqueue);
+
 #ifdef CONFIG_LOCKDEP
 __printf(1, 5)
 struct workqueue_struct *
@@ -6278,7 +6332,7 @@ static void pr_cont_worker_id(struct worker *worker)
 {
 	struct worker_pool *pool = worker->pool;
 
-	if (pool->flags & WQ_BH)
+	if (pool->flags & POOL_BH)
 		pr_cont("bh%s",
 			pool->attrs->nice == HIGHPRI_NICE_LEVEL ? "-hi" : "");
 	else
@@ -6363,6 +6417,8 @@ static void show_pwq(struct pool_workqueue *pwq)
 			pr_cont(" %s", comma ? "," : "");
 			pr_cont_worker_id(worker);
 			pr_cont(":%ps", worker->current_func);
+			pr_cont(" for %us",
+				jiffies_to_msecs(jiffies - worker->current_start) / 1000);
 			list_for_each_entry(work, &worker->scheduled, entry)
 				pr_cont_work(false, work, &pcws);
 			pr_cont_work_flush(comma, (work_func_t)-1L, &pcws);
@@ -6466,7 +6522,7 @@ static void show_one_worker_pool(struct worker_pool *pool)
 
 	/* How long the first pending work is waiting for a worker. */
 	if (!list_empty(&pool->worklist))
-		hung = jiffies_to_msecs(jiffies - pool->watchdog_ts) / 1000;
+		hung = jiffies_to_msecs(jiffies - pool->last_progress_ts) / 1000;
 
 	/*
 	 * Defer printing to avoid deadlocks in console drivers that
@@ -7067,13 +7123,7 @@ int workqueue_unbound_housekeeping_update(const struct cpumask *hk)
 
 static int parse_affn_scope(const char *val)
 {
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(wq_affn_names); i++) {
-		if (!strncasecmp(val, wq_affn_names[i], strlen(wq_affn_names[i])))
-			return i;
-	}
-	return -EINVAL;
+	return sysfs_match_string(wq_affn_names, val);
 }
 
 static int wq_affn_dfl_set(const char *val, const struct kernel_param *kp)
@@ -7180,7 +7230,26 @@ static struct attribute *wq_sysfs_attrs[] = {
 	&dev_attr_max_active.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(wq_sysfs);
+
+static umode_t wq_sysfs_is_visible(struct kobject *kobj, struct attribute *a, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct workqueue_struct *wq = dev_to_wq(dev);
+
+	/*
+	 * Adjusting max_active breaks ordering guarantee. Changing it has no
+	 * effect on BH worker. Limit max_active to RO in such case.
+	 */
+	if (wq->flags & (WQ_BH | __WQ_ORDERED))
+		return 0444;
+	return a->mode;
+}
+
+static const struct attribute_group wq_sysfs_group = {
+	.is_visible = wq_sysfs_is_visible,
+	.attrs = wq_sysfs_attrs,
+};
+__ATTRIBUTE_GROUPS(wq_sysfs);
 
 static ssize_t wq_nice_show(struct device *dev, struct device_attribute *attr,
 			    char *buf)
@@ -7483,14 +7552,7 @@ int workqueue_sysfs_register(struct workqueue_struct *wq)
 	struct wq_device *wq_dev;
 	int ret;
 
-	/*
-	 * Adjusting max_active breaks ordering guarantee.  Disallow exposing
-	 * ordered workqueues.
-	 */
-	if (WARN_ON(wq->flags & __WQ_ORDERED))
-		return -EINVAL;
-
-	wq->wq_dev = wq_dev = kzalloc(sizeof(*wq_dev), GFP_KERNEL);
+	wq->wq_dev = wq_dev = kzalloc_obj(*wq_dev);
 	if (!wq_dev)
 		return -ENOMEM;
 
@@ -7575,16 +7637,20 @@ static struct timer_list wq_watchdog_timer;
 static unsigned long wq_watchdog_touched = INITIAL_JIFFIES;
 static DEFINE_PER_CPU(unsigned long, wq_watchdog_touched_cpu) = INITIAL_JIFFIES;
 
-static unsigned int wq_panic_on_stall;
+static unsigned int wq_panic_on_stall = CONFIG_BOOTPARAM_WQ_STALL_PANIC;
 module_param_named(panic_on_stall, wq_panic_on_stall, uint, 0644);
+
+static unsigned int wq_panic_on_stall_time;
+module_param_named(panic_on_stall_time, wq_panic_on_stall_time, uint, 0644);
+MODULE_PARM_DESC(panic_on_stall_time, "Panic if stall exceeds this many seconds (0=disabled)");
 
 /*
  * Show workers that might prevent the processing of pending work items.
- * The only candidates are CPU-bound workers in the running state.
- * Pending work items should be handled by another idle worker
- * in all other situations.
+ * A busy worker that is not running on the CPU (e.g. sleeping in
+ * wait_event_idle() with PF_WQ_WORKER cleared) can stall the pool just as
+ * effectively as a CPU-bound one, so dump every in-flight worker.
  */
-static void show_cpu_pool_hog(struct worker_pool *pool)
+static void show_cpu_pool_busy_workers(struct worker_pool *pool)
 {
 	struct worker *worker;
 	unsigned long irq_flags;
@@ -7593,50 +7659,59 @@ static void show_cpu_pool_hog(struct worker_pool *pool)
 	raw_spin_lock_irqsave(&pool->lock, irq_flags);
 
 	hash_for_each(pool->busy_hash, bkt, worker, hentry) {
-		if (task_is_running(worker->task)) {
-			/*
-			 * Defer printing to avoid deadlocks in console
-			 * drivers that queue work while holding locks
-			 * also taken in their write paths.
-			 */
-			printk_deferred_enter();
+		/*
+		 * Defer printing to avoid deadlocks in console
+		 * drivers that queue work while holding locks
+		 * also taken in their write paths.
+		 */
+		printk_deferred_enter();
 
-			pr_info("pool %d:\n", pool->id);
-			sched_show_task(worker->task);
+		pr_info("pool %d:\n", pool->id);
+		sched_show_task(worker->task);
 
-			printk_deferred_exit();
-		}
+		printk_deferred_exit();
 	}
 
 	raw_spin_unlock_irqrestore(&pool->lock, irq_flags);
 }
 
-static void show_cpu_pools_hogs(void)
+static void show_cpu_pools_busy_workers(void)
 {
 	struct worker_pool *pool;
 	int pi;
 
-	pr_info("Showing backtraces of running workers in stalled CPU-bound worker pools:\n");
+	pr_info("Showing backtraces of busy workers in stalled worker pools:\n");
 
 	rcu_read_lock();
 
 	for_each_pool(pool, pi) {
 		if (pool->cpu_stall)
-			show_cpu_pool_hog(pool);
+			show_cpu_pool_busy_workers(pool);
 
 	}
 
 	rcu_read_unlock();
 }
 
-static void panic_on_wq_watchdog(void)
+/*
+ * It triggers a panic in two scenarios: when the total number of stalls
+ * exceeds a threshold, and when a stall lasts longer than
+ * wq_panic_on_stall_time
+ */
+static void panic_on_wq_watchdog(unsigned int stall_time_sec)
 {
 	static unsigned int wq_stall;
 
 	if (wq_panic_on_stall) {
 		wq_stall++;
-		BUG_ON(wq_stall >= wq_panic_on_stall);
+		if (wq_stall >= wq_panic_on_stall)
+			panic("workqueue: %u stall(s) exceeded threshold %u\n",
+			      wq_stall, wq_panic_on_stall);
 	}
+
+	if (wq_panic_on_stall_time && stall_time_sec >= wq_panic_on_stall_time)
+		panic("workqueue: stall lasted %us, exceeding threshold %us\n",
+		      stall_time_sec, wq_panic_on_stall_time);
 }
 
 static void wq_watchdog_reset_touched(void)
@@ -7651,10 +7726,12 @@ static void wq_watchdog_reset_touched(void)
 static void wq_watchdog_timer_fn(struct timer_list *unused)
 {
 	unsigned long thresh = READ_ONCE(wq_watchdog_thresh) * HZ;
+	unsigned int max_stall_time = 0;
 	bool lockup_detected = false;
 	bool cpu_pool_stall = false;
 	unsigned long now = jiffies;
 	struct worker_pool *pool;
+	unsigned int stall_time;
 	int pi;
 
 	if (!thresh)
@@ -7678,7 +7755,7 @@ static void wq_watchdog_timer_fn(struct timer_list *unused)
 			touched = READ_ONCE(per_cpu(wq_watchdog_touched_cpu, pool->cpu));
 		else
 			touched = READ_ONCE(wq_watchdog_touched);
-		pool_ts = READ_ONCE(pool->watchdog_ts);
+		pool_ts = READ_ONCE(pool->last_progress_ts);
 
 		if (time_after(pool_ts, touched))
 			ts = pool_ts;
@@ -7688,14 +7765,15 @@ static void wq_watchdog_timer_fn(struct timer_list *unused)
 		/* did we stall? */
 		if (time_after(now, ts + thresh)) {
 			lockup_detected = true;
+			stall_time = jiffies_to_msecs(now - pool_ts) / 1000;
+			max_stall_time = max(max_stall_time, stall_time);
 			if (pool->cpu >= 0 && !(pool->flags & POOL_BH)) {
 				pool->cpu_stall = true;
 				cpu_pool_stall = true;
 			}
 			pr_emerg("BUG: workqueue lockup - pool");
 			pr_cont_pool_info(pool);
-			pr_cont(" stuck for %us!\n",
-				jiffies_to_msecs(now - pool_ts) / 1000);
+			pr_cont(" stuck for %us!\n", stall_time);
 		}
 
 
@@ -7705,10 +7783,10 @@ static void wq_watchdog_timer_fn(struct timer_list *unused)
 		show_all_workqueues();
 
 	if (cpu_pool_stall)
-		show_cpu_pools_hogs();
+		show_cpu_pools_busy_workers();
 
 	if (lockup_detected)
-		panic_on_wq_watchdog();
+		panic_on_wq_watchdog(max_stall_time);
 
 	wq_watchdog_reset_touched();
 	mod_timer(&wq_watchdog_timer, jiffies + thresh);
@@ -7865,9 +7943,9 @@ void __init workqueue_init_early(void)
 		wq_power_efficient = true;
 
 	/* initialize WQ_AFFN_SYSTEM pods */
-	pt->pod_cpus = kcalloc(1, sizeof(pt->pod_cpus[0]), GFP_KERNEL);
-	pt->pod_node = kcalloc(1, sizeof(pt->pod_node[0]), GFP_KERNEL);
-	pt->cpu_pod = kcalloc(nr_cpu_ids, sizeof(pt->cpu_pod[0]), GFP_KERNEL);
+	pt->pod_cpus = kzalloc_objs(pt->pod_cpus[0], 1);
+	pt->pod_node = kzalloc_objs(pt->pod_node[0], 1);
+	pt->cpu_pod = kzalloc_objs(pt->cpu_pod[0], nr_cpu_ids);
 	BUG_ON(!pt->pod_cpus || !pt->pod_node || !pt->cpu_pod);
 
 	BUG_ON(!zalloc_cpumask_var_node(&pt->pod_cpus[0], GFP_KERNEL, NUMA_NO_NODE));
@@ -7928,11 +8006,12 @@ void __init workqueue_init_early(void)
 	system_bh_wq = alloc_workqueue("events_bh", WQ_BH | WQ_PERCPU, 0);
 	system_bh_highpri_wq = alloc_workqueue("events_bh_highpri",
 					       WQ_BH | WQ_HIGHPRI | WQ_PERCPU, 0);
+	system_dfl_long_wq = alloc_workqueue("events_dfl_long", WQ_UNBOUND, WQ_MAX_ACTIVE);
 	BUG_ON(!system_wq || !system_percpu_wq|| !system_highpri_wq || !system_long_wq ||
 	       !system_unbound_wq || !system_freezable_wq || !system_dfl_wq ||
 	       !system_power_efficient_wq ||
 	       !system_freezable_power_efficient_wq ||
-	       !system_bh_wq || !system_bh_highpri_wq);
+	       !system_bh_wq || !system_bh_highpri_wq || !system_dfl_long_wq);
 }
 
 static void __init wq_cpu_intensive_thresh_init(void)
@@ -8049,7 +8128,7 @@ static void __init init_pod_type(struct wq_pod_type *pt,
 	pt->nr_pods = 0;
 
 	/* init @pt->cpu_pod[] according to @cpus_share_pod() */
-	pt->cpu_pod = kcalloc(nr_cpu_ids, sizeof(pt->cpu_pod[0]), GFP_KERNEL);
+	pt->cpu_pod = kzalloc_objs(pt->cpu_pod[0], nr_cpu_ids);
 	BUG_ON(!pt->cpu_pod);
 
 	for_each_possible_cpu(cur) {
@@ -8066,8 +8145,8 @@ static void __init init_pod_type(struct wq_pod_type *pt,
 	}
 
 	/* init the rest to match @pt->cpu_pod[] */
-	pt->pod_cpus = kcalloc(pt->nr_pods, sizeof(pt->pod_cpus[0]), GFP_KERNEL);
-	pt->pod_node = kcalloc(pt->nr_pods, sizeof(pt->pod_node[0]), GFP_KERNEL);
+	pt->pod_cpus = kzalloc_objs(pt->pod_cpus[0], pt->nr_pods);
+	pt->pod_node = kzalloc_objs(pt->pod_node[0], pt->nr_pods);
 	BUG_ON(!pt->pod_cpus || !pt->pod_node);
 
 	for (pod = 0; pod < pt->nr_pods; pod++)

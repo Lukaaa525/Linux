@@ -31,7 +31,6 @@
 #include <linux/regulator/consumer.h>
 
 #include "dw_mmc.h"
-#include "mmc_hsq.h"
 
 /* Common flag combinations */
 #define DW_MCI_DATA_ERROR_FLAGS	(SDMMC_INT_DRTO | SDMMC_INT_DCRC | \
@@ -769,7 +768,7 @@ static int dw_mci_edmac_start_dma(struct dw_mci *host,
 static int dw_mci_edmac_init(struct dw_mci *host)
 {
 	/* Request external dma channel */
-	host->dms = kzalloc(sizeof(struct dw_mci_dma_slave), GFP_KERNEL);
+	host->dms = kzalloc_obj(struct dw_mci_dma_slave);
 	if (!host->dms)
 		return -ENOMEM;
 
@@ -1319,14 +1318,6 @@ static void dw_mci_queue_request(struct dw_mci *host, struct mmc_request *mrq)
 	}
 }
 
-static void dw_mci_request_done(struct mmc_host *mmc, struct mmc_request *mrq)
-{
-	if (mmc_hsq_finalize_request(mmc, mrq))
-		return;
-
-	mmc_request_done(mmc, mrq);
-}
-
 static void dw_mci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 {
 	struct dw_mci *host = mmc_priv(mmc);
@@ -1341,7 +1332,7 @@ static void dw_mci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 
 	if (!dw_mci_get_cd(mmc)) {
 		mrq->cmd->error = -ENOMEDIUM;
-		dw_mci_request_done(mmc, mrq);
+		mmc_request_done(mmc, mrq);
 		return;
 	}
 
@@ -1470,12 +1461,14 @@ static int dw_mci_switch_voltage(struct mmc_host *mmc, struct mmc_ios *ios)
 	else
 		uhs |= v18;
 
-	ret = mmc_regulator_set_vqmmc(mmc, ios);
-	if (ret < 0) {
-		dev_dbg(&mmc->class_dev,
-			 "Regulator set error %d - %s V\n",
-			 ret, uhs & v18 ? "1.8" : "3.3");
-		return ret;
+	if (!IS_ERR(mmc->supply.vqmmc)) {
+		ret = mmc_regulator_set_vqmmc(mmc, ios);
+		if (ret < 0) {
+			dev_dbg(&mmc->class_dev,
+					 "Regulator set error %d - %s V\n",
+					 ret, uhs & v18 ? "1.8" : "3.3");
+			return ret;
+		}
 	}
 	mci_writel(host, UHS_REG, uhs);
 
@@ -1789,7 +1782,7 @@ static void dw_mci_request_end(struct dw_mci *host, struct mmc_request *mrq)
 		host->state = STATE_IDLE;
 
 	spin_unlock(&host->lock);
-	dw_mci_request_done(prev_mmc, mrq);
+	mmc_request_done(prev_mmc, mrq);
 	spin_lock(&host->lock);
 }
 
@@ -2824,13 +2817,10 @@ static int dw_mci_init_host_caps(struct dw_mci *host)
 	if (drv_data)
 		mmc->caps |= drv_data->common_caps;
 
-	if (host->dev->of_node) {
-		ctrl_id = of_alias_get_id(host->dev->of_node, "mshc");
-		if (ctrl_id < 0)
-			ctrl_id = 0;
-	} else {
+	if (host->dev->of_node)
+		ctrl_id = mmc->index;
+	else
 		ctrl_id = to_platform_device(host->dev)->id;
-	}
 
 	if (drv_data && drv_data->caps) {
 		if (ctrl_id >= drv_data->num_caps) {
@@ -2875,6 +2865,8 @@ static int dw_mci_init_host(struct dw_mci *host)
 	ret = mmc_of_parse(mmc);
 	if (ret)
 		return ret;
+
+	mmc_of_parse_clk_phase(host->dev, &host->phase_map);
 
 	ret = dw_mci_init_host_caps(host);
 	if (ret)
@@ -3217,13 +3209,8 @@ EXPORT_SYMBOL(dw_mci_alloc_host);
 int dw_mci_probe(struct dw_mci *host)
 {
 	const struct dw_mci_drv_data *drv_data = host->drv_data;
-	struct mmc_hsq *hsq;
 	int width, i, ret = 0;
 	u32 fifo_size;
-
-	hsq = devm_kzalloc(host->dev, sizeof(*hsq), GFP_KERNEL);
-	if (!hsq)
-		return dev_err_probe(host->dev, -ENOMEM, "hsq allocation failed\n");
 
 	ret = dw_mci_parse_dt(host);
 	if (ret)
@@ -3409,10 +3396,6 @@ int dw_mci_probe(struct dw_mci *host)
 		goto err_dmaunmap;
 	}
 
-	ret = mmc_hsq_init(hsq, host->mmc);
-	if (ret)
-		goto err_dmaunmap;
-
 	/* Now that host is setup, we can enable card detect */
 	dw_mci_enable_cd(host);
 
@@ -3459,8 +3442,6 @@ EXPORT_SYMBOL(dw_mci_remove);
 int dw_mci_runtime_suspend(struct device *dev)
 {
 	struct dw_mci *host = dev_get_drvdata(dev);
-
-	mmc_hsq_suspend(host->mmc);
 
 	if (host->use_dma && host->dma_ops->exit)
 		host->dma_ops->exit(host);
@@ -3530,8 +3511,6 @@ int dw_mci_runtime_resume(struct device *dev)
 	if (sdio_irq_claimed(host->mmc))
 		__dw_mci_enable_sdio_irq(host, 1);
 
-	mmc_hsq_resume(host->mmc);
-
 	/* Now that host is setup, we can enable card detect */
 	dw_mci_enable_cd(host);
 
@@ -3546,18 +3525,11 @@ err:
 }
 EXPORT_SYMBOL(dw_mci_runtime_resume);
 
-static int __init dw_mci_init(void)
-{
-	pr_info("Synopsys Designware Multimedia Card Interface Driver\n");
-	return 0;
-}
-
-static void __exit dw_mci_exit(void)
-{
-}
-
-module_init(dw_mci_init);
-module_exit(dw_mci_exit);
+const struct dev_pm_ops dw_mci_pmops = {
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+	RUNTIME_PM_OPS(dw_mci_runtime_suspend, dw_mci_runtime_resume, NULL)
+};
+EXPORT_SYMBOL_GPL(dw_mci_pmops);
 
 MODULE_DESCRIPTION("DW Multimedia Card Interface driver");
 MODULE_AUTHOR("NXP Semiconductor VietNam");

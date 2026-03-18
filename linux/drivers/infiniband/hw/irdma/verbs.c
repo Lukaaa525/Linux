@@ -157,7 +157,7 @@ static struct rdma_user_mmap_entry*
 irdma_user_mmap_entry_insert(struct irdma_ucontext *ucontext, u64 bar_offset,
 			     enum irdma_mmap_flag mmap_flag, u64 *mmap_offset)
 {
-	struct irdma_user_mmap_entry *entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	struct irdma_user_mmap_entry *entry = kzalloc_obj(*entry);
 	int ret;
 
 	if (!entry)
@@ -709,12 +709,12 @@ static int irdma_setup_kmode_qp(struct irdma_device *iwdev,
 		return status;
 
 	iwqp->kqp.sq_wrid_mem =
-		kcalloc(ukinfo->sq_depth, sizeof(*iwqp->kqp.sq_wrid_mem), GFP_KERNEL);
+		kzalloc_objs(*iwqp->kqp.sq_wrid_mem, ukinfo->sq_depth);
 	if (!iwqp->kqp.sq_wrid_mem)
 		return -ENOMEM;
 
 	iwqp->kqp.rq_wrid_mem =
-		kcalloc(ukinfo->rq_depth, sizeof(*iwqp->kqp.rq_wrid_mem), GFP_KERNEL);
+		kzalloc_objs(*iwqp->kqp.rq_wrid_mem, ukinfo->rq_depth);
 
 	if (!iwqp->kqp.rq_wrid_mem) {
 		kfree(iwqp->kqp.sq_wrid_mem);
@@ -2109,7 +2109,7 @@ static int irdma_resize_cq(struct ib_cq *ibcq, int entries,
 
 		info.cq_base = kmem_buf.va;
 		info.cq_pa = kmem_buf.pa;
-		cq_buf = kzalloc(sizeof(*cq_buf), GFP_KERNEL);
+		cq_buf = kzalloc_obj(*cq_buf);
 		if (!cq_buf) {
 			ret = -ENOMEM;
 			goto error;
@@ -2669,8 +2669,11 @@ static int irdma_create_cq(struct ib_cq *ibcq,
 			goto cq_destroy;
 		}
 	}
-	rf->cq_table[cq_num] = iwcq;
+
 	init_completion(&iwcq->free_cq);
+
+	/* Populate table entry after CQ is fully created. */
+	smp_store_release(&rf->cq_table[cq_num], iwcq);
 
 	return 0;
 cq_destroy:
@@ -3148,7 +3151,7 @@ static struct ib_mr *irdma_alloc_mr(struct ib_pd *pd, enum ib_mr_type mr_type,
 	u32 stag;
 	int err_code;
 
-	iwmr = kzalloc(sizeof(*iwmr), GFP_KERNEL);
+	iwmr = kzalloc_obj(*iwmr);
 	if (!iwmr)
 		return ERR_PTR(-ENOMEM);
 
@@ -3365,7 +3368,7 @@ static struct irdma_mr *irdma_alloc_iwmr(struct ib_umem *region,
 	struct irdma_mr *iwmr;
 	unsigned long pgsz_bitmap;
 
-	iwmr = kzalloc(sizeof(*iwmr), GFP_KERNEL);
+	iwmr = kzalloc_obj(*iwmr);
 	if (!iwmr)
 		return ERR_PTR(-ENOMEM);
 
@@ -3587,6 +3590,36 @@ error:
 	return ERR_PTR(err);
 }
 
+static int irdma_hwdereg_mr(struct ib_mr *ib_mr);
+
+static void irdma_umem_dmabuf_revoke(void *priv)
+{
+	/* priv is guaranteed to be valid any time this callback is invoked
+	 * because we do not set the callback until after successful iwmr
+	 * allocation and initialization.
+	 */
+	struct irdma_mr *iwmr = priv;
+	int err;
+
+	/* Invalidate the key in hardware. This does not actually release the
+	 * key for potential reuse - that only occurs when the region is fully
+	 * deregistered.
+	 *
+	 * The irdma_hwdereg_mr call is a no-op if the region is not currently
+	 * registered with hardware.
+	 */
+	err = irdma_hwdereg_mr(&iwmr->ibmr);
+	if (err) {
+		struct irdma_device *iwdev = to_iwdev(iwmr->ibmr.device);
+
+		ibdev_err(&iwdev->ibdev, "dmabuf mr revoke failed %d", err);
+		if (!iwdev->rf->reset) {
+			iwdev->rf->reset = true;
+			iwdev->rf->gen_ops.request_reset(iwdev->rf);
+		}
+	}
+}
+
 static struct ib_mr *irdma_reg_user_mr_dmabuf(struct ib_pd *pd, u64 start,
 					      u64 len, u64 virt,
 					      int fd, int access,
@@ -3604,7 +3637,9 @@ static struct ib_mr *irdma_reg_user_mr_dmabuf(struct ib_pd *pd, u64 start,
 	if (len > iwdev->rf->sc_dev.hw_attrs.max_mr_size)
 		return ERR_PTR(-EINVAL);
 
-	umem_dmabuf = ib_umem_dmabuf_get_pinned(pd->device, start, len, fd, access);
+	umem_dmabuf =
+		ib_umem_dmabuf_get_pinned_revocable_and_lock(pd->device, start,
+							     len, fd, access);
 	if (IS_ERR(umem_dmabuf)) {
 		ibdev_dbg(&iwdev->ibdev, "Failed to get dmabuf umem[%pe]\n",
 			  umem_dmabuf);
@@ -3621,12 +3656,20 @@ static struct ib_mr *irdma_reg_user_mr_dmabuf(struct ib_pd *pd, u64 start,
 	if (err)
 		goto err_iwmr;
 
+	ib_umem_dmabuf_set_revoke_locked(umem_dmabuf, irdma_umem_dmabuf_revoke,
+					 iwmr);
+	ib_umem_dmabuf_revoke_unlock(umem_dmabuf);
 	return &iwmr->ibmr;
 
 err_iwmr:
 	irdma_free_iwmr(iwmr);
 
 err_release:
+	ib_umem_dmabuf_revoke_unlock(umem_dmabuf);
+
+	/* Will result in a call to revoke, but driver callback is not set and
+	 * is therefore skipped.
+	 */
 	ib_umem_release(&umem_dmabuf->umem);
 
 	return ERR_PTR(err);
@@ -3720,6 +3763,7 @@ static int irdma_rereg_mr_trans(struct irdma_mr *iwmr, u64 start, u64 len,
 
 err:
 	ib_umem_release(region);
+	iwmr->region = NULL;
 	return err;
 }
 
@@ -3746,6 +3790,8 @@ static struct ib_mr *irdma_rereg_user_mr(struct ib_mr *ib_mr, int flags,
 	struct irdma_device *iwdev = to_iwdev(ib_mr->device);
 	struct irdma_mr *iwmr = to_iwmr(ib_mr);
 	struct irdma_pbl *iwpbl = &iwmr->iwpbl;
+	bool dmabuf_revocable = iwmr->region && iwmr->region->is_dmabuf;
+	struct ib_umem_dmabuf *umem_dmabuf;
 	int ret;
 
 	if (len > iwdev->rf->sc_dev.hw_attrs.max_mr_size)
@@ -3754,9 +3800,26 @@ static struct ib_mr *irdma_rereg_user_mr(struct ib_mr *ib_mr, int flags,
 	if (flags & ~(IB_MR_REREG_TRANS | IB_MR_REREG_PD | IB_MR_REREG_ACCESS))
 		return ERR_PTR(-EOPNOTSUPP);
 
+	if (dmabuf_revocable) {
+		umem_dmabuf = to_ib_umem_dmabuf(iwmr->region);
+
+		ib_umem_dmabuf_revoke_lock(umem_dmabuf);
+
+		/* If the dmabuf has been revoked, it means that the region has
+		 * been invalidated in HW. We must not allow it to become valid
+		 * again unless the user is requesting a change in translation
+		 * which will end up dropping the umem dmabuf and allocating an
+		 * entirely new umem anyway.
+		 */
+		if (umem_dmabuf->revoked && !(flags & IB_MR_REREG_TRANS)) {
+			ret = -EINVAL;
+			goto err_unlock;
+		}
+	}
+
 	ret = irdma_hwdereg_mr(ib_mr);
 	if (ret)
-		return ERR_PTR(ret);
+		goto err_unlock;
 
 	if (flags & IB_MR_REREG_ACCESS)
 		iwmr->access = new_access;
@@ -3772,18 +3835,28 @@ static struct ib_mr *irdma_rereg_user_mr(struct ib_mr *ib_mr, int flags,
 					&iwpbl->pble_alloc);
 			iwpbl->pbl_allocated = false;
 		}
+
+		if (dmabuf_revocable) {
+			/* Must unlock before release to prevent deadlock */
+			ib_umem_dmabuf_revoke_unlock(umem_dmabuf);
+			dmabuf_revocable = false;
+		}
+
 		if (iwmr->region) {
 			ib_umem_release(iwmr->region);
 			iwmr->region = NULL;
 		}
 
 		ret = irdma_rereg_mr_trans(iwmr, start, len, virt);
-	} else
+	} else {
 		ret = irdma_hwreg_mr(iwdev, iwmr, iwmr->access);
-	if (ret)
-		return ERR_PTR(ret);
+	}
 
-	return NULL;
+err_unlock:
+	if (dmabuf_revocable)
+		ib_umem_dmabuf_revoke_unlock(umem_dmabuf);
+
+	return ret ? ERR_PTR(ret) : NULL;
 }
 
 /**
@@ -3804,7 +3877,7 @@ struct ib_mr *irdma_reg_phys_mr(struct ib_pd *pd, u64 addr, u64 size, int access
 	u32 stag;
 	int ret;
 
-	iwmr = kzalloc(sizeof(*iwmr), GFP_KERNEL);
+	iwmr = kzalloc_obj(*iwmr);
 	if (!iwmr)
 		return ERR_PTR(-ENOMEM);
 
@@ -3906,6 +3979,7 @@ static int irdma_dereg_mr(struct ib_mr *ib_mr, struct ib_udata *udata)
 	struct irdma_mr *iwmr = to_iwmr(ib_mr);
 	struct irdma_device *iwdev = to_iwdev(ib_mr->device);
 	struct irdma_pbl *iwpbl = &iwmr->iwpbl;
+	bool dmabuf_revocable = iwmr->region && iwmr->region->is_dmabuf;
 	int ret;
 
 	if (iwmr->type != IRDMA_MEMREG_TYPE_MEM) {
@@ -3920,17 +3994,28 @@ static int irdma_dereg_mr(struct ib_mr *ib_mr, struct ib_udata *udata)
 		goto done;
 	}
 
-	ret = irdma_hwdereg_mr(ib_mr);
-	if (ret)
-		return ret;
+	if (!dmabuf_revocable) {
+		ret = irdma_hwdereg_mr(ib_mr);
+		if (ret)
+			return ret;
 
-	irdma_free_stag(iwdev, iwmr->stag);
+		irdma_free_stag(iwdev, iwmr->stag);
+	}
 done:
+	if (iwmr->region)
+		/* For dmabuf MRs, ib_umem_release will trigger a synchronous
+		 * call to the revoke callback which will perform the actual HW
+		 * invalidation via irdma_hwdereg_mr. We rely on this for its
+		 * implicit serialization w.r.t. concurrent revocations. This
+		 * must be done before freeing the PBLEs.
+		 */
+		ib_umem_release(iwmr->region);
+
 	if (iwpbl->pbl_allocated)
 		irdma_free_pble(iwdev->rf->pble_rsrc, &iwpbl->pble_alloc);
 
-	if (iwmr->region)
-		ib_umem_release(iwmr->region);
+	if (dmabuf_revocable)
+		irdma_free_stag(iwdev, iwmr->stag);
 
 	kfree(iwmr);
 
@@ -4846,7 +4931,7 @@ static int irdma_attach_mcast(struct ib_qp *ibqp, union ib_gid *ibgid, u16 lid)
 		struct irdma_dma_mem *dma_mem_mc;
 
 		spin_unlock_irqrestore(&rf->qh_list_lock, flags);
-		mc_qht_elem = kzalloc(sizeof(*mc_qht_elem), GFP_KERNEL);
+		mc_qht_elem = kzalloc_obj(*mc_qht_elem);
 		if (!mc_qht_elem)
 			return -ENOMEM;
 
@@ -5209,7 +5294,7 @@ static int irdma_create_user_ah(struct ib_ah *ibah,
 #define IRDMA_CREATE_AH_MIN_RESP_LEN offsetofend(struct irdma_create_ah_resp, rsvd)
 	struct irdma_ah *ah = container_of(ibah, struct irdma_ah, ibah);
 	struct irdma_device *iwdev = to_iwdev(ibah->pd->device);
-	struct irdma_create_ah_resp uresp;
+	struct irdma_create_ah_resp uresp = {};
 	struct irdma_ah *parent_ah;
 	int err;
 

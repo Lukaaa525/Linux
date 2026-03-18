@@ -64,6 +64,9 @@
 #ifndef DP_PR_ERROR_STATUS                  // can remove this once the define gets into linux drm_dp_helper.h
 #define DP_PR_ERROR_STATUS                  0x2020  /* DP 2.0 */
 #endif /* DP_PR_ERROR_STATUS */
+#ifndef DP_PR_REPLAY_SINK_STATUS            // can remove this once the define gets into linux drm_dp_helper.h
+#define DP_PR_REPLAY_SINK_STATUS            0x2022
+#endif /* DP_PR_REPLAY_SINK_STATUS */
 #ifndef DP_PR_LINK_CRC_ERROR               // can remove this once the define gets into linux drm_dp_helper.h
 #define DP_PR_LINK_CRC_ERROR               (1 << 0)
 #endif /* DP_PR_LINK_CRC_ERROR */
@@ -224,6 +227,7 @@ enum dpcd_psr_sink_states {
 #define DP_SINK_PR_PIXEL_DEVIATION_PER_LINE     0x379
 #define DP_SINK_PR_MAX_NUMBER_OF_DEVIATION_LINE 0x37A
 #define DP_SINK_EMISSION_RATE                   0x37E
+#define DP_SINK_PR_FRAME_SKIP_COUNT             0x337
 
 /* Remove once drm_dp_helper.h is updated upstream */
 #ifndef DP_TOTAL_LTTPR_CNT

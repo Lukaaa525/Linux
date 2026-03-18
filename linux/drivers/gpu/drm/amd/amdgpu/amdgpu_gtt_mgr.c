@@ -122,7 +122,7 @@ static int amdgpu_gtt_mgr_new(struct ttm_resource_manager *man,
 	struct ttm_range_mgr_node *node;
 	int r;
 
-	node = kzalloc(struct_size(node, mm_nodes, 1), GFP_KERNEL);
+	node = kzalloc_flex(*node, mm_nodes, 1);
 	if (!node)
 		return -ENOMEM;
 
@@ -324,17 +324,13 @@ int amdgpu_gtt_mgr_init(struct amdgpu_device *adev, uint64_t gtt_size)
 {
 	struct amdgpu_gtt_mgr *mgr = &adev->mman.gtt_mgr;
 	struct ttm_resource_manager *man = &mgr->manager;
-	uint64_t start, size;
 
 	man->use_tt = true;
 	man->func = &amdgpu_gtt_mgr_func;
 
 	ttm_resource_manager_init(man, &adev->mman.bdev, gtt_size);
 
-	start = AMDGPU_GTT_MAX_TRANSFER_SIZE * AMDGPU_GTT_NUM_TRANSFER_WINDOWS;
-	start += amdgpu_vce_required_gart_pages(adev);
-	size = (adev->gmc.gart_size >> PAGE_SHIFT) - start;
-	drm_mm_init(&mgr->mm, start, size);
+	drm_mm_init(&mgr->mm, 0, adev->gmc.gart_size >> PAGE_SHIFT);
 	spin_lock_init(&mgr->lock);
 
 	ttm_set_driver_manager(&adev->mman.bdev, TTM_PL_TT, &mgr->manager);

@@ -52,7 +52,6 @@ Hardware Monitoring Kernel Drivers
    bcm54140
    bel-pfe
    bpa-rs600
-   bt1-pvt
    cgbc-hwmon
    chipcap2
    coretemp
@@ -84,6 +83,7 @@ Hardware Monitoring Kernel Drivers
    gl518sm
    gpd-fan
    gxp-fan-ctrl
+   hac300s
    hih6130
    hp-wmi-sensors
    hs3001
@@ -110,6 +110,7 @@ Hardware Monitoring Kernel Drivers
    kbatt
    kfan
    lan966x
+   lattepanda-sigma-ec
    lineage-pem
    lm25066
    lm63
@@ -219,7 +220,6 @@ Hardware Monitoring Kernel Drivers
    q54sj108a2
    qnap-mcu-hwmon
    raspberrypi-hwmon
-   sa67
    sbrmi
    sbtsi_temp
    sch5627
@@ -234,6 +234,7 @@ Hardware Monitoring Kernel Drivers
    shtc1
    sis5595
    sl28cpld
+   stef48h28
    smpro-hwmon
    smsc47b397
    smsc47m192
@@ -282,10 +283,3 @@ Hardware Monitoring Kernel Drivers
    xdpe12284
    xdpe152c4
    zl6100
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`

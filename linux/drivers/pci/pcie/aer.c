@@ -239,9 +239,6 @@ void pcie_ecrc_get_policy(char *str)
 }
 #endif	/* CONFIG_PCIE_ECRC */
 
-#define	PCI_EXP_AER_FLAGS	(PCI_EXP_DEVCTL_CERE | PCI_EXP_DEVCTL_NFERE | \
-				 PCI_EXP_DEVCTL_FERE | PCI_EXP_DEVCTL_URRE)
-
 int pcie_aer_is_native(struct pci_dev *dev)
 {
 	struct pci_host_bridge *host = pci_find_host_bridge(dev->bus);
@@ -393,7 +390,7 @@ void pci_aer_init(struct pci_dev *dev)
 	if (!dev->aer_cap)
 		return;
 
-	dev->aer_info = kzalloc(sizeof(*dev->aer_info), GFP_KERNEL);
+	dev->aer_info = kzalloc_obj(*dev->aer_info);
 	if (!dev->aer_info) {
 		dev->aer_cap = 0;
 		return;
@@ -981,6 +978,28 @@ void pci_print_aer(struct pci_dev *dev, int aer_severity,
 EXPORT_SYMBOL_GPL(pci_print_aer);
 
 /**
+ * aer_print_init - set flag whether error message should be printed
+ * @dev: pointer to pci_dev to be rate-limited
+ * @info: pointer to aer_error_info
+ * @i: index for dev array in aer_error_info
+ */
+void aer_print_init(struct pci_dev *dev, struct aer_err_info *info, int i)
+{
+	/*
+	 * Ratelimit AER log messages.  "dev" is either the source
+	 * identified by the root's Error Source ID or it has an unmasked
+	 * error logged in its own AER Capability.  Messages are emitted
+	 * when "ratelimit_print[i]" is non-zero.  If we will print detail
+	 * for a downstream device, make sure we print the Error Source ID
+	 * from the root as well.
+	 */
+	if (aer_ratelimit(dev, info->severity)) {
+		info->ratelimit_print[i] = 1;
+		info->root_ratelimit_print = 1;
+	}
+}
+
+/**
  * add_error_device - list device to be handled
  * @e_info: pointer to error info
  * @dev: pointer to pci_dev to be added
@@ -995,18 +1014,7 @@ static int add_error_device(struct aer_err_info *e_info, struct pci_dev *dev)
 	e_info->dev[i] = pci_dev_get(dev);
 	e_info->error_dev_num++;
 
-	/*
-	 * Ratelimit AER log messages.  "dev" is either the source
-	 * identified by the root's Error Source ID or it has an unmasked
-	 * error logged in its own AER Capability.  Messages are emitted
-	 * when "ratelimit_print[i]" is non-zero.  If we will print detail
-	 * for a downstream device, make sure we print the Error Source ID
-	 * from the root as well.
-	 */
-	if (aer_ratelimit(dev, e_info->severity)) {
-		e_info->ratelimit_print[i] = 1;
-		e_info->root_ratelimit_print = 1;
-	}
+	aer_print_init(dev, e_info, i);
 	return 0;
 }
 
@@ -1515,6 +1523,20 @@ static void aer_disable_irq(struct pci_dev *pdev)
 	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_COMMAND, reg32);
 }
 
+static int clear_status_iter(struct pci_dev *dev, void *data)
+{
+	u16 devctl;
+
+	/* Skip if pci_enable_pcie_error_reporting() hasn't been called yet */
+	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &devctl);
+	if (!(devctl & PCI_EXP_AER_FLAGS))
+		return 0;
+
+	pci_aer_clear_status(dev);
+	pcie_clear_device_status(dev);
+	return 0;
+}
+
 /**
  * aer_enable_rootport - enable Root Port's interrupts when receiving messages
  * @rpc: pointer to a Root Port data structure
@@ -1536,9 +1558,19 @@ static void aer_enable_rootport(struct aer_rpc *rpc)
 	pcie_capability_clear_word(pdev, PCI_EXP_RTCTL,
 				   SYSTEM_ERROR_INTR_ON_MESG_MASK);
 
-	/* Clear error status */
+	/* Clear error status of this Root Port or RCEC */
 	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, &reg32);
 	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, reg32);
+
+	/* Clear error status of agents reporting to this Root Port or RCEC */
+	if (reg32 & AER_ERR_STATUS_MASK) {
+		if (pci_pcie_type(pdev) == PCI_EXP_TYPE_RC_EC)
+			pcie_walk_rcec(pdev, clear_status_iter, NULL);
+		else if (pdev->subordinate)
+			pci_walk_bus(pdev->subordinate, clear_status_iter,
+				     NULL);
+	}
+
 	pci_read_config_dword(pdev, aer + PCI_ERR_COR_STATUS, &reg32);
 	pci_write_config_dword(pdev, aer + PCI_ERR_COR_STATUS, reg32);
 	pci_read_config_dword(pdev, aer + PCI_ERR_UNCOR_STATUS, &reg32);

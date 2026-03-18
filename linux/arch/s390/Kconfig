@@ -32,9 +32,6 @@ config GENERIC_BUG_RELATIVE_POINTERS
 config GENERIC_LOCKBREAK
 	def_bool y if PREEMPTION
 
-config PGSTE
-	def_bool y if KVM
-
 config AUDIT_ARCH
 	def_bool y
 
@@ -69,6 +66,12 @@ config CC_HAS_ASM_AOR_FORMAT_FLAGS
 	  Clang versions before 19.1.0 do not support A,
 	  O, and R inline assembly format flags.
 
+config CC_HAS_ASM_IMMEDIATE_STRINGS
+	def_bool !(CC_IS_GCC && GCC_VERSION < 90000)
+	help
+	  GCC versions before 9.0.0 cannot handle strings as immediate
+	  input operands in inline assemblies.
+
 config CC_HAS_STACKPROTECTOR_GLOBAL
 	def_bool $(cc-option, -mstack-protector-guard=global -mstack-protector-guard-record)
 
@@ -77,7 +80,6 @@ config S390
 	#
 	# Note: keep this list sorted alphabetically
 	#
-	imply IMA_SECURE_AND_OR_TRUSTED_BOOT
 	select ALTERNATE_USER_ADDRESS_SPACE
 	select ARCH_32BIT_USTAT_F_TINODE
 	select ARCH_CORRECT_STACKTRACE_ON_KRETPROBE
@@ -151,6 +153,7 @@ config S390
 	select ARCH_SUPPORTS_INT128 if CC_HAS_INT128 && CC_IS_CLANG
 	select ARCH_SUPPORTS_MSEAL_SYSTEM_MAPPINGS
 	select ARCH_SUPPORTS_NUMA_BALANCING
+	select ARCH_SUPPORTS_PAGE_TABLE_CHECK
 	select ARCH_SUPPORTS_PER_VMA_LOCK
 	select ARCH_USE_BUILTIN_BSWAP
 	select ARCH_USE_CMPXCHG_LOCKREF
@@ -179,6 +182,7 @@ config S390
 	select GENERIC_IOREMAP if PCI
 	select HAVE_ALIGNED_STRUCT_PAGE
 	select HAVE_ARCH_AUDITSYSCALL
+	select HAVE_ARCH_GET_SECUREBOOT
 	select HAVE_ARCH_JUMP_LABEL
 	select HAVE_ARCH_JUMP_LABEL_RELATIVE
 	select HAVE_ARCH_KASAN
@@ -276,6 +280,7 @@ config S390
 	select SPARSE_IRQ
 	select SWIOTLB
 	select SYSCTL_EXCEPTION_TRACE
+	select SYSTEM_DATA_VERIFICATION if KEXEC_SIG
 	select THREAD_INFO_IN_TASK
 	select TRACE_IRQFLAGS_SUPPORT
 	select TTY
@@ -283,6 +288,7 @@ config S390
 	select VDSO_GETRANDOM
 	select VIRT_CPU_ACCOUNTING
 	select VMAP_STACK
+	select XOR_BLOCKS_ARCH
 	select ZONE_DMA
 	# Note: keep the above list sorted alphabetically
 
@@ -310,7 +316,7 @@ config ARCH_SUPPORTS_KEXEC_FILE
 	def_bool y
 
 config ARCH_SUPPORTS_KEXEC_SIG
-	def_bool MODULE_SIG_FORMAT
+	def_bool y
 
 config ARCH_SUPPORTS_KEXEC_PURGATORY
 	def_bool y
@@ -713,6 +719,10 @@ config ARCH_SPARSEMEM_ENABLE
 config ARCH_SPARSEMEM_DEFAULT
 	def_bool y
 
+config ILLEGAL_POINTER_VALUE
+	hex
+	default 0xdead000000000000
+
 config MAX_PHYSMEM_BITS
 	int "Maximum size of supported physical memory in bits (42-53)"
 	range 42 53
@@ -1016,7 +1026,7 @@ config S390_KPROBES_SANITY_TEST
 
 config S390_MODULES_SANITY_TEST
 	def_tristate n
-	depends on KUNIT
+	depends on KUNIT && m
 	default KUNIT_ALL_TESTS
 	prompt "Enable s390 specific modules tests"
 	select S390_MODULES_SANITY_TEST_HELPERS

@@ -1333,7 +1333,7 @@ static int pwm_export_child(struct device *pwmchip_dev, struct pwm_device *pwm)
 	if (test_and_set_bit(PWMF_EXPORTED, &pwm->flags))
 		return -EBUSY;
 
-	export = kzalloc(sizeof(*export), GFP_KERNEL);
+	export = kzalloc_obj(*export);
 	if (!export) {
 		clear_bit(PWMF_EXPORTED, &pwm->flags);
 		return -ENOMEM;
@@ -1699,8 +1699,7 @@ static bool pwm_ops_check(const struct pwm_chip *chip)
 
 	if (ops->write_waveform) {
 		if (!ops->round_waveform_tohw ||
-		    !ops->round_waveform_fromhw ||
-		    !ops->write_waveform)
+		    !ops->round_waveform_fromhw)
 			return false;
 
 		if (PWM_WFHWSIZE < ops->sizeof_wfhw) {
@@ -2139,7 +2138,7 @@ static int pwm_cdev_open(struct inode *inode, struct file *file)
 	if (!chip->operational)
 		return -ENXIO;
 
-	cdata = kzalloc(struct_size(cdata, pwm, chip->npwm), GFP_KERNEL);
+	cdata = kzalloc_flex(*cdata, pwm, chip->npwm);
 	if (!cdata)
 		return -ENOMEM;
 

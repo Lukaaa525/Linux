@@ -130,7 +130,7 @@ static bool kq_initialize(struct kernel_queue *kq, struct kfd_node *dev,
 
 	kq->queue->device = dev;
 
-	kq->queue->mqd_mem_obj = kq->mqd_mgr->allocate_mqd(kq->mqd_mgr->dev,
+	kq->queue->mqd_mem_obj = kq->mqd_mgr->allocate_mqd(kq->mqd_mgr,
 					&kq->queue->properties);
 	if (!kq->queue->mqd_mem_obj)
 		goto err_allocate_mqd;
@@ -309,7 +309,7 @@ struct kernel_queue *kernel_queue_init(struct kfd_node *dev,
 {
 	struct kernel_queue *kq;
 
-	kq = kzalloc(sizeof(*kq), GFP_KERNEL);
+	kq = kzalloc_obj(*kq);
 	if (!kq)
 		return NULL;
 

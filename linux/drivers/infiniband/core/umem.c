@@ -189,7 +189,7 @@ struct ib_umem *ib_umem_get(struct ib_device *device, unsigned long addr,
 	if (access & IB_ACCESS_ON_DEMAND)
 		return ERR_PTR(-EOPNOTSUPP);
 
-	umem = kzalloc(sizeof(*umem), GFP_KERNEL);
+	umem = kzalloc_obj(*umem);
 	if (!umem)
 		return ERR_PTR(-ENOMEM);
 	umem->ibdev      = device;
@@ -283,7 +283,7 @@ EXPORT_SYMBOL(ib_umem_get);
  */
 void ib_umem_release(struct ib_umem *umem)
 {
-	if (!umem)
+	if (IS_ERR_OR_NULL(umem))
 		return;
 	if (umem->is_dmabuf)
 		return ib_umem_dmabuf_release(to_ib_umem_dmabuf(umem));

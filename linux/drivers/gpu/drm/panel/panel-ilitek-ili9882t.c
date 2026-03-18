@@ -88,11 +88,9 @@ static const struct drm_dsc_config tianma_il79900a_dsc = {
 	.native_422 = false,
 	.simple_422 = false,
 	.vbr_enable = false,
-	.rc_model_size = DSC_RC_MODEL_SIZE_CONST,
 	.pic_width = 1600,
 	.pic_height = 2560,
 	.convert_rgb = 0,
-	.vbr_enable = 0,
 	.rc_buf_thresh = {14, 28, 42, 56, 70, 84, 98, 105, 112, 119, 121, 123, 125, 126},
 	.rc_model_size = DSC_RC_MODEL_SIZE_CONST,
 	.rc_edge_factor = DSC_RC_EDGE_FACTOR_CONST,
@@ -105,7 +103,6 @@ static const struct drm_dsc_config tianma_il79900a_dsc = {
 	.initial_offset = 6144,
 	.rc_quant_incr_limit0 = 11,
 	.rc_quant_incr_limit1 = 11,
-	.nfl_bpg_offset = 1402,
 	.rc_range_params = {
 		{ 0,  4, DSC_BPG_OFFSET(2)},
 		{ 0,  4, DSC_BPG_OFFSET(0)},
@@ -123,7 +120,6 @@ static const struct drm_dsc_config tianma_il79900a_dsc = {
 		{ 9, 12, DSC_BPG_OFFSET(-12)},
 		{12, 13, DSC_BPG_OFFSET(-12)},
 	},
-	.initial_scale_value = 32,
 	.slice_chunk_size = 800,
 	.initial_dec_delay = 657,
 	.final_offset = 4320,
@@ -596,7 +592,7 @@ static int ili9882t_unprepare(struct drm_panel *panel)
 {
 	struct ili9882t *ili = to_ili9882t(panel);
 
-	gpiod_set_value(ili->enable_gpio, 0);
+	gpiod_set_value_cansleep(ili->enable_gpio, 0);
 	usleep_range(1000, 2000);
 	regulator_disable(ili->avee);
 	regulator_disable(ili->avdd);
@@ -612,7 +608,7 @@ static int ili9882t_prepare(struct drm_panel *panel)
 	struct ili9882t *ili = to_ili9882t(panel);
 	int ret;
 
-	gpiod_set_value(ili->enable_gpio, 0);
+	gpiod_set_value_cansleep(ili->enable_gpio, 0);
 	usleep_range(1000, 1500);
 
 	ret = regulator_enable(ili->pp3300);
@@ -642,11 +638,11 @@ static int ili9882t_prepare(struct drm_panel *panel)
 	}
 	usleep_range(1000, 2000);
 
-	gpiod_set_value(ili->enable_gpio, 1);
+	gpiod_set_value_cansleep(ili->enable_gpio, 1);
 	usleep_range(1000, 2000);
-	gpiod_set_value(ili->enable_gpio, 0);
+	gpiod_set_value_cansleep(ili->enable_gpio, 0);
 	msleep(50);
-	gpiod_set_value(ili->enable_gpio, 1);
+	gpiod_set_value_cansleep(ili->enable_gpio, 1);
 	usleep_range(6000, 10000);
 
 	ret = ili->desc->init(ili);
@@ -656,7 +652,7 @@ static int ili9882t_prepare(struct drm_panel *panel)
 	return 0;
 
 poweroff:
-	gpiod_set_value(ili->enable_gpio, 0);
+	gpiod_set_value_cansleep(ili->enable_gpio, 0);
 	regulator_disable(ili->avee);
 poweroffavdd:
 	regulator_disable(ili->avdd);
@@ -797,7 +793,7 @@ static int ili9882t_add(struct ili9882t *ili)
 		return PTR_ERR(ili->enable_gpio);
 	}
 
-	gpiod_set_value(ili->enable_gpio, 0);
+	gpiod_set_value_cansleep(ili->enable_gpio, 0);
 
 	err = of_drm_get_panel_orientation(dev->of_node, &ili->orientation);
 	if (err < 0) {

@@ -17,7 +17,7 @@ The acquisition orders for mutexes are as follows:
 
 - kvm->lock is taken outside kvm->slots_lock and kvm->irq_lock
 
-- vcpu->mutex is taken outside kvm->slots_lock
+- vcpu->mutex is taken outside kvm->slots_lock and kvm->slots_arch_lock
 
 - kvm->slots_lock is taken outside kvm->irq_lock, though acquiring
   them together is quite rare.

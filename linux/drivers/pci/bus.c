@@ -15,6 +15,7 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/proc_fs.h>
 #include <linux/slab.h>
 
@@ -64,7 +65,7 @@ void pci_bus_add_resource(struct pci_bus *bus, struct resource *res)
 {
 	struct pci_bus_resource *bus_res;
 
-	bus_res = kzalloc(sizeof(struct pci_bus_resource), GFP_KERNEL);
+	bus_res = kzalloc_obj(struct pci_bus_resource);
 	if (!bus_res) {
 		dev_err(&bus->dev, "can't add %pR resource\n", res);
 		return;
@@ -359,6 +360,13 @@ void pci_bus_add_device(struct pci_dev *dev)
 
 	/* Save config space for error recoverability */
 	pci_save_state(dev);
+
+	/*
+	 * Enable runtime PM, which potentially allows the device to
+	 * suspend immediately, only after the PCI state has been
+	 * configured completely.
+	 */
+	pm_runtime_enable(&dev->dev);
 
 	if (!dn || of_device_is_available(dn))
 		pci_dev_allow_binding(dev);

@@ -524,6 +524,7 @@ void drm_mode_config_cleanup(struct drm_device *dev)
 	struct drm_property *property, *pt;
 	struct drm_property_blob *blob, *bt;
 	struct drm_plane *plane, *plt;
+	struct drm_colorop *colorop, *copt;
 
 	list_for_each_entry_safe(encoder, enct, &dev->mode_config.encoder_list,
 				 head) {
@@ -553,6 +554,11 @@ void drm_mode_config_cleanup(struct drm_device *dev)
 		drm_property_destroy(dev, property);
 	}
 
+	list_for_each_entry_safe(colorop, copt, &dev->mode_config.colorop_list,
+				 head) {
+		colorop->funcs->destroy(colorop);
+	}
+
 	list_for_each_entry_safe(plane, plt, &dev->mode_config.plane_list,
 				 head) {
 		plane->funcs->destroy(plane);
@@ -577,10 +583,13 @@ void drm_mode_config_cleanup(struct drm_device *dev)
 	 */
 	WARN_ON(!list_empty(&dev->mode_config.fb_list));
 	list_for_each_entry_safe(fb, fbt, &dev->mode_config.fb_list, head) {
-		struct drm_printer p = drm_dbg_printer(dev, DRM_UT_KMS, "[leaked fb]");
+		if (list_empty(&fb->filp_head) || drm_framebuffer_read_refcount(fb) > 1) {
+			struct drm_printer p = drm_dbg_printer(dev, DRM_UT_KMS, "[leaked fb]");
 
-		drm_printf(&p, "framebuffer[%u]:\n", fb->base.id);
-		drm_framebuffer_print_info(&p, 1, fb);
+			drm_printf(&p, "framebuffer[%u]:\n", fb->base.id);
+			drm_framebuffer_print_info(&p, 1, fb);
+		}
+		list_del_init(&fb->filp_head);
 		drm_framebuffer_free(&fb->base.refcount);
 	}
 

@@ -362,7 +362,7 @@ static int coda_venus_readdir(struct file *coda_file, struct dir_context *ctx)
 
 	cii = ITOC(file_inode(coda_file));
 
-	vdir = kmalloc(sizeof(*vdir), GFP_KERNEL);
+	vdir = kmalloc_obj(*vdir);
 	if (!vdir) return -ENOMEM;
 
 	if (!dir_emit_dots(coda_file, ctx))
@@ -533,7 +533,7 @@ int coda_revalidate_inode(struct inode *inode)
 		coda_vattr_to_iattr(inode, &attr);
 
 		if ((old_mode & S_IFMT) != (inode->i_mode & S_IFMT)) {
-			pr_warn("inode %ld, fid %s changed type!\n",
+			pr_warn("inode %llu, fid %s changed type!\n",
 				inode->i_ino, coda_f2s(&(cii->c_fid)));
 		}
 

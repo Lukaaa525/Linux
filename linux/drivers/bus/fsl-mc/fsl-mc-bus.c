@@ -672,8 +672,7 @@ static int fsl_mc_device_get_mmio_regions(struct fsl_mc_device *mc_dev,
 		return -EINVAL;
 	}
 
-	regions = kmalloc_array(obj_desc->region_count,
-				sizeof(regions[0]), GFP_KERNEL);
+	regions = kmalloc_objs(regions[0], obj_desc->region_count);
 	if (!regions)
 		return -ENOMEM;
 
@@ -788,7 +787,7 @@ int fsl_mc_device_add(struct fsl_mc_obj_desc *obj_desc,
 		/*
 		 * Allocate an MC bus device object:
 		 */
-		mc_bus = kzalloc(sizeof(*mc_bus), GFP_KERNEL);
+		mc_bus = kzalloc_obj(*mc_bus);
 		if (!mc_bus)
 			return -ENOMEM;
 
@@ -798,7 +797,7 @@ int fsl_mc_device_add(struct fsl_mc_obj_desc *obj_desc,
 		/*
 		 * Allocate a regular fsl_mc_device object:
 		 */
-		mc_dev = kzalloc(sizeof(*mc_dev), GFP_KERNEL);
+		mc_dev = kzalloc_obj(*mc_dev);
 		if (!mc_dev)
 			return -ENOMEM;
 	}
@@ -855,14 +854,12 @@ int fsl_mc_device_add(struct fsl_mc_obj_desc *obj_desc,
 	} else {
 		/*
 		 * A non-DPRC object has to be a child of a DPRC, use the
-		 * parent's ICID and interrupt domain.
+		 * parent's ICID.
 		 */
 		mc_dev->icid = parent_mc_dev->icid;
 		mc_dev->dma_mask = FSL_MC_DEFAULT_DMA_MASK;
 		mc_dev->dev.dma_mask = &mc_dev->dma_mask;
 		mc_dev->dev.coherent_dma_mask = mc_dev->dma_mask;
-		dev_set_msi_domain(&mc_dev->dev,
-				   dev_get_msi_domain(&parent_mc_dev->dev));
 	}
 
 	/*
@@ -895,11 +892,7 @@ int fsl_mc_device_add(struct fsl_mc_obj_desc *obj_desc,
 	return 0;
 
 error_cleanup_dev:
-	kfree(mc_dev->regions);
-	if (mc_bus)
-		kfree(mc_bus);
-	else
-		kfree(mc_dev);
+	put_device(&mc_dev->dev);
 
 	return error;
 }

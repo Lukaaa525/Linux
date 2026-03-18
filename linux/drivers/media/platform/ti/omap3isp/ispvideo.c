@@ -1371,7 +1371,7 @@ static int isp_video_open(struct file *file)
 	struct vb2_queue *queue;
 	int ret = 0;
 
-	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	handle = kzalloc_obj(*handle);
 	if (handle == NULL)
 		return -ENOMEM;
 
@@ -1403,6 +1403,7 @@ static int isp_video_open(struct file *file)
 
 	ret = vb2_queue_init(&handle->queue);
 	if (ret < 0) {
+		v4l2_pipeline_pm_put(&video->video.entity);
 		omap3isp_put(video->isp);
 		goto done;
 	}

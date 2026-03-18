@@ -41,7 +41,7 @@
 #define FN(reg_name, field_name) \
 	hubbub2->shifts->field_name, hubbub2->masks->field_name
 
-static void dcn401_init_crb(struct hubbub *hubbub)
+void dcn401_init_crb(struct hubbub *hubbub)
 {
 	struct dcn20_hubbub *hubbub2 = TO_DCN20_HUBBUB(hubbub);
 
@@ -1110,7 +1110,7 @@ bool hubbub401_get_dcc_compression_cap(struct hubbub *hubbub,
 	return true;
 }
 
-static void dcn401_program_det_segments(struct hubbub *hubbub, int hubp_inst, unsigned det_buffer_size_seg)
+void dcn401_program_det_segments(struct hubbub *hubbub, int hubp_inst, unsigned det_buffer_size_seg)
 {
 	struct dcn20_hubbub *hubbub2 = TO_DCN20_HUBBUB(hubbub);
 
@@ -1147,11 +1147,9 @@ static void dcn401_program_det_segments(struct hubbub *hubbub, int hubp_inst, un
 	}
 }
 
-static void dcn401_program_compbuf_segments(struct hubbub *hubbub, unsigned compbuf_size_seg, bool safe_to_increase)
+void dcn401_program_compbuf_segments(struct hubbub *hubbub, unsigned compbuf_size_seg, bool safe_to_increase)
 {
 	struct dcn20_hubbub *hubbub2 = TO_DCN20_HUBBUB(hubbub);
-
-	unsigned int cur_compbuf_size_seg = 0;
 
 	if (safe_to_increase || compbuf_size_seg <= hubbub2->compbuf_size_segments) {
 		if (compbuf_size_seg > hubbub2->compbuf_size_segments) {
@@ -1165,12 +1163,10 @@ static void dcn401_program_compbuf_segments(struct hubbub *hubbub, unsigned comp
 				+ hubbub2->det3_size + compbuf_size_seg <= hubbub2->crb_size_segs);
 		REG_UPDATE(DCHUBBUB_COMPBUF_CTRL, COMPBUF_SIZE, compbuf_size_seg);
 		hubbub2->compbuf_size_segments = compbuf_size_seg;
-
-		ASSERT(REG_GET(DCHUBBUB_COMPBUF_CTRL, CONFIG_ERROR, &cur_compbuf_size_seg) && !cur_compbuf_size_seg);
 	}
 }
 
-static void dcn401_wait_for_det_update(struct hubbub *hubbub, int hubp_inst)
+void dcn401_wait_for_det_update(struct hubbub *hubbub, int hubp_inst)
 {
 	struct dcn20_hubbub *hubbub2 = TO_DCN20_HUBBUB(hubbub);
 
@@ -1192,7 +1188,7 @@ static void dcn401_wait_for_det_update(struct hubbub *hubbub, int hubp_inst)
 	}
 }
 
-static bool dcn401_program_arbiter(struct hubbub *hubbub, struct dml2_display_arb_regs *arb_regs, bool safe_to_lower)
+bool dcn401_program_arbiter(struct hubbub *hubbub, struct dml2_display_arb_regs *arb_regs, bool safe_to_lower)
 {
 	struct dcn20_hubbub *hubbub2 = TO_DCN20_HUBBUB(hubbub);
 

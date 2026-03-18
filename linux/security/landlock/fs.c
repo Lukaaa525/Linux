@@ -119,8 +119,8 @@ static const struct landlock_object_underops landlock_fs_underops = {
  * Any new IOCTL commands that are implemented in fs/ioctl.c's do_vfs_ioctl()
  * should be considered for inclusion here.
  *
- * Returns: true if the IOCTL @cmd can not be restricted with Landlock for
- * device files.
+ * Return: True if the IOCTL @cmd can not be restricted with Landlock for
+ * device files, false otherwise.
  */
 static __attribute_const__ bool is_masked_device_ioctl(const unsigned int cmd)
 {
@@ -331,7 +331,7 @@ int landlock_append_fs_rule(struct landlock_ruleset *const ruleset,
 
 	/* Files only get access rights that make sense. */
 	if (!d_is_dir(path->dentry) &&
-	    (access_rights | ACCESS_FILE) != ACCESS_FILE)
+	    !access_mask_subset(access_rights, ACCESS_FILE))
 		return -EINVAL;
 	if (WARN_ON_ONCE(ruleset->num_layers != 1))
 		return -EINVAL;
@@ -399,15 +399,6 @@ static const struct access_masks any_fs = {
 };
 
 /*
- * Returns true iff a has a subset of the bits of b.
- * It helps readability and gets inlined.
- */
-static bool access_mask_subset(access_mask_t a, access_mask_t b)
-{
-	return (a | b) == b;
-}
-
-/*
  * Returns true iff the child file with the given src_child access rights under
  * src_parent would result in having the same or fewer access rights if it were
  * moved under new_parent.
@@ -417,7 +408,7 @@ static bool may_refer(const struct layer_access_masks *const src_parent,
 		      const struct layer_access_masks *const new_parent,
 		      const bool child_is_dir)
 {
-	for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(new_parent->access); i++) {
 		access_mask_t child_access = src_parent->access[i] &
 					     src_child->access[i];
 		access_mask_t parent_access = new_parent->access[i];
@@ -437,10 +428,10 @@ static bool may_refer(const struct layer_access_masks *const src_parent,
  * Check that a destination file hierarchy has more restrictions than a source
  * file hierarchy.  This is only used for link and rename actions.
  *
- * Returns: true if child1 may be moved from parent1 to parent2 without
- * increasing its access rights.  If child2 is set, an additional condition is
+ * Return: True if child1 may be moved from parent1 to parent2 without
+ * increasing its access rights (if child2 is set, an additional condition is
  * that child2 may be used from parent2 to parent1 without increasing its access
- * rights.
+ * rights), false otherwise.
  */
 static bool no_more_access(const struct layer_access_masks *const parent1,
 			   const struct layer_access_masks *const child1,
@@ -589,7 +580,7 @@ static bool scope_to_request(const access_mask_t access_request,
 	if (WARN_ON_ONCE(!masks))
 		return true;
 
-	for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++) {
 		masks->access[i] &= access_request;
 		if (masks->access[i])
 			saw_unfulfilled_access = true;
@@ -651,7 +642,7 @@ static bool is_eacces(const struct layer_access_masks *masks,
 	if (!masks)
 		return false;
 
-	for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(masks->access); i++) {
 		/* LANDLOCK_ACCESS_FS_REFER alone must return -EXDEV. */
 		if (masks->access[i] & access_request &
 		    ~LANDLOCK_ACCESS_FS_REFER)
@@ -743,9 +734,7 @@ static void test_is_eacces_with_write(struct kunit *const test)
  * checks that the collected accesses and the remaining ones are enough to
  * allow the request.
  *
- * Returns:
- * - true if the access request is granted;
- * - false otherwise.
+ * Return: True if the access request is granted, false otherwise.
  */
 static bool
 is_access_to_paths_allowed(const struct landlock_ruleset *const domain,
@@ -937,7 +926,7 @@ jump_up:
 		log_request_parent1->audit.type = LSM_AUDIT_DATA_PATH;
 		log_request_parent1->audit.u.path = *path;
 		log_request_parent1->access = access_masked_parent1;
-		log_request_parent1->masks = layer_masks_parent1;
+		log_request_parent1->layer_masks = layer_masks_parent1;
 	}
 
 	if (!allowed_parent2 && log_request_parent2) {
@@ -945,7 +934,7 @@ jump_up:
 		log_request_parent2->audit.type = LSM_AUDIT_DATA_PATH;
 		log_request_parent2->audit.u.path = *path;
 		log_request_parent2->access = access_masked_parent2;
-		log_request_parent2->masks = layer_masks_parent2;
+		log_request_parent2->layer_masks = layer_masks_parent2;
 	}
 #endif /* CONFIG_AUDIT */
 
@@ -1031,16 +1020,14 @@ static access_mask_t maybe_remove(const struct dentry *const dentry)
  * only handles walking on the same mount point and only checks one set of
  * accesses.
  *
- * Returns:
- * - true if all the domain access rights are allowed for @dir;
- * - false if the walk reached @mnt_root.
+ * Return: True if all the domain access rights are allowed for @dir, false if
+ * the walk reached @mnt_root.
  */
 static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
 				    const struct dentry *const mnt_root,
 				    struct dentry *dir,
 				    struct layer_access_masks *layer_masks_dom)
 {
-	unsigned long access_dom;
 	bool ret = false;
 
 	if (WARN_ON_ONCE(!domain || !mnt_root || !dir || !layer_masks_dom))
@@ -1048,9 +1035,9 @@ static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
 	if (is_nouser_or_private(dir))
 		return true;
 
-	access_dom = landlock_init_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
-					       layer_masks_dom,
-					       LANDLOCK_KEY_INODE);
+	if (!landlock_init_layer_masks(domain, LANDLOCK_MASK_ACCESS_FS,
+				       layer_masks_dom, LANDLOCK_KEY_INODE))
+		return true;
 
 	dget(dir);
 	while (true) {
@@ -1130,10 +1117,9 @@ static bool collect_domain_accesses(const struct landlock_ruleset *const domain,
  * ephemeral matrices take some space on the stack, which limits the number of
  * layers to a deemed reasonable number: 16.
  *
- * Returns:
- * - 0 if access is allowed;
- * - -EXDEV if @old_dentry would inherit new access rights from @new_dir;
- * - -EACCES if file removal or creation is denied.
+ * Return: 0 if access is allowed, -EXDEV if @old_dentry would inherit new
+ * access rights from @new_dir, or -EACCES if file removal or creation is
+ * denied.
  */
 static int current_check_refer_path(struct dentry *const old_dentry,
 				    const struct path *const new_dir,
@@ -1578,7 +1564,7 @@ static int hook_path_truncate(const struct path *const path)
  *
  * @file: File being opened.
  *
- * Returns the access rights that are required for opening the given file,
+ * Return: The access rights that are required for opening the given file,
  * depending on the file type and open mode.
  */
 static access_mask_t
@@ -1664,7 +1650,7 @@ static int hook_file_open(struct file *const file)
 		 * are still unfulfilled in any of the layers.
 		 */
 		allowed_access = full_access_request;
-		for (int i = 0; i < LANDLOCK_MAX_NUM_LAYERS; i++)
+		for (size_t i = 0; i < ARRAY_SIZE(layer_masks.access); i++)
 			allowed_access &= ~layer_masks.access[i];
 	}
 
@@ -1676,8 +1662,8 @@ static int hook_file_open(struct file *const file)
 	 */
 	landlock_file(file)->allowed_access = allowed_access;
 #ifdef CONFIG_AUDIT
-	landlock_file(file)->deny_masks =
-		landlock_get_fs_deny_masks(optional_access, &layer_masks);
+	landlock_file(file)->deny_masks = landlock_get_deny_masks(
+		_LANDLOCK_ACCESS_FS_OPTIONAL, optional_access, &layer_masks);
 #endif /* CONFIG_AUDIT */
 
 	if (access_mask_subset(open_access_request, allowed_access))

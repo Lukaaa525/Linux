@@ -95,7 +95,18 @@ struct dst_entry {
 #ifdef CONFIG_64BIT
 	struct lwtunnel_state   *lwtstate;
 #endif
+#ifdef CONFIG_NET_DEV_REFCNT_TRACKER
+	atomic_t dst_trace_seq;
+#endif
 };
+
+#ifdef CONFIG_NET_DEV_REFCNT_TRACKER
+void save_dst_trace_buffer(struct dst_entry *dst, int delta);
+void dump_dst_trace_buffer(const struct net_device *dev);
+#else
+static inline void save_dst_trace_buffer(struct dst_entry *dst, int delta) { };
+static inline void dump_dst_trace_buffer(const struct net_device *dev) { };
+#endif
 
 struct dst_metrics {
 	u32		metrics[RTAX_MAX];
@@ -219,6 +230,12 @@ static inline u32 dst_mtu(const struct dst_entry *dst)
 	return INDIRECT_CALL_INET(dst->ops->mtu, ip6_mtu, ipv4_mtu, dst);
 }
 
+/* Variant of dst_mtu() for IPv4 users. */
+static inline u32 dst4_mtu(const struct dst_entry *dst)
+{
+	return INDIRECT_CALL_1(dst->ops->mtu, ipv4_mtu, dst);
+}
+
 /* RTT metrics are stored in milliseconds for user ABI, but used as jiffies */
 static inline unsigned long dst_metric_rtt(const struct dst_entry *dst, int metric)
 {
@@ -238,7 +255,10 @@ static inline void dst_hold(struct dst_entry *dst)
 	 * the placement of __rcuref in struct dst_entry
 	 */
 	BUILD_BUG_ON(offsetof(struct dst_entry, __rcuref) & 63);
-	WARN_ON(!rcuref_get(&dst->__rcuref));
+	if (!rcuref_get(&dst->__rcuref))
+		WARN_ON(1);
+	else
+		save_dst_trace_buffer(dst, 1);
 }
 
 static inline void dst_use_noref(struct dst_entry *dst, unsigned long time)
@@ -302,7 +322,11 @@ static inline void skb_dst_copy(struct sk_buff *nskb, const struct sk_buff *oskb
  */
 static inline bool dst_hold_safe(struct dst_entry *dst)
 {
-	return rcuref_get(&dst->__rcuref);
+	const bool ret = rcuref_get(&dst->__rcuref);
+
+	if (ret)
+		save_dst_trace_buffer(dst, 1);
+	return ret;
 }
 
 /**

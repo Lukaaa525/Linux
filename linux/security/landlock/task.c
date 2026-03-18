@@ -37,6 +37,9 @@
  *
  * Checks if the @parent domain is less or equal to (i.e. an ancestor, which
  * means a subset of) the @child domain.
+ *
+ * Return: True if @parent is an ancestor of or equal to @child, false
+ * otherwise.
  */
 static bool domain_scope_le(const struct landlock_ruleset *const parent,
 			    const struct landlock_ruleset *const child)
@@ -79,8 +82,7 @@ static int domain_ptrace(const struct landlock_ruleset *const parent,
  * If the current task has Landlock rules, then the child must have at least
  * the same rules.  Else denied.
  *
- * Determines whether a process may access another, returning 0 if permission
- * granted, -errno if denied.
+ * Return: 0 if permission is granted, -errno if denied.
  */
 static int hook_ptrace_access_check(struct task_struct *const child,
 				    const unsigned int mode)
@@ -129,8 +131,7 @@ static int hook_ptrace_access_check(struct task_struct *const child,
  * If the parent has Landlock rules, then the current task must have the same
  * or more rules.  Else denied.
  *
- * Determines whether the nominated task is permitted to trace the current
- * process, returning 0 if permission is granted, -errno if denied.
+ * Return: 0 if permission is granted, -errno if denied.
  */
 static int hook_ptrace_traceme(struct task_struct *const parent)
 {
@@ -173,8 +174,8 @@ static int hook_ptrace_traceme(struct task_struct *const parent)
  * @server: IPC receiver domain.
  * @scope: The scope restriction criteria.
  *
- * Returns: True if @server is in a different domain from @client, and @client
- * is scoped to access @server (i.e. access should be denied).
+ * Return: True if @server is in a different domain from @client and @client
+ * is scoped to access @server (i.e. access should be denied), false otherwise.
  */
 static bool domain_is_scoped(const struct landlock_ruleset *const client,
 			     const struct landlock_ruleset *const server,
@@ -232,81 +233,35 @@ static bool domain_is_scoped(const struct landlock_ruleset *const client,
 	return false;
 }
 
-/**
- * sock_is_scoped - Check if socket connect or send should be restricted
- *    based on scope controls.
- *
- * @other: The server socket.
- * @domain: The client domain.
- * @scope: The relevant scope bit to check (i.e. pathname or abstract).
- *
- * Returns: True if connect should be restricted, false otherwise.
- */
 static bool sock_is_scoped(struct sock *const other,
-			   const struct landlock_ruleset *const domain,
-			   access_mask_t scope)
+			   const struct landlock_ruleset *const domain)
 {
 	const struct landlock_ruleset *dom_other;
 
 	/* The credentials will not change. */
 	lockdep_assert_held(&unix_sk(other)->lock);
 	dom_other = landlock_cred(other->sk_socket->file->f_cred)->domain;
-	return domain_is_scoped(domain, dom_other, scope);
+	return domain_is_scoped(domain, dom_other,
+				LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET);
 }
 
-/* Allow us to quickly test if the current domain scopes any form of socket */
-static const struct access_masks unix_scope = {
-	.scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET |
-		 LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET,
-};
-
-/*
- * UNIX sockets can have three types of addresses: pathname (a filesystem path),
- * unnamed (not bound to an address), and abstract (sun_path[0] is '\0').
- * Unnamed sockets include those created with socketpair() and unbound sockets.
- * We do not restrict unnamed sockets since they have no address to identify.
- */
-static int
-check_socket_access(struct sock *const other,
-		    const struct landlock_cred_security *const subject,
-		    const size_t handle_layer)
+static bool is_abstract_socket(struct sock *const sock)
 {
-	const struct unix_address *addr = unix_sk(other)->addr;
-	access_mask_t scope;
-	enum landlock_request_type request_type;
+	struct unix_address *addr = unix_sk(sock)->addr;
 
-	/* Unnamed sockets are not restricted. */
 	if (!addr)
-		return 0;
+		return false;
 
-	/*
-	 * Abstract and pathname Unix sockets have separate scope and audit
-	 * request type.
-	 */
 	if (addr->len >= offsetof(struct sockaddr_un, sun_path) + 1 &&
-	    addr->name->sun_path[0] == '\0') {
-		scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
-		request_type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET;
-	} else {
-		scope = LANDLOCK_SCOPE_PATHNAME_UNIX_SOCKET;
-		request_type = LANDLOCK_REQUEST_SCOPE_PATHNAME_UNIX_SOCKET;
-	}
+	    addr->name->sun_path[0] == '\0')
+		return true;
 
-	if (!sock_is_scoped(other, subject->domain, scope))
-		return 0;
-
-	landlock_log_denial(subject, &(struct landlock_request) {
-		.type = request_type,
-		.audit = {
-			.type = LSM_AUDIT_DATA_NET,
-			.u.net = &(struct lsm_network_audit) {
-				.sk = other,
-			},
-		},
-		.layer_plus_one = handle_layer + 1,
-	});
-	return -EPERM;
+	return false;
 }
+
+static const struct access_masks unix_scope = {
+	.scope = LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
+};
 
 static int hook_unix_stream_connect(struct sock *const sock,
 				    struct sock *const other,
@@ -321,7 +276,23 @@ static int hook_unix_stream_connect(struct sock *const sock,
 	if (!subject)
 		return 0;
 
-	return check_socket_access(other, subject, handle_layer);
+	if (!is_abstract_socket(other))
+		return 0;
+
+	if (!sock_is_scoped(other, subject->domain))
+		return 0;
+
+	landlock_log_denial(subject, &(struct landlock_request) {
+		.type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET,
+		.audit = {
+			.type = LSM_AUDIT_DATA_NET,
+			.u.net = &(struct lsm_network_audit) {
+				.sk = other,
+			},
+		},
+		.layer_plus_one = handle_layer + 1,
+	});
+	return -EPERM;
 }
 
 static int hook_unix_may_send(struct socket *const sock,
@@ -332,7 +303,6 @@ static int hook_unix_may_send(struct socket *const sock,
 		landlock_get_applicable_subject(current_cred(), unix_scope,
 						&handle_layer);
 
-	/* Quick return for non-landlocked tasks. */
 	if (!subject)
 		return 0;
 
@@ -343,7 +313,23 @@ static int hook_unix_may_send(struct socket *const sock,
 	if (unix_peer(sock->sk) == other->sk)
 		return 0;
 
-	return check_socket_access(other->sk, subject, handle_layer);
+	if (!is_abstract_socket(other->sk))
+		return 0;
+
+	if (!sock_is_scoped(other->sk, subject->domain))
+		return 0;
+
+	landlock_log_denial(subject, &(struct landlock_request) {
+		.type = LANDLOCK_REQUEST_SCOPE_ABSTRACT_UNIX_SOCKET,
+		.audit = {
+			.type = LSM_AUDIT_DATA_NET,
+			.u.net = &(struct lsm_network_audit) {
+				.sk = other->sk,
+			},
+		},
+		.layer_plus_one = handle_layer + 1,
+	});
+	return -EPERM;
 }
 
 static const struct access_masks signal_scope = {

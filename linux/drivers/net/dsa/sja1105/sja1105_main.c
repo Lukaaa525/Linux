@@ -2278,6 +2278,12 @@ int sja1105_static_config_reload(struct sja1105_private *priv,
 	 * change it through the dynamic interface later.
 	 */
 	dsa_switch_for_each_available_port(dp, ds) {
+		/* May be called during unbind when we unoffload a VLAN-aware
+		 * bridge from port 1 while port 0 was already torn down
+		 */
+		if (!dp->pl)
+			continue;
+
 		phylink_replay_link_begin(dp->pl);
 		mac[dp->index].speed = priv->info->port_speed[SJA1105_SPEED_AUTO];
 	}
@@ -2333,13 +2339,13 @@ int sja1105_static_config_reload(struct sja1105_private *priv,
 			goto out;
 	}
 
-	dsa_switch_for_each_available_port(dp, ds)
-		phylink_replay_link_end(dp->pl);
-
 	rc = sja1105_reload_cbs(priv);
-	if (rc < 0)
-		goto out;
+
 out:
+	dsa_switch_for_each_available_port(dp, ds)
+		if (dp->pl)
+			phylink_replay_link_end(dp->pl);
+
 	mutex_unlock(&priv->mgmt_lock);
 	mutex_unlock(&priv->fdb_lock);
 
@@ -2841,7 +2847,7 @@ static void sja1105_mirror_del(struct dsa_switch *ds, int port,
 }
 
 static int sja1105_port_policer_add(struct dsa_switch *ds, int port,
-				    struct dsa_mall_policer_tc_entry *policer)
+				    const struct flow_action_police *policer)
 {
 	struct sja1105_l2_policing_entry *policing;
 	struct sja1105_private *priv = ds->priv;
@@ -2852,7 +2858,7 @@ static int sja1105_port_policer_add(struct dsa_switch *ds, int port,
 	 * the value of RATE bytes divided by 64, up to a maximum of SMAX
 	 * bytes.
 	 */
-	policing[port].rate = div_u64(512 * policer->rate_bytes_per_sec,
+	policing[port].rate = div_u64(512 * policer->rate_bytes_ps,
 				      1000000);
 	policing[port].smax = policer->burst;
 

@@ -85,8 +85,15 @@ static int erofs_init_inode_xattrs(struct inode *inode)
 	}
 	vi->xattr_name_filter = le32_to_cpu(ih->h_name_filter);
 	vi->xattr_shared_count = ih->h_shared_count;
-	vi->xattr_shared_xattrs = kmalloc_array(vi->xattr_shared_count,
-						sizeof(uint), GFP_KERNEL);
+	if ((u32)vi->xattr_shared_count * sizeof(__le32) >
+	    vi->xattr_isize - sizeof(struct erofs_xattr_ibody_header)) {
+		erofs_err(sb, "invalid h_shared_count %u @ nid %llu",
+			  vi->xattr_shared_count, vi->nid);
+		erofs_put_metabuf(&buf);
+		ret = -EFSCORRUPTED;
+		goto out_unlock;
+	}
+	vi->xattr_shared_xattrs = kmalloc_objs(uint, vi->xattr_shared_count);
 	if (!vi->xattr_shared_xattrs) {
 		erofs_put_metabuf(&buf);
 		ret = -ENOMEM;
@@ -498,7 +505,7 @@ int erofs_xattr_prefixes_init(struct super_block *sb)
 	if (!sbi->xattr_prefix_count)
 		return 0;
 
-	pfs = kcalloc(sbi->xattr_prefix_count, sizeof(*pfs), GFP_KERNEL);
+	pfs = kzalloc_objs(*pfs, sbi->xattr_prefix_count);
 	if (!pfs)
 		return -ENOMEM;
 
@@ -530,6 +537,19 @@ int erofs_xattr_prefixes_init(struct super_block *sb)
 	}
 
 	erofs_put_metabuf(&buf);
+	if (!ret && erofs_sb_has_ishare_xattrs(sbi)) {
+		struct erofs_xattr_prefix_item *pf = pfs + sbi->ishare_xattr_prefix_id;
+		struct erofs_xattr_long_prefix *newpfx;
+
+		newpfx = krealloc(pf->prefix,
+			sizeof(*newpfx) + pf->infix_len + 1, GFP_KERNEL);
+		if (newpfx) {
+			newpfx->infix[pf->infix_len] = '\0';
+			pf->prefix = newpfx;
+		} else {
+			ret = -ENOMEM;
+		}
+	}
 	sbi->xattr_prefixes = pfs;
 	if (ret)
 		erofs_xattr_prefixes_cleanup(sb);
@@ -573,5 +593,59 @@ struct posix_acl *erofs_get_acl(struct inode *inode, int type, bool rcu)
 		acl = posix_acl_from_xattr(&init_user_ns, value, rc);
 	kfree(value);
 	return acl;
+}
+
+bool erofs_inode_has_noacl(struct inode *inode, void *kaddr, unsigned int ofs)
+{
+	static const unsigned int bitmask =
+		BIT(21) |	/* system.posix_acl_default */
+		BIT(30);	/* system.posix_acl_access */
+	struct erofs_sb_info *sbi = EROFS_I_SB(inode);
+	const struct erofs_xattr_ibody_header *ih = kaddr + ofs;
+
+	if (EROFS_I(inode)->xattr_isize < sizeof(*ih))
+		return true;
+
+	if (erofs_sb_has_xattr_filter(sbi) && !sbi->xattr_filter_reserved &&
+	    !check_add_overflow(ofs, sizeof(*ih), &ofs) &&
+	    ofs <= i_blocksize(inode)) {
+		if ((le32_to_cpu(ih->h_name_filter) & bitmask) == bitmask)
+			return true;
+	}
+	return false;
+}
+#endif
+
+#ifdef CONFIG_EROFS_FS_PAGE_CACHE_SHARE
+int erofs_xattr_fill_inode_fingerprint(struct erofs_inode_fingerprint *fp,
+				       struct inode *inode, const char *domain_id)
+{
+	struct erofs_sb_info *sbi = EROFS_SB(inode->i_sb);
+	struct erofs_xattr_prefix_item *prefix;
+	const char *infix;
+	int valuelen, base_index;
+
+	if (!test_opt(&sbi->opt, INODE_SHARE))
+		return -EOPNOTSUPP;
+	if (!sbi->xattr_prefixes)
+		return -EINVAL;
+	prefix = sbi->xattr_prefixes + sbi->ishare_xattr_prefix_id;
+	infix = prefix->prefix->infix;
+	base_index = prefix->prefix->base_index;
+	valuelen = erofs_getxattr(inode, base_index, infix, NULL, 0);
+	if (valuelen <= 0 || valuelen > (1 << sbi->blkszbits))
+		return -EFSCORRUPTED;
+	fp->size = valuelen + (domain_id ? strlen(domain_id) : 0);
+	fp->opaque = kmalloc(fp->size, GFP_KERNEL);
+	if (!fp->opaque)
+		return -ENOMEM;
+	if (valuelen != erofs_getxattr(inode, base_index, infix,
+				       fp->opaque, valuelen)) {
+		kfree(fp->opaque);
+		fp->opaque = NULL;
+		return -EFSCORRUPTED;
+	}
+	memcpy(fp->opaque + valuelen, domain_id, fp->size - valuelen);
+	return 0;
 }
 #endif

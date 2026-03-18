@@ -6,6 +6,7 @@ menuconfig INFINIBAND
 	depends on INET
 	depends on m || IPV6 != m
 	depends on !ALPHA
+	select DMA_SHARED_BUFFER
 	select IRQ_POLL
 	select DIMLIB
 	help
@@ -110,7 +111,5 @@ source "drivers/infiniband/ulp/srpt/Kconfig"
 source "drivers/infiniband/ulp/iser/Kconfig"
 source "drivers/infiniband/ulp/isert/Kconfig"
 source "drivers/infiniband/ulp/rtrs/Kconfig"
-
-source "drivers/infiniband/ulp/opa_vnic/Kconfig"
 
 endif # INFINIBAND

@@ -160,8 +160,10 @@ static void tdx_mr_deinit(const struct attribute_group *mr_grp)
 /*
  * Intel's SGX QE implementation generally uses Quote size less
  * than 8K (2K Quote data + ~5K of certificate blob).
+ * DICE-based attestation uses layered evidence that requires
+ * larger Quote size (~100K).
  */
-#define GET_QUOTE_BUF_SIZE		SZ_8K
+#define GET_QUOTE_BUF_SIZE		SZ_128K
 
 #define GET_QUOTE_CMD_VER		1
 
@@ -302,6 +304,11 @@ static int tdx_report_new_locked(struct tsm_report *report, void *data)
 	if (ret) {
 		pr_err("GetQuote request timedout\n");
 		return ret;
+	}
+
+	if (quote_buf->status != GET_QUOTE_SUCCESS) {
+		pr_debug("GetQuote request failed, status:%llx\n", quote_buf->status);
+		return -EIO;
 	}
 
 	buf = kvmemdup(quote_buf->data, quote_buf->out_len, GFP_KERNEL);

@@ -22,11 +22,18 @@
 #define ODEBUG_HASH_BITS	14
 #define ODEBUG_HASH_SIZE	(1 << ODEBUG_HASH_BITS)
 
-/* Must be power of two */
+/*
+ * Must be power of two.
+ * Please change Kconfig help text of DEBUG_OBJECTS_POOL_SIZE_SHIFT when
+ * changed.
+ */
 #define ODEBUG_BATCH_SIZE	16
 
+#define ODEBUG_POOL_SHIFT	CONFIG_DEBUG_OBJECTS_POOL_SIZE_SHIFT
+static_assert(ODEBUG_POOL_SHIFT >= 0);
+
 /* Initial values. Must all be a multiple of batch size */
-#define ODEBUG_POOL_SIZE	(64 * ODEBUG_BATCH_SIZE)
+#define ODEBUG_POOL_SIZE	((1 << ODEBUG_POOL_SHIFT) * ODEBUG_BATCH_SIZE)
 #define ODEBUG_POOL_MIN_LEVEL	(ODEBUG_POOL_SIZE / 4)
 
 #define ODEBUG_POOL_PERCPU_SIZE	(8 * ODEBUG_BATCH_SIZE)
@@ -398,9 +405,26 @@ static void fill_pool(void)
 
 	atomic_inc(&cpus_allocating);
 	while (pool_should_refill(&pool_global)) {
+		gfp_t gfp = __GFP_HIGH | __GFP_NOWARN;
 		HLIST_HEAD(head);
 
-		if (!kmem_alloc_batch(&head, obj_cache, __GFP_HIGH | __GFP_NOWARN))
+		/*
+		 * Allow reclaim only in preemptible context and during
+		 * early boot. If not preemptible, the caller might hold
+		 * locks causing a deadlock in the allocator.
+		 *
+		 * If the reclaim flag is not set during early boot then
+		 * allocations, which happen before deferred page
+		 * initialization has completed, will fail.
+		 *
+		 * In preemptible context the flag is harmless and not a
+		 * performance issue as that's usually invoked from slow
+		 * path initialization context.
+		 */
+		if (preemptible() || system_state < SYSTEM_SCHEDULING)
+			gfp |= __GFP_KSWAPD_RECLAIM;
+
+		if (!kmem_alloc_batch(&head, obj_cache, gfp))
 			break;
 
 		guard(raw_spinlock_irqsave)(&pool_lock);
@@ -569,6 +593,10 @@ static void debug_objects_oom(void)
 	struct debug_bucket *db = obj_hash;
 	HLIST_HEAD(freelist);
 
+	/*
+	 * Please change Kconfig help text of DEBUG_OBJECTS_POOL_SIZE_SHIFT
+	 * when changed.
+	 */
 	pr_warn("Out of memory. ODEBUG disabled\n");
 
 	for (int i = 0; i < ODEBUG_HASH_SIZE; i++, db++) {

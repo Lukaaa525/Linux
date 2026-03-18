@@ -33,7 +33,6 @@
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 
-#include "i915_reg.h"
 #include "intel_atomic.h"
 #include "intel_backlight.h"
 #include "intel_connector.h"
@@ -1919,7 +1918,7 @@ void vlv_dsi_init(struct intel_display *display)
 	else
 		display->dsi.mmio_base = VLV_MIPI_BASE;
 
-	intel_dsi = kzalloc(sizeof(*intel_dsi), GFP_KERNEL);
+	intel_dsi = kzalloc_obj(*intel_dsi);
 	if (!intel_dsi)
 		return;
 

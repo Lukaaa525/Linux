@@ -134,11 +134,11 @@ static struct cache_head *sunrpc_cache_add_entry(struct cache_detail *detail,
 		return tmp;
 	}
 
+	cache_get(new);
 	hlist_add_head_rcu(&new->cache_list, head);
 	detail->entries++;
 	if (detail->nextcheck > new->expiry_time)
 		detail->nextcheck = new->expiry_time + 1;
-	cache_get(new);
 	spin_unlock(&detail->hash_lock);
 
 	if (freeme)
@@ -233,9 +233,9 @@ struct cache_head *sunrpc_cache_update(struct cache_detail *detail,
 
 	spin_lock(&detail->hash_lock);
 	cache_entry_update(detail, tmp, new);
-	hlist_add_head(&tmp->cache_list, &detail->hash_table[hash]);
-	detail->entries++;
 	cache_get(tmp);
+	hlist_add_head_rcu(&tmp->cache_list, &detail->hash_table[hash]);
+	detail->entries++;
 	cache_fresh_locked(tmp, new->expiry_time, detail);
 	cache_fresh_locked(old, 0, detail);
 	spin_unlock(&detail->hash_lock);
@@ -1038,7 +1038,7 @@ static int cache_open(struct inode *inode, struct file *filp,
 		return -EACCES;
 	nonseekable_open(inode, filp);
 	if (filp->f_mode & FMODE_READ) {
-		rp = kmalloc(sizeof(*rp), GFP_KERNEL);
+		rp = kmalloc_obj(*rp);
 		if (!rp) {
 			module_put(cd->owner);
 			return -ENOMEM;
@@ -1062,14 +1062,25 @@ static int cache_release(struct inode *inode, struct file *filp,
 	struct cache_reader *rp = filp->private_data;
 
 	if (rp) {
+		struct cache_request *rq = NULL;
+
 		spin_lock(&queue_lock);
 		if (rp->offset) {
 			struct cache_queue *cq;
-			for (cq= &rp->q; &cq->list != &cd->queue;
-			     cq = list_entry(cq->list.next, struct cache_queue, list))
+			for (cq = &rp->q; &cq->list != &cd->queue;
+			     cq = list_entry(cq->list.next,
+					     struct cache_queue, list))
 				if (!cq->reader) {
-					container_of(cq, struct cache_request, q)
-						->readers--;
+					struct cache_request *cr =
+						container_of(cq,
+						struct cache_request, q);
+					cr->readers--;
+					if (cr->readers == 0 &&
+					    !test_bit(CACHE_PENDING,
+						      &cr->item->flags)) {
+						list_del(&cr->q.list);
+						rq = cr;
+					}
 					break;
 				}
 			rp->offset = 0;
@@ -1077,9 +1088,14 @@ static int cache_release(struct inode *inode, struct file *filp,
 		list_del(&rp->q.list);
 		spin_unlock(&queue_lock);
 
+		if (rq) {
+			cache_put(rq->item, cd);
+			kfree(rq->buf);
+			kfree(rq);
+		}
+
 		filp->private_data = NULL;
 		kfree(rp);
-
 	}
 	if (filp->f_mode & FMODE_WRITE) {
 		atomic_dec(&cd->writers);
@@ -1225,7 +1241,7 @@ static int cache_pipe_upcall(struct cache_detail *detail, struct cache_head *h)
 	if (!buf)
 		return -EAGAIN;
 
-	crq = kmalloc(sizeof (*crq), GFP_KERNEL);
+	crq = kmalloc_obj(*crq);
 	if (!crq) {
 		kfree(buf);
 		return -EAGAIN;
@@ -1362,18 +1378,14 @@ static void *__cache_seq_start(struct seq_file *m, loff_t *pos)
 	hlist_for_each_entry_rcu(ch, &cd->hash_table[hash], cache_list)
 		if (!entry--)
 			return ch;
-	n &= ~((1LL<<32) - 1);
-	do {
-		hash++;
-		n += 1LL<<32;
-	} while(hash < cd->hash_size &&
-		hlist_empty(&cd->hash_table[hash]));
-	if (hash >= cd->hash_size)
-		return NULL;
-	*pos = n+1;
-	return hlist_entry_safe(rcu_dereference_raw(
+	ch = NULL;
+	while (!ch && ++hash < cd->hash_size)
+		ch = hlist_entry_safe(rcu_dereference(
 				hlist_first_rcu(&cd->hash_table[hash])),
 				struct cache_head, cache_list);
+
+	*pos = ((long long)hash << 32) + 1;
+	return ch;
 }
 
 static void *cache_seq_next(struct seq_file *m, void *p, loff_t *pos)
@@ -1382,29 +1394,29 @@ static void *cache_seq_next(struct seq_file *m, void *p, loff_t *pos)
 	int hash = (*pos >> 32);
 	struct cache_detail *cd = m->private;
 
-	if (p == SEQ_START_TOKEN)
+	if (p == SEQ_START_TOKEN) {
 		hash = 0;
-	else if (ch->cache_list.next == NULL) {
-		hash++;
-		*pos += 1LL<<32;
-	} else {
-		++*pos;
-		return hlist_entry_safe(rcu_dereference_raw(
+		ch = NULL;
+	}
+	while (hash < cd->hash_size) {
+		if (ch)
+			ch = hlist_entry_safe(
+				rcu_dereference(
 					hlist_next_rcu(&ch->cache_list)),
-					struct cache_head, cache_list);
-	}
-	*pos &= ~((1LL<<32) - 1);
-	while (hash < cd->hash_size &&
-	       hlist_empty(&cd->hash_table[hash])) {
-		hash++;
-		*pos += 1LL<<32;
-	}
-	if (hash >= cd->hash_size)
-		return NULL;
-	++*pos;
-	return hlist_entry_safe(rcu_dereference_raw(
-				hlist_first_rcu(&cd->hash_table[hash])),
 				struct cache_head, cache_list);
+		else
+			ch = hlist_entry_safe(
+				rcu_dereference(
+					hlist_first_rcu(&cd->hash_table[hash])),
+				struct cache_head, cache_list);
+		if (ch) {
+			++*pos;
+			return ch;
+		}
+		hash++;
+		*pos = (long long)hash << 32;
+	}
+	return NULL;
 }
 
 void *cache_seq_start_rcu(struct seq_file *m, loff_t *pos)
@@ -1745,8 +1757,7 @@ struct cache_detail *cache_create_net(const struct cache_detail *tmpl, struct ne
 	if (cd == NULL)
 		return ERR_PTR(-ENOMEM);
 
-	cd->hash_table = kcalloc(cd->hash_size, sizeof(struct hlist_head),
-				 GFP_KERNEL);
+	cd->hash_table = kzalloc_objs(struct hlist_head, cd->hash_size);
 	if (cd->hash_table == NULL) {
 		kfree(cd);
 		return ERR_PTR(-ENOMEM);
