@@ -12,6 +12,12 @@ import subprocess
 import sys
 from typing import Dict, Iterable, List, Literal, Optional, TypedDict
 
+def invoke_rustc(args: List[str]) -> str:
+    return subprocess.check_output(
+        [os.environ["RUSTC"]] + args,
+        stdin=subprocess.DEVNULL,
+    ).decode('utf-8').strip()
+
 def args_crates_cfgs(cfgs: List[str]) -> Dict[str, List[str]]:
     crates_cfgs = {}
     for cfg in cfgs:
@@ -19,6 +25,14 @@ def args_crates_cfgs(cfgs: List[str]) -> Dict[str, List[str]]:
         crates_cfgs[crate] = vals.split()
 
     return crates_cfgs
+
+def args_crates_envs(envs: List[str]) -> Dict[str, Dict[str, str]]:
+    crates_envs = {}
+    for env in envs:
+        crate, vals = env.split("=", 1)
+        crates_envs[crate] = dict(v.split("=", 1) for v in vals.split())
+
+    return crates_envs
 
 class Dependency(TypedDict):
     crate: int
@@ -55,6 +69,7 @@ def generate_crates(
     sysroot_src: pathlib.Path,
     external_src: Optional[pathlib.Path],
     cfgs: List[str],
+    envs: List[str],
     core_edition: str,
 ) -> List[Crate]:
     # Generate the configuration list.
@@ -68,6 +83,10 @@ def generate_crates(
     # Now fill the crates list.
     crates: List[Crate] = []
     crates_cfgs = args_crates_cfgs(cfgs)
+    crates_envs = args_crates_envs(envs)
+
+    def get_crate_name(path: pathlib.Path) -> str:
+        return invoke_rustc(["--print", "crate-name", str(path)])
 
     def build_crate(
         display_name: str,
@@ -83,6 +102,10 @@ def generate_crates(
             is_workspace_member if is_workspace_member is not None else True
         )
         edition = edition if edition is not None else "2021"
+        crate_env = {
+            "RUST_MODFILE": "This is only for rust-analyzer",
+            **crates_envs.get(display_name, {}),
+        }
         return {
             "display_name": display_name,
             "root_module": str(root_module),
@@ -90,9 +113,7 @@ def generate_crates(
             "deps": deps,
             "cfg": cfg,
             "edition": edition,
-            "env": {
-                "RUST_MODFILE": "This is only for rust-analyzer"
-            }
+            "env": crate_env,
         }
 
     def append_proc_macro_crate(
@@ -112,23 +133,15 @@ def generate_crates(
             is_workspace_member=is_workspace_member,
             edition=edition,
         )
-        proc_macro_dylib_name = (
-            subprocess.check_output(
-                [
-                    os.environ["RUSTC"],
-                    "--print",
-                    "file-names",
-                    "--crate-name",
-                    display_name,
-                    "--crate-type",
-                    "proc-macro",
-                    "-",
-                ],
-                stdin=subprocess.DEVNULL,
-            )
-            .decode("utf-8")
-            .strip()
-        )
+        proc_macro_dylib_name = invoke_rustc([
+            "--print",
+            "file-names",
+            "--crate-name",
+            display_name,
+            "--crate-type",
+            "proc-macro",
+            "-",
+        ])
         proc_macro_crate: ProcMacroCrate = {
             **crate,
             "is_proc_macro": True,
@@ -237,6 +250,13 @@ def generate_crates(
         "macros",
         srctree / "rust" / "macros" / "lib.rs",
         [std, proc_macro, proc_macro2, quote, syn],
+        cfg=generated_cfg,
+    )
+
+    zerocopy_derive = append_proc_macro_crate(
+        "zerocopy_derive",
+        srctree / "rust" / "zerocopy-derive" / "lib.rs",
+        [std, proc_macro, proc_macro2, quote, syn],
     )
 
     build_error = append_crate(
@@ -260,6 +280,12 @@ def generate_crates(
     ffi = append_crate(
         "ffi",
         srctree / "rust" / "ffi.rs",
+        [core, compiler_builtins],
+    )
+
+    zerocopy = append_crate(
+        "zerocopy",
+        srctree / "rust" / "zerocopy" / "src" / "lib.rs",
         [core, compiler_builtins],
     )
 
@@ -291,7 +317,7 @@ def generate_crates(
     bindings = append_crate_with_generated("bindings", [core, ffi, pin_init])
     uapi = append_crate_with_generated("uapi", [core, ffi, pin_init])
     kernel = append_crate_with_generated(
-        "kernel", [core, macros, build_error, pin_init, ffi, bindings, uapi]
+        "kernel", [core, macros, build_error, pin_init, ffi, bindings, uapi, zerocopy, zerocopy_derive]
     )
 
     scripts = srctree / "scripts"
@@ -324,18 +350,19 @@ def generate_crates(
     for folder in extra_dirs:
         for path in folder.rglob("*.rs"):
             logging.info("Checking %s", path)
-            name = path.stem
+            file_name = path.stem
 
             # Skip those that are not crate roots.
-            if not is_root_crate(path.parent / "Makefile", name) and \
-               not is_root_crate(path.parent / "Kbuild", name):
+            if not is_root_crate(path.parent / "Makefile", file_name) and \
+               not is_root_crate(path.parent / "Kbuild", file_name):
                 continue
 
-            logging.info("Adding %s", name)
+            crate_name = get_crate_name(path)
+            logging.info("Adding %s", crate_name)
             append_crate(
-                name,
+                crate_name,
                 path,
-                [core, kernel, pin_init],
+                [core, kernel, pin_init, zerocopy, zerocopy_derive],
                 cfg=generated_cfg,
             )
 
@@ -345,6 +372,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--verbose', '-v', action='store_true')
     parser.add_argument('--cfgs', action='append', default=[])
+    parser.add_argument('--envs', action='append', default=[])
     parser.add_argument("core_edition")
     parser.add_argument("srctree", type=pathlib.Path)
     parser.add_argument("objtree", type=pathlib.Path)
@@ -355,6 +383,7 @@ def main() -> None:
     class Args(argparse.Namespace):
         verbose: bool
         cfgs: List[str]
+        envs: List[str]
         srctree: pathlib.Path
         objtree: pathlib.Path
         sysroot: pathlib.Path
@@ -370,7 +399,7 @@ def main() -> None:
     )
 
     rust_project = {
-        "crates": generate_crates(args.srctree, args.objtree, args.sysroot_src, args.exttree, args.cfgs, args.core_edition),
+        "crates": generate_crates(args.srctree, args.objtree, args.sysroot_src, args.exttree, args.cfgs, args.envs, args.core_edition),
         "sysroot": str(args.sysroot),
     }
 

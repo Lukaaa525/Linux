@@ -44,6 +44,46 @@
 #define TIME_UNIT_OFFSET		0x10
 #define TIME_UNIT_MASK			GENMASK(19, 16)
 
+/* bitmasks for RAPL MSRs, used by primitive access functions */
+#define ENERGY_STATUS_MASK		GENMASK(31, 0)
+
+#define POWER_LIMIT1_MASK		GENMASK(14, 0)
+#define POWER_LIMIT1_ENABLE		BIT(15)
+#define POWER_LIMIT1_CLAMP		BIT(16)
+
+#define POWER_LIMIT2_MASK		GENMASK_ULL(46, 32)
+#define POWER_LIMIT2_ENABLE		BIT_ULL(47)
+#define POWER_LIMIT2_CLAMP		BIT_ULL(48)
+#define POWER_HIGH_LOCK			BIT_ULL(63)
+#define POWER_LOW_LOCK			BIT(31)
+
+#define POWER_LIMIT4_MASK		GENMASK(12, 0)
+
+#define TIME_WINDOW1_MASK		GENMASK_ULL(23, 17)
+#define TIME_WINDOW2_MASK		GENMASK_ULL(55, 49)
+
+#define POWER_INFO_MAX_MASK		GENMASK_ULL(46, 32)
+#define POWER_INFO_MIN_MASK		GENMASK_ULL(30, 16)
+#define POWER_INFO_MAX_TIME_WIN_MASK	GENMASK_ULL(53, 48)
+#define POWER_INFO_THERMAL_SPEC_MASK	GENMASK(14, 0)
+
+#define PERF_STATUS_THROTTLE_TIME_MASK	GENMASK(31, 0)
+#define PP_POLICY_MASK			GENMASK(4, 0)
+
+/*
+ * SPR has different layout for Psys Domain PowerLimit registers.
+ * There are 17 bits of PL1 and PL2 instead of 15 bits.
+ * The Enable bits and TimeWindow bits are also shifted as a result.
+ */
+#define PSYS_POWER_LIMIT1_MASK		GENMASK_ULL(16, 0)
+#define PSYS_POWER_LIMIT1_ENABLE	BIT(17)
+
+#define PSYS_POWER_LIMIT2_MASK		GENMASK_ULL(48, 32)
+#define PSYS_POWER_LIMIT2_ENABLE	BIT_ULL(49)
+
+#define PSYS_TIME_WINDOW1_MASK		GENMASK_ULL(25, 19)
+#define PSYS_TIME_WINDOW2_MASK		GENMASK_ULL(57, 51)
+
 /* Sideband MBI registers */
 #define IOSF_CPU_POWER_BUDGET_CTL_BYT	0x02
 #define IOSF_CPU_POWER_BUDGET_CTL_TNG	0xDF
@@ -176,33 +216,6 @@ static int rapl_msr_write_raw(int cpu, struct reg_action *ra)
 	return ra->err;
 }
 
-/* List of verified CPUs. */
-static const struct x86_cpu_id pl4_support_ids[] = {
-	X86_MATCH_VFM(INTEL_ICELAKE_L, NULL),
-	X86_MATCH_VFM(INTEL_TIGERLAKE_L, NULL),
-	X86_MATCH_VFM(INTEL_ALDERLAKE, NULL),
-	X86_MATCH_VFM(INTEL_ALDERLAKE_L, NULL),
-	X86_MATCH_VFM(INTEL_ATOM_GRACEMONT, NULL),
-	X86_MATCH_VFM(INTEL_RAPTORLAKE, NULL),
-	X86_MATCH_VFM(INTEL_RAPTORLAKE_P, NULL),
-	X86_MATCH_VFM(INTEL_METEORLAKE, NULL),
-	X86_MATCH_VFM(INTEL_METEORLAKE_L, NULL),
-	X86_MATCH_VFM(INTEL_ARROWLAKE_U, NULL),
-	X86_MATCH_VFM(INTEL_ARROWLAKE_H, NULL),
-	X86_MATCH_VFM(INTEL_PANTHERLAKE_L, NULL),
-	X86_MATCH_VFM(INTEL_WILDCATLAKE_L, NULL),
-	X86_MATCH_VFM(INTEL_NOVALAKE, NULL),
-	X86_MATCH_VFM(INTEL_NOVALAKE_L, NULL),
-	{}
-};
-
-/* List of MSR-based RAPL PMU support CPUs */
-static const struct x86_cpu_id pmu_support_ids[] = {
-	X86_MATCH_VFM(INTEL_PANTHERLAKE_L, NULL),
-	X86_MATCH_VFM(INTEL_WILDCATLAKE_L, NULL),
-	{}
-};
-
 static int rapl_check_unit_atom(struct rapl_domain *rd)
 {
 	struct reg_action ra;
@@ -268,6 +281,64 @@ static u64 rapl_compute_time_window_atom(struct rapl_domain *rd, u64 value,
 	return value ? value * rd->time_unit : rd->time_unit;
 }
 
+/* RAPL primitives for MSR I/F */
+static struct rapl_primitive_info rpi_msr[NR_RAPL_PRIMITIVES] = {
+	/* name, mask, shift, msr index, unit divisor */
+	[POWER_LIMIT1]		= PRIMITIVE_INFO_INIT(POWER_LIMIT1, POWER_LIMIT1_MASK, 0,
+						      RAPL_DOMAIN_REG_LIMIT, POWER_UNIT, 0),
+	[POWER_LIMIT2]		= PRIMITIVE_INFO_INIT(POWER_LIMIT2, POWER_LIMIT2_MASK, 32,
+						      RAPL_DOMAIN_REG_LIMIT, POWER_UNIT, 0),
+	[POWER_LIMIT4]		= PRIMITIVE_INFO_INIT(POWER_LIMIT4, POWER_LIMIT4_MASK, 0,
+						      RAPL_DOMAIN_REG_PL4, POWER_UNIT, 0),
+	[ENERGY_COUNTER]	= PRIMITIVE_INFO_INIT(ENERGY_COUNTER, ENERGY_STATUS_MASK, 0,
+						      RAPL_DOMAIN_REG_STATUS, ENERGY_UNIT, 0),
+	[FW_LOCK]		= PRIMITIVE_INFO_INIT(FW_LOCK, POWER_LOW_LOCK, 31,
+						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
+	[FW_HIGH_LOCK]		= PRIMITIVE_INFO_INIT(FW_LOCK, POWER_HIGH_LOCK, 63,
+						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
+	[PL1_ENABLE]		= PRIMITIVE_INFO_INIT(PL1_ENABLE, POWER_LIMIT1_ENABLE, 15,
+						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
+	[PL1_CLAMP]		= PRIMITIVE_INFO_INIT(PL1_CLAMP, POWER_LIMIT1_CLAMP, 16,
+						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
+	[PL2_ENABLE]		= PRIMITIVE_INFO_INIT(PL2_ENABLE, POWER_LIMIT2_ENABLE, 47,
+						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
+	[PL2_CLAMP]		= PRIMITIVE_INFO_INIT(PL2_CLAMP, POWER_LIMIT2_CLAMP, 48,
+						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
+	[TIME_WINDOW1]		= PRIMITIVE_INFO_INIT(TIME_WINDOW1, TIME_WINDOW1_MASK, 17,
+						      RAPL_DOMAIN_REG_LIMIT, TIME_UNIT, 0),
+	[TIME_WINDOW2]		= PRIMITIVE_INFO_INIT(TIME_WINDOW2, TIME_WINDOW2_MASK, 49,
+						      RAPL_DOMAIN_REG_LIMIT, TIME_UNIT, 0),
+	[THERMAL_SPEC_POWER]	= PRIMITIVE_INFO_INIT(THERMAL_SPEC_POWER,
+						      POWER_INFO_THERMAL_SPEC_MASK, 0,
+						      RAPL_DOMAIN_REG_INFO, POWER_UNIT, 0),
+	[MAX_POWER]		= PRIMITIVE_INFO_INIT(MAX_POWER, POWER_INFO_MAX_MASK, 32,
+						      RAPL_DOMAIN_REG_INFO, POWER_UNIT, 0),
+	[MIN_POWER]		= PRIMITIVE_INFO_INIT(MIN_POWER, POWER_INFO_MIN_MASK, 16,
+						      RAPL_DOMAIN_REG_INFO, POWER_UNIT, 0),
+	[MAX_TIME_WINDOW]	= PRIMITIVE_INFO_INIT(MAX_TIME_WINDOW,
+						      POWER_INFO_MAX_TIME_WIN_MASK, 48,
+						      RAPL_DOMAIN_REG_INFO, TIME_UNIT, 0),
+	[THROTTLED_TIME]	= PRIMITIVE_INFO_INIT(THROTTLED_TIME,
+						      PERF_STATUS_THROTTLE_TIME_MASK, 0,
+						      RAPL_DOMAIN_REG_PERF, TIME_UNIT, 0),
+	[PRIORITY_LEVEL]	= PRIMITIVE_INFO_INIT(PRIORITY_LEVEL, PP_POLICY_MASK, 0,
+						      RAPL_DOMAIN_REG_POLICY, ARBITRARY_UNIT, 0),
+	[PSYS_POWER_LIMIT1]	= PRIMITIVE_INFO_INIT(PSYS_POWER_LIMIT1, PSYS_POWER_LIMIT1_MASK, 0,
+						      RAPL_DOMAIN_REG_LIMIT, POWER_UNIT, 0),
+	[PSYS_POWER_LIMIT2]	= PRIMITIVE_INFO_INIT(PSYS_POWER_LIMIT2, PSYS_POWER_LIMIT2_MASK,
+						      32, RAPL_DOMAIN_REG_LIMIT, POWER_UNIT, 0),
+	[PSYS_PL1_ENABLE]	= PRIMITIVE_INFO_INIT(PSYS_PL1_ENABLE, PSYS_POWER_LIMIT1_ENABLE,
+						      17, RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT,
+						      0),
+	[PSYS_PL2_ENABLE]	= PRIMITIVE_INFO_INIT(PSYS_PL2_ENABLE, PSYS_POWER_LIMIT2_ENABLE,
+						      49, RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT,
+						      0),
+	[PSYS_TIME_WINDOW1]	= PRIMITIVE_INFO_INIT(PSYS_TIME_WINDOW1, PSYS_TIME_WINDOW1_MASK,
+						      19, RAPL_DOMAIN_REG_LIMIT, TIME_UNIT, 0),
+	[PSYS_TIME_WINDOW2]	= PRIMITIVE_INFO_INIT(PSYS_TIME_WINDOW2, PSYS_TIME_WINDOW2_MASK,
+						      51, RAPL_DOMAIN_REG_LIMIT, TIME_UNIT, 0),
+};
+
 static const struct rapl_defaults rapl_defaults_core = {
 	.floor_freq_reg_addr = 0,
 	.check_unit = rapl_default_check_unit,
@@ -322,6 +393,23 @@ static const struct rapl_defaults rapl_defaults_amd = {
 	.check_unit = rapl_default_check_unit,
 };
 
+static const struct rapl_defaults rapl_defaults_core_pl4 = {
+	.floor_freq_reg_addr = 0,
+	.check_unit = rapl_default_check_unit,
+	.set_floor_freq = rapl_default_set_floor_freq,
+	.compute_time_window = rapl_default_compute_time_window,
+	.msr_pl4_support = 1,
+};
+
+static const struct rapl_defaults rapl_defaults_core_pl4_pmu = {
+	.floor_freq_reg_addr = 0,
+	.check_unit = rapl_default_check_unit,
+	.set_floor_freq = rapl_default_set_floor_freq,
+	.compute_time_window = rapl_default_compute_time_window,
+	.msr_pl4_support = 1,
+	.msr_pmu_support = 1,
+};
+
 static const struct x86_cpu_id rapl_ids[]  = {
 	X86_MATCH_VFM(INTEL_SANDYBRIDGE,		&rapl_defaults_core),
 	X86_MATCH_VFM(INTEL_SANDYBRIDGE_X,		&rapl_defaults_core),
@@ -345,35 +433,35 @@ static const struct x86_cpu_id rapl_ids[]  = {
 	X86_MATCH_VFM(INTEL_KABYLAKE_L,			&rapl_defaults_core),
 	X86_MATCH_VFM(INTEL_KABYLAKE,			&rapl_defaults_core),
 	X86_MATCH_VFM(INTEL_CANNONLAKE_L,		&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_ICELAKE_L,			&rapl_defaults_core),
+	X86_MATCH_VFM(INTEL_ICELAKE_L,			&rapl_defaults_core_pl4),
 	X86_MATCH_VFM(INTEL_ICELAKE,			&rapl_defaults_core),
 	X86_MATCH_VFM(INTEL_ICELAKE_NNPI,		&rapl_defaults_core),
 	X86_MATCH_VFM(INTEL_ICELAKE_X,			&rapl_defaults_hsw_server),
 	X86_MATCH_VFM(INTEL_ICELAKE_D,			&rapl_defaults_hsw_server),
 	X86_MATCH_VFM(INTEL_COMETLAKE_L,		&rapl_defaults_core),
 	X86_MATCH_VFM(INTEL_COMETLAKE,			&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_TIGERLAKE_L,		&rapl_defaults_core),
+	X86_MATCH_VFM(INTEL_TIGERLAKE_L,		&rapl_defaults_core_pl4),
 	X86_MATCH_VFM(INTEL_TIGERLAKE,			&rapl_defaults_core),
 	X86_MATCH_VFM(INTEL_ROCKETLAKE,			&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_ALDERLAKE,			&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_ALDERLAKE_L,		&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_ATOM_GRACEMONT,		&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_RAPTORLAKE,			&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_RAPTORLAKE_P,		&rapl_defaults_core),
+	X86_MATCH_VFM(INTEL_ALDERLAKE,			&rapl_defaults_core_pl4),
+	X86_MATCH_VFM(INTEL_ALDERLAKE_L,		&rapl_defaults_core_pl4),
+	X86_MATCH_VFM(INTEL_ATOM_GRACEMONT,		&rapl_defaults_core_pl4),
+	X86_MATCH_VFM(INTEL_RAPTORLAKE,			&rapl_defaults_core_pl4),
+	X86_MATCH_VFM(INTEL_RAPTORLAKE_P,		&rapl_defaults_core_pl4),
 	X86_MATCH_VFM(INTEL_RAPTORLAKE_S,		&rapl_defaults_core),
 	X86_MATCH_VFM(INTEL_BARTLETTLAKE,		&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_METEORLAKE,			&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_METEORLAKE_L,		&rapl_defaults_core),
+	X86_MATCH_VFM(INTEL_METEORLAKE,			&rapl_defaults_core_pl4),
+	X86_MATCH_VFM(INTEL_METEORLAKE_L,		&rapl_defaults_core_pl4),
 	X86_MATCH_VFM(INTEL_SAPPHIRERAPIDS_X,		&rapl_defaults_spr_server),
 	X86_MATCH_VFM(INTEL_EMERALDRAPIDS_X,		&rapl_defaults_spr_server),
 	X86_MATCH_VFM(INTEL_LUNARLAKE_M,		&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_PANTHERLAKE_L,		&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_WILDCATLAKE_L,		&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_NOVALAKE,			&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_NOVALAKE_L,			&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_ARROWLAKE_H,		&rapl_defaults_core),
+	X86_MATCH_VFM(INTEL_PANTHERLAKE_L,		&rapl_defaults_core_pl4_pmu),
+	X86_MATCH_VFM(INTEL_WILDCATLAKE_L,		&rapl_defaults_core_pl4_pmu),
+	X86_MATCH_VFM(INTEL_NOVALAKE,			&rapl_defaults_core_pl4),
+	X86_MATCH_VFM(INTEL_NOVALAKE_L,			&rapl_defaults_core_pl4),
+	X86_MATCH_VFM(INTEL_ARROWLAKE_H,		&rapl_defaults_core_pl4),
 	X86_MATCH_VFM(INTEL_ARROWLAKE,			&rapl_defaults_core),
-	X86_MATCH_VFM(INTEL_ARROWLAKE_U,		&rapl_defaults_core),
+	X86_MATCH_VFM(INTEL_ARROWLAKE_U,		&rapl_defaults_core_pl4),
 	X86_MATCH_VFM(INTEL_LAKEFIELD,			&rapl_defaults_core),
 
 	X86_MATCH_VFM(INTEL_ATOM_SILVERMONT,		&rapl_defaults_byt),
@@ -400,7 +488,6 @@ MODULE_DEVICE_TABLE(x86cpu, rapl_ids);
 
 static int rapl_msr_probe(struct platform_device *pdev)
 {
-	const struct x86_cpu_id *id = x86_match_cpu(pl4_support_ids);
 	int ret;
 
 	switch (boot_cpu_data.x86_vendor) {
@@ -418,17 +505,18 @@ static int rapl_msr_probe(struct platform_device *pdev)
 	rapl_msr_priv->read_raw = rapl_msr_read_raw;
 	rapl_msr_priv->write_raw = rapl_msr_write_raw;
 	rapl_msr_priv->defaults = (const struct rapl_defaults *)pdev->dev.platform_data;
+	rapl_msr_priv->rpi = rpi_msr;
 
-	if (id) {
+	if (rapl_msr_priv->defaults->msr_pl4_support) {
 		rapl_msr_priv->limits[RAPL_DOMAIN_PACKAGE] |= BIT(POWER_LIMIT4);
 		rapl_msr_priv->regs[RAPL_DOMAIN_PACKAGE][RAPL_DOMAIN_REG_PL4].msr =
 			MSR_VR_CURRENT_CONFIG;
-		pr_info("PL4 support detected.\n");
+		pr_info("PL4 support detected (updated).\n");
 	}
 
-	if (x86_match_cpu(pmu_support_ids)) {
+	if (rapl_msr_priv->defaults->msr_pmu_support) {
 		rapl_msr_pmu = true;
-		pr_info("MSR-based RAPL PMU support enabled\n");
+		pr_info("MSR-based RAPL PMU support enabled (updated)\n");
 	}
 
 	rapl_msr_priv->control_type = powercap_register_control_type(NULL, "intel-rapl", NULL);

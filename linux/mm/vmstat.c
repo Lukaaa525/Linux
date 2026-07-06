@@ -28,7 +28,6 @@
 #include <linux/mm_inline.h>
 #include <linux/page_owner.h>
 #include <linux/sched/isolation.h>
-#include <linux/mmzone_lock.h>
 
 #include "internal.h"
 
@@ -1296,6 +1295,8 @@ const char * const vmstat_text[] = {
 #endif
 	[I(NR_BALLOON_PAGES)]			= "nr_balloon_pages",
 	[I(NR_KERNEL_FILE_PAGES)]		= "nr_kernel_file_pages",
+	[I(NR_GPU_ACTIVE)]			= "nr_gpu_active",
+	[I(NR_GPU_RECLAIM)]			= "nr_gpu_reclaim",
 #undef I
 
 	/* system-wide enum vm_stat_item counters */
@@ -1537,10 +1538,10 @@ static void walk_zones_in_node(struct seq_file *m, pg_data_t *pgdat,
 			continue;
 
 		if (!nolock)
-			zone_lock_irqsave(zone, flags);
+			spin_lock_irqsave(&zone->lock, flags);
 		print(m, pgdat, zone);
 		if (!nolock)
-			zone_unlock_irqrestore(zone, flags);
+			spin_unlock_irqrestore(&zone->lock, flags);
 	}
 }
 #endif
@@ -1567,7 +1568,7 @@ static void frag_show_print(struct seq_file *m, pg_data_t *pgdat,
 static int frag_show(struct seq_file *m, void *arg)
 {
 	pg_data_t *pgdat = (pg_data_t *)arg;
-	walk_zones_in_node(m, pgdat, true, false, frag_show_print);
+	walk_zones_in_node(m, pgdat, true, true, frag_show_print);
 	return 0;
 }
 
@@ -1605,9 +1606,9 @@ static void pagetypeinfo_showfree_print(struct seq_file *m,
 				}
 			}
 			seq_printf(m, "%s%6lu ", overflow ? ">" : "", freecount);
-			zone_unlock_irq(zone);
+			spin_unlock_irq(&zone->lock);
 			cond_resched();
-			zone_lock_irq(zone);
+			spin_lock_irq(&zone->lock);
 		}
 		seq_putc(m, '\n');
 	}
@@ -2140,7 +2141,7 @@ static void vmstat_shepherd(struct work_struct *w)
 			if (cpu_is_isolated(cpu))
 				continue;
 
-			if (!delayed_work_pending(dw) && need_update(cpu))
+			if (!work_busy(&dw->work) && need_update(cpu))
 				queue_delayed_work_on(cpu, mm_percpu_wq, dw, 0);
 		}
 

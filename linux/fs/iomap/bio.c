@@ -9,6 +9,9 @@
 #include "internal.h"
 #include "trace.h"
 
+static DEFINE_SPINLOCK(failed_read_lock);
+static struct bio_list failed_read_list = BIO_EMPTY_LIST;
+
 static u32 __iomap_read_end_io(struct bio *bio, int error)
 {
 	struct folio_iter fi;
@@ -24,9 +27,50 @@ static u32 __iomap_read_end_io(struct bio *bio, int error)
 	return folio_count;
 }
 
+static void
+iomap_fail_reads(
+	struct work_struct	*work)
+{
+	struct bio		*bio;
+	struct bio_list		tmp = BIO_EMPTY_LIST;
+	unsigned long		flags;
+
+	spin_lock_irqsave(&failed_read_lock, flags);
+	bio_list_merge_init(&tmp, &failed_read_list);
+	spin_unlock_irqrestore(&failed_read_lock, flags);
+
+	while ((bio = bio_list_pop(&tmp)) != NULL) {
+		__iomap_read_end_io(bio, blk_status_to_errno(bio->bi_status));
+		cond_resched();
+	}
+}
+
+static DECLARE_WORK(failed_read_work, iomap_fail_reads);
+
+static void iomap_fail_buffered_read(struct bio *bio)
+{
+	unsigned long flags;
+
+	/*
+	 * Bounce I/O errors to a workqueue to avoid nested i_lock acquisitions
+	 * in the fserror code.  The caller no longer owns the bio reference
+	 * after the spinlock drops.
+	 */
+	spin_lock_irqsave(&failed_read_lock, flags);
+	if (bio_list_empty(&failed_read_list))
+		WARN_ON_ONCE(!schedule_work(&failed_read_work));
+	bio_list_add(&failed_read_list, bio);
+	spin_unlock_irqrestore(&failed_read_lock, flags);
+}
+
 static void iomap_read_end_io(struct bio *bio)
 {
-	__iomap_read_end_io(bio, blk_status_to_errno(bio->bi_status));
+	if (bio->bi_status) {
+		iomap_fail_buffered_read(bio);
+		return;
+	}
+
+	__iomap_read_end_io(bio, 0);
 }
 
 u32 iomap_finish_ioend_buffered_read(struct iomap_ioend *ioend)
@@ -34,14 +78,24 @@ u32 iomap_finish_ioend_buffered_read(struct iomap_ioend *ioend)
 	return __iomap_read_end_io(&ioend->io_bio, ioend->io_error);
 }
 
-static void iomap_bio_submit_read(const struct iomap_iter *iter,
-		struct iomap_read_folio_ctx *ctx)
+void iomap_bio_submit_read_endio(const struct iomap_iter *iter,
+		struct iomap_read_folio_ctx *ctx, bio_end_io_t end_io)
 {
 	struct bio *bio = ctx->read_ctx;
 
+	bio->bi_end_io = end_io;
 	if (iter->iomap.flags & IOMAP_F_INTEGRITY)
 		fs_bio_integrity_alloc(bio);
 	submit_bio(bio);
+
+	ctx->read_ctx = NULL;
+}
+EXPORT_SYMBOL_GPL(iomap_bio_submit_read_endio);
+
+static void iomap_bio_submit_read(const struct iomap_iter *iter,
+		struct iomap_read_folio_ctx *ctx)
+{
+	return iomap_bio_submit_read_endio(iter, ctx, iomap_read_end_io);
 }
 
 static struct bio_set *iomap_read_bio_set(struct iomap_read_folio_ctx *ctx)
@@ -83,7 +137,6 @@ static void iomap_read_alloc_bio(const struct iomap_iter *iter,
 	if (ctx->rac)
 		bio->bi_opf |= REQ_RAHEAD;
 	bio->bi_iter.bi_sector = iomap_sector(iomap, iter->pos);
-	bio->bi_end_io = iomap_read_end_io;
 	bio_add_folio_nofail(bio, folio, plen,
 			offset_in_folio(folio, iter->pos));
 	ctx->read_ctx = bio;

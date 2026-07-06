@@ -167,8 +167,6 @@ ieee80211_ibss_build_presp(struct ieee80211_sub_if_data *sdata,
 
 	/* add HT capability and information IEs */
 	if (chandef->width != NL80211_CHAN_WIDTH_20_NOHT &&
-	    chandef->width != NL80211_CHAN_WIDTH_5 &&
-	    chandef->width != NL80211_CHAN_WIDTH_10 &&
 	    sband->ht_cap.ht_supported) {
 		struct ieee80211_sta_ht_cap ht_cap;
 
@@ -259,9 +257,7 @@ static void __ieee80211_sta_join_ibss(struct ieee80211_sub_if_data *sdata,
 	chan = chanreq.oper.chan;
 	if (!cfg80211_reg_can_beacon(local->hw.wiphy, &chanreq.oper,
 				     NL80211_IFTYPE_ADHOC)) {
-		if (chanreq.oper.width == NL80211_CHAN_WIDTH_5 ||
-		    chanreq.oper.width == NL80211_CHAN_WIDTH_10 ||
-		    chanreq.oper.width == NL80211_CHAN_WIDTH_20_NOHT ||
+		if (chanreq.oper.width == NL80211_CHAN_WIDTH_20_NOHT ||
 		    chanreq.oper.width == NL80211_CHAN_WIDTH_20) {
 			sdata_info(sdata,
 				   "Failed to join IBSS, beacons forbidden\n");
@@ -405,12 +401,6 @@ static void ieee80211_sta_join_ibss(struct ieee80211_sub_if_data *sdata,
 		chan_type = cfg80211_get_chandef_type(&sdata->u.ibss.chandef);
 		cfg80211_chandef_create(&chandef, cbss->channel, chan_type);
 		break;
-	case NL80211_CHAN_WIDTH_5:
-	case NL80211_CHAN_WIDTH_10:
-		cfg80211_chandef_create(&chandef, cbss->channel,
-					NL80211_CHAN_NO_HT);
-		chandef.width = sdata->u.ibss.chandef.width;
-		break;
 	case NL80211_CHAN_WIDTH_80:
 	case NL80211_CHAN_WIDTH_80P80:
 	case NL80211_CHAN_WIDTH_160:
@@ -552,6 +542,9 @@ static struct sta_info *ieee80211_ibss_finish_sta(struct sta_info *sta)
 	u8 addr[ETH_ALEN];
 
 	memcpy(addr, sta->sta.addr, ETH_ALEN);
+
+	ieee80211_sta_init_nss_bw_capa(&sta->deflink,
+				       &sdata->deflink.conf->chanreq.oper);
 
 	ibss_dbg(sdata, "Adding new IBSS station %pM\n", addr);
 
@@ -759,8 +752,6 @@ ieee80211_ibss_process_chanswitch(struct ieee80211_sub_if_data *sdata,
 	lockdep_assert_wiphy(sdata->local->hw.wiphy);
 
 	switch (ifibss->chandef.width) {
-	case NL80211_CHAN_WIDTH_5:
-	case NL80211_CHAN_WIDTH_10:
 	case NL80211_CHAN_WIDTH_20_NOHT:
 		conn.mode = IEEE80211_CONN_MODE_LEGACY;
 		fallthrough;
@@ -807,19 +798,6 @@ ieee80211_ibss_process_chanswitch(struct ieee80211_sub_if_data *sdata,
 		ch_type = cfg80211_get_chandef_type(&ifibss->chandef);
 		cfg80211_chandef_create(&params.chandef, params.chandef.chan,
 					ch_type);
-		break;
-	case NL80211_CHAN_WIDTH_5:
-	case NL80211_CHAN_WIDTH_10:
-		if (params.chandef.width != ifibss->chandef.width) {
-			sdata_info(sdata,
-				   "IBSS %pM received channel switch from incompatible channel width (%d MHz, width:%d, CF1/2: %d/%d MHz), disconnecting\n",
-				   ifibss->bssid,
-				   params.chandef.chan->center_freq,
-				   params.chandef.width,
-				   params.chandef.center_freq1,
-				   params.chandef.center_freq2);
-			goto disconnect;
-		}
 		break;
 	default:
 		/* should not happen, conn_flags should prevent VHT modes. */
@@ -1002,9 +980,7 @@ static void ieee80211_update_sta_info(struct ieee80211_sub_if_data *sdata,
 	}
 
 	if (sta && elems->ht_operation && elems->ht_cap_elem &&
-	    sdata->u.ibss.chandef.width != NL80211_CHAN_WIDTH_20_NOHT &&
-	    sdata->u.ibss.chandef.width != NL80211_CHAN_WIDTH_5 &&
-	    sdata->u.ibss.chandef.width != NL80211_CHAN_WIDTH_10) {
+	    sdata->u.ibss.chandef.width != NL80211_CHAN_WIDTH_20_NOHT) {
 		/* we both use HT */
 		struct ieee80211_ht_cap htcap_ie;
 		struct cfg80211_chan_def chandef;
@@ -1014,7 +990,8 @@ static void ieee80211_update_sta_info(struct ieee80211_sub_if_data *sdata,
 		ieee80211_chandef_ht_oper(elems->ht_operation, &chandef);
 
 		memcpy(&htcap_ie, elems->ht_cap_elem, sizeof(htcap_ie));
-		rates_updated |= ieee80211_ht_cap_ie_to_sta_ht_cap(sdata, sband,
+		rates_updated |= ieee80211_ht_cap_ie_to_sta_ht_cap(sdata,
+								   &sband->ht_cap,
 								   &htcap_ie,
 								   &sta->deflink);
 
@@ -1033,6 +1010,7 @@ static void ieee80211_update_sta_info(struct ieee80211_sub_if_data *sdata,
 						   &chandef);
 			memcpy(&cap_ie, elems->vht_cap_elem, sizeof(cap_ie));
 			ieee80211_vht_cap_ie_to_sta_vht_cap(sdata, sband,
+							    &sband->vht_cap,
 							    &cap_ie, NULL,
 							    &sta->deflink);
 			if (memcmp(&cap, &sta->sta.deflink.vht_cap, sizeof(cap)))
@@ -1125,7 +1103,7 @@ static void ieee80211_rx_bss_info(struct ieee80211_sub_if_data *sdata,
 	if (ieee80211_have_rx_timestamp(rx_status)) {
 		/* time when timestamp field was received */
 		rx_timestamp =
-			ieee80211_calculate_rx_timestamp(local, rx_status,
+			ieee80211_calculate_rx_timestamp(&local->hw, rx_status,
 							 len + FCS_LEN, 24);
 	} else {
 		/*

@@ -131,8 +131,9 @@ struct rcu_work {
 enum wq_affn_scope {
 	WQ_AFFN_DFL,			/* use system default */
 	WQ_AFFN_CPU,			/* one pod per CPU */
-	WQ_AFFN_SMT,			/* one pod poer SMT */
+	WQ_AFFN_SMT,			/* one pod per SMT */
 	WQ_AFFN_CACHE,			/* one pod per LLC */
+	WQ_AFFN_CACHE_SHARD,		/* synthetic sub-LLC shards */
 	WQ_AFFN_NUMA,			/* one pod per NUMA node */
 	WQ_AFFN_SYSTEM,			/* one pod across the whole system */
 
@@ -408,6 +409,7 @@ enum wq_flags {
 	__WQ_DRAINING		= 1 << 16, /* internal: workqueue is draining */
 	__WQ_ORDERED		= 1 << 17, /* internal: workqueue is ordered */
 	__WQ_LEGACY		= 1 << 18, /* internal: create*_workqueue() */
+	__WQ_DEPRECATED		= 1 << 19, /* internal: workqueue is deprecated */
 
 	/* BH wq only allows the following flags */
 	__WQ_BH_ALLOWS		= WQ_BH | WQ_HIGHPRI | WQ_PERCPU,
@@ -533,8 +535,10 @@ alloc_workqueue_noprof(const char *fmt, unsigned int flags, int max_active, ...)
  * Pointer to the allocated workqueue on success, %NULL on failure.
  */
 __printf(2, 5) struct workqueue_struct *
-devm_alloc_workqueue(struct device *dev, const char *fmt, unsigned int flags,
-		     int max_active, ...);
+devm_alloc_workqueue_noprof(struct device *dev, const char *fmt,
+			    unsigned int flags, int max_active, ...);
+#define devm_alloc_workqueue(...)	\
+	alloc_hooks(devm_alloc_workqueue_noprof(__VA_ARGS__))
 
 #ifdef CONFIG_LOCKDEP
 /**

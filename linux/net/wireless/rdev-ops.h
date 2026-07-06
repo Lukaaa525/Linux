@@ -736,12 +736,13 @@ static inline int
 rdev_remain_on_channel(struct cfg80211_registered_device *rdev,
 		       struct wireless_dev *wdev,
 		       struct ieee80211_channel *chan,
-		       unsigned int duration, u64 *cookie)
+		       unsigned int duration, u64 *cookie, const u8 *rx_addr)
 {
 	int ret;
-	trace_rdev_remain_on_channel(&rdev->wiphy, wdev, chan, duration);
+	trace_rdev_remain_on_channel(&rdev->wiphy, wdev, chan, duration,
+				     rx_addr);
 	ret = rdev->ops->remain_on_channel(&rdev->wiphy, wdev, chan,
-					   duration, cookie);
+					   duration, cookie, rx_addr);
 	trace_rdev_return_int_cookie(&rdev->wiphy, ret, *cookie);
 	return ret;
 }
@@ -1058,6 +1059,57 @@ rdev_nan_change_conf(struct cfg80211_registered_device *rdev,
 		ret = -EOPNOTSUPP;
 	trace_rdev_return_int(&rdev->wiphy, ret);
 	return ret;
+}
+
+static inline int
+rdev_nan_set_local_sched(struct cfg80211_registered_device *rdev,
+			 struct wireless_dev *wdev,
+			 struct cfg80211_nan_local_sched *sched)
+{
+	int ret;
+
+	trace_rdev_nan_set_local_sched(&rdev->wiphy, wdev, sched);
+	if (rdev->ops->nan_set_local_sched)
+		ret = rdev->ops->nan_set_local_sched(&rdev->wiphy, wdev, sched);
+	else
+		ret = -EOPNOTSUPP;
+	trace_rdev_return_int(&rdev->wiphy, ret);
+	return ret;
+}
+
+static inline int
+rdev_nan_set_peer_sched(struct cfg80211_registered_device *rdev,
+			struct wireless_dev *wdev,
+			struct cfg80211_nan_peer_sched *sched)
+{
+	int ret;
+
+	trace_rdev_nan_set_peer_sched(&rdev->wiphy, wdev, sched);
+	if (rdev->ops->nan_set_peer_sched)
+		ret = rdev->ops->nan_set_peer_sched(&rdev->wiphy, wdev, sched);
+	else
+		ret = -EOPNOTSUPP;
+	trace_rdev_return_int(&rdev->wiphy, ret);
+	return ret;
+}
+
+static inline int rdev_start_pd(struct cfg80211_registered_device *rdev,
+				struct wireless_dev *wdev)
+{
+	int ret;
+
+	trace_rdev_start_pd(&rdev->wiphy, wdev);
+	ret = rdev->ops->start_pd(&rdev->wiphy, wdev);
+	trace_rdev_return_int(&rdev->wiphy, ret);
+	return ret;
+}
+
+static inline void rdev_stop_pd(struct cfg80211_registered_device *rdev,
+				struct wireless_dev *wdev)
+{
+	trace_rdev_stop_pd(&rdev->wiphy, wdev);
+	rdev->ops->stop_pd(&rdev->wiphy, wdev);
+	trace_rdev_return_void(&rdev->wiphy);
 }
 
 static inline int rdev_set_mac_acl(struct cfg80211_registered_device *rdev,

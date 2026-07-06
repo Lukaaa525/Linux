@@ -818,8 +818,6 @@
 };
 
 &ipa {
-	qcom,gsi-loader = "self";
-	memory-region = <&ipa_fw_mem>;
 	firmware-name = "qcom/sm8550/ipa_fws.mbn";
 	status = "okay";
 };
@@ -870,8 +868,8 @@
 		compatible = "visionox,vtdr6130";
 		reg = <0>;
 
-		pinctrl-0 = <&sde_dsi_active>, <&sde_te_active>;
-		pinctrl-1 = <&sde_dsi_suspend>, <&sde_te_suspend>;
+		pinctrl-0 = <&sde_dsi_active>, <&sde_te>;
+		pinctrl-1 = <&sde_dsi_suspend>, <&sde_te>;
 		pinctrl-names = "default", "sleep";
 
 		vci-supply = <&vreg_l13b_3p0>;
@@ -912,7 +910,7 @@
 	status = "okay";
 };
 
-&pcieport0 {
+&pcie0_port0 {
 	wifi@0 {
 		compatible = "pci17cb,1107";
 		reg = <0x10000 0x0 0x0 0x0 0x0>;
@@ -1179,14 +1177,7 @@
 		bias-pull-down;
 	};
 
-	sde_te_active: sde-te-active-state {
-		pins = "gpio86";
-		function = "mdp_vsync";
-		drive-strength = <2>;
-		bias-pull-down;
-	};
-
-	sde_te_suspend: sde-te-suspend-state {
+	sde_te: sde-te-state {
 		pins = "gpio86";
 		function = "mdp_vsync";
 		drive-strength = <2>;

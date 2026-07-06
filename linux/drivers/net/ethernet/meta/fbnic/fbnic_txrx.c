@@ -194,15 +194,17 @@ static bool fbnic_tx_tstamp(struct sk_buff *skb)
 
 static bool
 fbnic_tx_lso(struct fbnic_ring *ring, struct sk_buff *skb,
-	     struct skb_shared_info *shinfo, __le64 *meta,
-	     unsigned int *l2len, unsigned int *i3len)
+	     __le64 *meta, unsigned int *l2len, unsigned int *i3len)
 {
 	unsigned int l3_type, l4_type, l4len, hdrlen;
+	struct skb_shared_info *shinfo;
 	unsigned char *l4hdr;
 	__be16 payload_len;
 
 	if (unlikely(skb_cow_head(skb, 0)))
 		return true;
+
+	shinfo = skb_shinfo(skb);
 
 	if (shinfo->gso_type & SKB_GSO_PARTIAL) {
 		l3_type = FBNIC_TWD_L3_TYPE_OTHER;
@@ -258,7 +260,6 @@ fbnic_tx_lso(struct fbnic_ring *ring, struct sk_buff *skb,
 static bool
 fbnic_tx_offloads(struct fbnic_ring *ring, struct sk_buff *skb, __le64 *meta)
 {
-	struct skb_shared_info *shinfo = skb_shinfo(skb);
 	unsigned int l2len, i3len;
 
 	if (fbnic_tx_tstamp(skb))
@@ -273,8 +274,8 @@ fbnic_tx_offloads(struct fbnic_ring *ring, struct sk_buff *skb, __le64 *meta)
 	*meta |= cpu_to_le64(FIELD_PREP(FBNIC_TWD_CSUM_OFFSET_MASK,
 					skb->csum_offset / 2));
 
-	if (shinfo->gso_size) {
-		if (fbnic_tx_lso(ring, skb, shinfo, meta, &l2len, &i3len))
+	if (skb_is_gso(skb)) {
+		if (fbnic_tx_lso(ring, skb, meta, &l2len, &i3len))
 			return true;
 	} else {
 		*meta |= cpu_to_le64(FBNIC_TWD_FLAG_REQ_CSO);
@@ -927,7 +928,7 @@ static void fbnic_fill_bdq(struct fbnic_ring *bdq)
 		/* Force DMA writes to flush before writing to tail */
 		dma_wmb();
 
-		writel(i, bdq->doorbell);
+		writel(i * FBNIC_BD_FRAG_COUNT, bdq->doorbell);
 	}
 }
 
@@ -2564,7 +2565,7 @@ static void fbnic_enable_bdq(struct fbnic_ring *hpq, struct fbnic_ring *ppq)
 	hpq->tail = 0;
 	hpq->head = 0;
 
-	log_size = fls(hpq->size_mask);
+	log_size = fls(hpq->size_mask) + ilog2(FBNIC_BD_FRAG_COUNT);
 
 	/* Store descriptor ring address and size */
 	fbnic_ring_wr32(hpq, FBNIC_QUEUE_BDQ_HPQ_BAL, lower_32_bits(hpq->dma));
@@ -2576,7 +2577,7 @@ static void fbnic_enable_bdq(struct fbnic_ring *hpq, struct fbnic_ring *ppq)
 	if (!ppq->size_mask)
 		goto write_ctl;
 
-	log_size = fls(ppq->size_mask);
+	log_size = fls(ppq->size_mask) + ilog2(FBNIC_BD_FRAG_COUNT);
 
 	/* Add enabling of PPQ to BDQ control */
 	bdq_ctl |= FBNIC_QUEUE_BDQ_CTL_PPQ_ENABLE;

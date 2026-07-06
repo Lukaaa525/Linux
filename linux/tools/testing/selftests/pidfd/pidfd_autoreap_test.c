@@ -23,15 +23,15 @@
 #include "kselftest_harness.h"
 
 #ifndef CLONE_AUTOREAP
-#define CLONE_AUTOREAP 0x400000000ULL
-#endif
-
-#ifndef CLONE_PIDFD_AUTOKILL
-#define CLONE_PIDFD_AUTOKILL 0x800000000ULL
+#define CLONE_AUTOREAP (1ULL << 34)
 #endif
 
 #ifndef CLONE_NNP
-#define CLONE_NNP 0x1000000000ULL
+#define CLONE_NNP (1ULL << 35)
+#endif
+
+#ifndef CLONE_PIDFD_AUTOKILL
+#define CLONE_PIDFD_AUTOKILL (1ULL << 36)
 #endif
 
 #ifndef _LINUX_CAPABILITY_VERSION_3

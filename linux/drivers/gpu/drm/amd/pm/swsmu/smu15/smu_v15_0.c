@@ -174,7 +174,7 @@ int smu_v15_0_init_pptable_microcode(struct smu_context *smu)
 	if (!pptable_id)
 		return 0;
 
-	ret = smu_v15_0_get_pptable_from_firmware(smu, &table, &size, pptable_id);
+	ret = smu_cmn_get_pptable_from_firmware(smu, &table, &size, pptable_id);
 	if (ret)
 		return ret;
 
@@ -207,48 +207,6 @@ int smu_v15_0_check_fw_status(struct smu_context *smu)
 	return -EIO;
 }
 
-static int smu_v15_0_set_pptable_v2_0(struct smu_context *smu, void **table, uint32_t *size)
-{
-	struct amdgpu_device *adev = smu->adev;
-	uint32_t ppt_offset_bytes;
-	const struct smc_firmware_header_v2_0 *v2;
-
-	v2 = (const struct smc_firmware_header_v2_0 *) adev->pm.fw->data;
-
-	ppt_offset_bytes = le32_to_cpu(v2->ppt_offset_bytes);
-	*size = le32_to_cpu(v2->ppt_size_bytes);
-	*table = (uint8_t *)v2 + ppt_offset_bytes;
-
-	return 0;
-}
-
-static int smu_v15_0_set_pptable_v2_1(struct smu_context *smu, void **table,
-				      uint32_t *size, uint32_t pptable_id)
-{
-	struct amdgpu_device *adev = smu->adev;
-	const struct smc_firmware_header_v2_1 *v2_1;
-	struct smc_soft_pptable_entry *entries;
-	uint32_t pptable_count = 0;
-	int i = 0;
-
-	v2_1 = (const struct smc_firmware_header_v2_1 *) adev->pm.fw->data;
-	entries = (struct smc_soft_pptable_entry *)
-		((uint8_t *)v2_1 + le32_to_cpu(v2_1->pptable_entry_offset));
-	pptable_count = le32_to_cpu(v2_1->pptable_count);
-	for (i = 0; i < pptable_count; i++) {
-		if (le32_to_cpu(entries[i].id) == pptable_id) {
-			*table = ((uint8_t *)v2_1 + le32_to_cpu(entries[i].ppt_offset_bytes));
-			*size = le32_to_cpu(entries[i].ppt_size_bytes);
-			break;
-		}
-	}
-
-	if (i == pptable_count)
-		return -EINVAL;
-
-	return 0;
-}
-
 static int smu_v15_0_get_pptable_from_vbios(struct smu_context *smu, void **table, uint32_t *size)
 {
 	struct amdgpu_device *adev = smu->adev;
@@ -271,45 +229,6 @@ static int smu_v15_0_get_pptable_from_vbios(struct smu_context *smu, void **tabl
 	return 0;
 }
 
-int smu_v15_0_get_pptable_from_firmware(struct smu_context *smu,
-					void **table,
-					uint32_t *size,
-					uint32_t pptable_id)
-{
-	const struct smc_firmware_header_v1_0 *hdr;
-	struct amdgpu_device *adev = smu->adev;
-	uint16_t version_major, version_minor;
-	int ret;
-
-	hdr = (const struct smc_firmware_header_v1_0 *) adev->pm.fw->data;
-	if (!hdr)
-		return -EINVAL;
-
-	dev_info(adev->dev, "use driver provided pptable %d\n", pptable_id);
-
-	version_major = le16_to_cpu(hdr->header.header_version_major);
-	version_minor = le16_to_cpu(hdr->header.header_version_minor);
-	if (version_major != 2) {
-		dev_err(adev->dev, "Unsupported smu firmware version %d.%d\n",
-			version_major, version_minor);
-		return -EINVAL;
-	}
-
-	switch (version_minor) {
-	case 0:
-		ret = smu_v15_0_set_pptable_v2_0(smu, table, size);
-		break;
-	case 1:
-		ret = smu_v15_0_set_pptable_v2_1(smu, table, size, pptable_id);
-		break;
-	default:
-		ret = -EINVAL;
-		break;
-	}
-
-	return ret;
-}
-
 int smu_v15_0_setup_pptable(struct smu_context *smu)
 {
 	struct amdgpu_device *adev = smu->adev;
@@ -329,7 +248,7 @@ int smu_v15_0_setup_pptable(struct smu_context *smu)
 	if ((amdgpu_sriov_vf(adev) || !pptable_id) && (amdgpu_emu_mode != 1))
 		ret = smu_v15_0_get_pptable_from_vbios(smu, &table, &size);
 	else
-		ret = smu_v15_0_get_pptable_from_firmware(smu, &table, &size, pptable_id);
+		ret = smu_cmn_get_pptable_from_firmware(smu, &table, &size, pptable_id);
 
 	if (ret)
 		return ret;
@@ -435,10 +354,12 @@ int smu_v15_0_fini_smc_tables(struct smu_context *smu)
 	smu_table->watermarks_table = NULL;
 	smu_table->metrics_time = 0;
 
+	kfree(smu_dpm->dpm_policies);
 	kfree(smu_dpm->dpm_context);
 	kfree(smu_dpm->golden_dpm_context);
 	kfree(smu_dpm->dpm_current_power_state);
 	kfree(smu_dpm->dpm_request_power_state);
+	smu_dpm->dpm_policies = NULL;
 	smu_dpm->dpm_context = NULL;
 	smu_dpm->golden_dpm_context = NULL;
 	smu_dpm->dpm_context_size = 0;
@@ -589,71 +510,47 @@ int smu_v15_0_notify_memory_pool_location(struct smu_context *smu)
 {
 	struct smu_table_context *smu_table = &smu->smu_table;
 	struct smu_table *memory_pool = &smu_table->memory_pool;
-	int ret = 0;
-	uint64_t address;
-	uint32_t address_low, address_high;
+	uint32_t params[3];
 
 	if (memory_pool->size == 0 || memory_pool->cpu_addr == NULL)
-		return ret;
+		return 0;
 
-	address = memory_pool->mc_address;
-	address_high = (uint32_t)upper_32_bits(address);
-	address_low  = (uint32_t)lower_32_bits(address);
+	/* SMU_MSG_DramLogSetDramAddr: ARG0=low, ARG1=high, ARG2=size */
+	params[0] = lower_32_bits(memory_pool->mc_address);
+	params[1] = upper_32_bits(memory_pool->mc_address);
+	params[2] = (u32)memory_pool->size;
 
-	ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_DramLogSetDramAddrHigh,
-					      address_high, NULL);
-	if (ret)
-		return ret;
-	ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_DramLogSetDramAddrLow,
-					      address_low, NULL);
-	if (ret)
-		return ret;
-	ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_DramLogSetDramSize,
-					      (uint32_t)memory_pool->size, NULL);
-	if (ret)
-		return ret;
-
-	return ret;
+	return smu_cmn_send_smc_msg_with_params(smu,
+						SMU_MSG_DramLogSetDramAddr,
+						params, ARRAY_SIZE(params),
+						NULL, 0);
 }
 
 int smu_v15_0_set_driver_table_location(struct smu_context *smu)
 {
 	struct smu_table *driver_table = &smu->smu_table.driver_table;
-	int ret = 0;
+	const uint32_t params[] = {
+		lower_32_bits(driver_table->mc_address),
+		upper_32_bits(driver_table->mc_address),
+	};
 
-	if (driver_table->mc_address) {
-		ret = smu_cmn_send_smc_msg_with_param(smu,
-						      SMU_MSG_SetDriverDramAddrHigh,
-						      upper_32_bits(driver_table->mc_address),
-						      NULL);
-		if (!ret)
-			ret = smu_cmn_send_smc_msg_with_param(smu,
-							      SMU_MSG_SetDriverDramAddrLow,
-							      lower_32_bits(driver_table->mc_address),
-							      NULL);
-	}
-
-	return ret;
+	return smu_cmn_send_smc_msg_with_params(smu, SMU_MSG_SetDriverDramAddr,
+						params, ARRAY_SIZE(params),
+						NULL, 0);
 }
 
 int smu_v15_0_set_tool_table_location(struct smu_context *smu)
 {
-	int ret = 0;
 	struct smu_table *tool_table = &smu->smu_table.tables[SMU_TABLE_PMSTATUSLOG];
+	const uint32_t params[] = {
+		lower_32_bits(tool_table->mc_address),
+		upper_32_bits(tool_table->mc_address),
+	};
 
-	if (tool_table->mc_address) {
-		ret = smu_cmn_send_smc_msg_with_param(smu,
-						      SMU_MSG_SetToolsDramAddrHigh,
-						      upper_32_bits(tool_table->mc_address),
-						      NULL);
-		if (!ret)
-			ret = smu_cmn_send_smc_msg_with_param(smu,
-							      SMU_MSG_SetToolsDramAddrLow,
-							      lower_32_bits(tool_table->mc_address),
-							      NULL);
-	}
-
-	return ret;
+	/* SMU_MSG_SetToolsDramAddr: ARG0=low, ARG1=high */
+	return smu_cmn_send_smc_msg_with_params(smu, SMU_MSG_SetToolsDramAddr,
+						params, ARRAY_SIZE(params),
+						NULL, 0);
 }
 
 int smu_v15_0_set_allowed_mask(struct smu_context *smu)
@@ -700,8 +597,7 @@ int smu_v15_0_gfx_off_control(struct smu_context *smu, bool enable)
 	return ret;
 }
 
-int smu_v15_0_system_features_control(struct smu_context *smu,
-				      bool en)
+int smu_v15_0_system_features_control(struct smu_context *smu, bool en)
 {
 	return smu_cmn_send_smc_msg(smu, (en ? SMU_MSG_EnableAllSmuFeatures :
 					  SMU_MSG_DisableAllSmuFeatures), NULL);
@@ -905,7 +801,8 @@ static int smu_v15_0_wait_for_reset_complete(struct smu_context *smu,
 	return ret;
 }
 
-int smu_v15_0_wait_for_event(struct smu_context *smu, enum smu_event_type event,
+int smu_v15_0_wait_for_event(struct smu_context *smu,
+			     enum smu_event_type event,
 			     uint64_t event_arg)
 {
 	int ret = -EINVAL;
@@ -1077,18 +974,12 @@ int smu_v15_0_set_performance_level(struct smu_context *smu,
 {
 	struct smu_15_0_dpm_context *dpm_context =
 		smu->smu_dpm.dpm_context;
-	struct smu_15_0_dpm_table *gfx_table =
-		&dpm_context->dpm_tables.gfx_table;
-	struct smu_15_0_dpm_table *mem_table =
-		&dpm_context->dpm_tables.uclk_table;
-	struct smu_15_0_dpm_table *soc_table =
-		&dpm_context->dpm_tables.soc_table;
-	struct smu_15_0_dpm_table *vclk_table =
-		&dpm_context->dpm_tables.vclk_table;
-	struct smu_15_0_dpm_table *dclk_table =
-		&dpm_context->dpm_tables.dclk_table;
-	struct smu_15_0_dpm_table *fclk_table =
-		&dpm_context->dpm_tables.fclk_table;
+	struct smu_dpm_table *gfx_table = &dpm_context->dpm_tables.gfx_table;
+	struct smu_dpm_table *mem_table = &dpm_context->dpm_tables.uclk_table;
+	struct smu_dpm_table *soc_table = &dpm_context->dpm_tables.soc_table;
+	struct smu_dpm_table *vclk_table = &dpm_context->dpm_tables.vclk_table;
+	struct smu_dpm_table *dclk_table = &dpm_context->dpm_tables.dclk_table;
+	struct smu_dpm_table *fclk_table = &dpm_context->dpm_tables.fclk_table;
 	struct smu_umd_pstate_table *pstate_table =
 		&smu->pstate_table;
 	struct amdgpu_device *adev = smu->adev;
@@ -1103,34 +994,34 @@ int smu_v15_0_set_performance_level(struct smu_context *smu,
 
 	switch (level) {
 	case AMD_DPM_FORCED_LEVEL_HIGH:
-		sclk_min = sclk_max = gfx_table->max;
-		mclk_min = mclk_max = mem_table->max;
-		socclk_min = socclk_max = soc_table->max;
-		vclk_min = vclk_max = vclk_table->max;
-		dclk_min = dclk_max = dclk_table->max;
-		fclk_min = fclk_max = fclk_table->max;
+		sclk_min = sclk_max = SMU_DPM_TABLE_MAX(gfx_table);
+		mclk_min = mclk_max = SMU_DPM_TABLE_MAX(mem_table);
+		socclk_min = socclk_max = SMU_DPM_TABLE_MAX(soc_table);
+		vclk_min = vclk_max = SMU_DPM_TABLE_MAX(vclk_table);
+		dclk_min = dclk_max = SMU_DPM_TABLE_MAX(dclk_table);
+		fclk_min = fclk_max = SMU_DPM_TABLE_MAX(fclk_table);
 		break;
 	case AMD_DPM_FORCED_LEVEL_LOW:
-		sclk_min = sclk_max = gfx_table->min;
-		mclk_min = mclk_max = mem_table->min;
-		socclk_min = socclk_max = soc_table->min;
-		vclk_min = vclk_max = vclk_table->min;
-		dclk_min = dclk_max = dclk_table->min;
-		fclk_min = fclk_max = fclk_table->min;
+		sclk_min = sclk_max = SMU_DPM_TABLE_MIN(gfx_table);
+		mclk_min = mclk_max = SMU_DPM_TABLE_MIN(mem_table);
+		socclk_min = socclk_max = SMU_DPM_TABLE_MIN(soc_table);
+		vclk_min = vclk_max = SMU_DPM_TABLE_MIN(vclk_table);
+		dclk_min = dclk_max = SMU_DPM_TABLE_MIN(dclk_table);
+		fclk_min = fclk_max = SMU_DPM_TABLE_MIN(fclk_table);
 		break;
 	case AMD_DPM_FORCED_LEVEL_AUTO:
-		sclk_min = gfx_table->min;
-		sclk_max = gfx_table->max;
-		mclk_min = mem_table->min;
-		mclk_max = mem_table->max;
-		socclk_min = soc_table->min;
-		socclk_max = soc_table->max;
-		vclk_min = vclk_table->min;
-		vclk_max = vclk_table->max;
-		dclk_min = dclk_table->min;
-		dclk_max = dclk_table->max;
-		fclk_min = fclk_table->min;
-		fclk_max = fclk_table->max;
+		sclk_min = SMU_DPM_TABLE_MIN(gfx_table);
+		sclk_max = SMU_DPM_TABLE_MAX(gfx_table);
+		mclk_min = SMU_DPM_TABLE_MIN(mem_table);
+		mclk_max = SMU_DPM_TABLE_MAX(mem_table);
+		socclk_min = SMU_DPM_TABLE_MIN(soc_table);
+		socclk_max = SMU_DPM_TABLE_MAX(soc_table);
+		vclk_min = SMU_DPM_TABLE_MIN(vclk_table);
+		vclk_max = SMU_DPM_TABLE_MAX(vclk_table);
+		dclk_min = SMU_DPM_TABLE_MIN(dclk_table);
+		dclk_max = SMU_DPM_TABLE_MAX(dclk_table);
+		fclk_min = SMU_DPM_TABLE_MIN(fclk_table);
+		fclk_max = SMU_DPM_TABLE_MAX(fclk_table);
 		auto_level = true;
 		break;
 	case AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD:
@@ -1352,10 +1243,11 @@ static int smu_v15_0_get_fine_grained_status(struct smu_context *smu,
 
 int smu_v15_0_set_single_dpm_table(struct smu_context *smu,
 				   enum smu_clk_type clk_type,
-				   struct smu_15_0_dpm_table *single_dpm_table)
+				   struct smu_dpm_table *single_dpm_table)
 {
 	int ret = 0;
 	uint32_t clk;
+	bool is_fine_grained;
 	int i;
 
 	ret = smu_v15_0_get_dpm_level_count(smu,
@@ -1368,11 +1260,14 @@ int smu_v15_0_set_single_dpm_table(struct smu_context *smu,
 
 	ret = smu_v15_0_get_fine_grained_status(smu,
 						clk_type,
-						&single_dpm_table->is_fine_grained);
+						&is_fine_grained);
 	if (ret) {
 		dev_err(smu->adev->dev, "[%s] failed to get fine grained status!\n", __func__);
 		return ret;
 	}
+
+	if (is_fine_grained)
+		single_dpm_table->flags |= SMU_DPM_TABLE_FINE_GRAINED;
 
 	for (i = 0; i < single_dpm_table->count; i++) {
 		ret = smu_v15_0_get_dpm_freq_by_index(smu,
@@ -1386,11 +1281,6 @@ int smu_v15_0_set_single_dpm_table(struct smu_context *smu,
 
 		single_dpm_table->dpm_levels[i].value = clk;
 		single_dpm_table->dpm_levels[i].enabled = true;
-
-		if (i == 0)
-			single_dpm_table->min = clk;
-		else if (i == single_dpm_table->count - 1)
-			single_dpm_table->max = clk;
 	}
 
 	return 0;

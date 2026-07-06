@@ -178,9 +178,17 @@ static __cold int io_register_restrictions(struct io_ring_ctx *ctx,
 		return -EBUSY;
 
 	ret = io_parse_restrictions(arg, nr_args, &ctx->restrictions);
-	/* Reset all restrictions if an error happened */
+	/*
+	 * Reset all restrictions if an error happened, but retain any COW'ed
+	 * settings.
+	 */
 	if (ret < 0) {
+		struct io_bpf_filters *bpf = ctx->restrictions.bpf_filters;
+		bool cowed = ctx->restrictions.bpf_filters_cow;
+
 		memset(&ctx->restrictions, 0, sizeof(ctx->restrictions));
+		ctx->restrictions.bpf_filters = bpf;
+		ctx->restrictions.bpf_filters_cow = cowed;
 		return ret;
 	}
 	if (ctx->restrictions.op_registered)
@@ -495,6 +503,7 @@ static int io_register_resize_rings(struct io_ring_ctx *ctx, void __user *arg)
 	unsigned i, tail, old_head;
 	struct io_uring_params *p = &config.p;
 	struct io_rings_layout *rl = &config.layout;
+	u32 *o_sq_array, *n_sq_array = NULL;
 	int ret;
 
 	memset(&config, 0, sizeof(config));
@@ -581,6 +590,9 @@ static int io_register_resize_rings(struct io_ring_ctx *ctx, void __user *arg)
 	ctx->rings = NULL;
 	o.sq_sqes = ctx->sq_sqes;
 	ctx->sq_sqes = NULL;
+	o_sq_array = ctx->sq_array;
+	if (!(ctx->flags & IORING_SETUP_NO_SQARRAY))
+		n_sq_array = (u32 *)((char *)n.rings + rl->sq_array_offset);
 
 	/*
 	 * Now copy SQ and CQ entries, if any. If either of the destination
@@ -591,10 +603,27 @@ static int io_register_resize_rings(struct io_ring_ctx *ctx, void __user *arg)
 	if (tail - old_head > p->sq_entries)
 		goto overflow;
 	for (i = old_head; i < tail; i++) {
-		unsigned src_head = i & (ctx->sq_entries - 1);
-		unsigned dst_head = i & (p->sq_entries - 1);
+		unsigned int dst, src;
+		size_t sq_size;
 
-		n.sq_sqes[dst_head] = o.sq_sqes[src_head];
+		dst = i & (p->sq_entries - 1);
+		src = i & (ctx->sq_entries - 1);
+		if (n_sq_array) {
+			src = READ_ONCE(o_sq_array[src]);
+			if (unlikely(src >= ctx->sq_entries)) {
+				WRITE_ONCE(n_sq_array[dst], UINT_MAX);
+				continue;
+			}
+			WRITE_ONCE(n_sq_array[dst], dst);
+		}
+
+		sq_size = sizeof(struct io_uring_sqe);
+		if (ctx->flags & IORING_SETUP_SQE128) {
+			dst <<= 1;
+			src <<= 1;
+			sq_size <<= 1;
+		}
+		memcpy(&n.sq_sqes[dst], &o.sq_sqes[src], sq_size);
 	}
 	WRITE_ONCE(n.rings->sq.head, old_head);
 	WRITE_ONCE(n.rings->sq.tail, tail);
@@ -611,10 +640,20 @@ overflow:
 		goto out;
 	}
 	for (i = old_head; i < tail; i++) {
-		unsigned src_head = i & (ctx->cq_entries - 1);
-		unsigned dst_head = i & (p->cq_entries - 1);
+		unsigned index, dst_mask, src_mask;
+		size_t cq_size;
 
-		n.rings->cqes[dst_head] = o.rings->cqes[src_head];
+		index = i;
+		cq_size = sizeof(struct io_uring_cqe);
+		src_mask = ctx->cq_entries - 1;
+		dst_mask = p->cq_entries - 1;
+		if (ctx->flags & IORING_SETUP_CQE32) {
+			index <<= 1;
+			cq_size <<= 1;
+			src_mask = (ctx->cq_entries << 1) - 1;
+			dst_mask = (p->cq_entries << 1) - 1;
+		}
+		memcpy(&n.rings->cqes[index & dst_mask], &o.rings->cqes[index & src_mask], cq_size);
 	}
 	WRITE_ONCE(n.rings->cq.head, old_head);
 	WRITE_ONCE(n.rings->cq.tail, tail);
@@ -627,8 +666,8 @@ overflow:
 	WRITE_ONCE(n.rings->cq_overflow, READ_ONCE(o.rings->cq_overflow));
 
 	/* all done, store old pointers and assign new ones */
-	if (!(ctx->flags & IORING_SETUP_NO_SQARRAY))
-		ctx->sq_array = (u32 *)((char *)n.rings + rl->sq_array_offset);
+	if (n_sq_array)
+		ctx->sq_array = n_sq_array;
 
 	ctx->sq_entries = p->sq_entries;
 	ctx->cq_entries = p->cq_entries;
@@ -900,7 +939,7 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 		ret = -EINVAL;
 		if (!arg || nr_args != 1)
 			break;
-		ret = io_register_zcrx_ifq(ctx, arg);
+		ret = io_register_zcrx(ctx, arg);
 		break;
 	case IORING_REGISTER_RESIZE_RINGS:
 		ret = -EINVAL;
@@ -936,40 +975,6 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 	}
 
 	return ret;
-}
-
-/*
- * Given an 'fd' value, return the ctx associated with if. If 'registered' is
- * true, then the registered index is used. Otherwise, the normal fd table.
- * Caller must call fput() on the returned file, unless it's an ERR_PTR.
- */
-struct file *io_uring_register_get_file(unsigned int fd, bool registered)
-{
-	struct file *file;
-
-	if (registered) {
-		/*
-		 * Ring fd has been registered via IORING_REGISTER_RING_FDS, we
-		 * need only dereference our task private array to find it.
-		 */
-		struct io_uring_task *tctx = current->io_uring;
-
-		if (unlikely(!tctx || fd >= IO_RINGFD_REG_MAX))
-			return ERR_PTR(-EINVAL);
-		fd = array_index_nospec(fd, IO_RINGFD_REG_MAX);
-		file = tctx->registered_rings[fd];
-		if (file)
-			get_file(file);
-	} else {
-		file = fget(fd);
-	}
-
-	if (unlikely(!file))
-		return ERR_PTR(-EBADF);
-	if (io_is_uring_fops(file))
-		return file;
-	fput(file);
-	return ERR_PTR(-EOPNOTSUPP);
 }
 
 static int io_uring_register_send_msg_ring(void __user *arg, unsigned int nr_args)
@@ -1026,7 +1031,7 @@ SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode,
 	if (fd == -1)
 		return io_uring_register_blind(opcode, arg, nr_args);
 
-	file = io_uring_register_get_file(fd, use_registered_ring);
+	file = io_uring_ctx_get_file(fd, use_registered_ring);
 	if (IS_ERR(file))
 		return PTR_ERR(file);
 	ctx = file->private_data;
@@ -1038,6 +1043,7 @@ SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode,
 				ctx->buf_table.nr, ret);
 	mutex_unlock(&ctx->uring_lock);
 
-	fput(file);
+	if (!use_registered_ring)
+		fput(file);
 	return ret;
 }

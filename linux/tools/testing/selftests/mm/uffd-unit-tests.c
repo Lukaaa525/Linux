@@ -86,47 +86,28 @@ typedef struct {
 	uffd_test_case_ops_t *test_case_ops;
 } uffd_test_case_t;
 
-static void uffd_test_report(void)
-{
-	printf("Userfaults unit tests: pass=%u, skip=%u, fail=%u (total=%u)\n",
-	       ksft_get_pass_cnt(),
-	       ksft_get_xskip_cnt(),
-	       ksft_get_fail_cnt(),
-	       ksft_test_num());
-}
+static char current_test[256];
 
 static void uffd_test_pass(void)
 {
-	printf("done\n");
-	ksft_inc_pass_cnt();
+	ksft_test_result_pass("%s\n", current_test);
 }
 
 #define  uffd_test_start(...)  do {		\
-		printf("Testing ");		\
-		printf(__VA_ARGS__);		\
-		printf("... ");			\
-		fflush(stdout);			\
+		snprintf(current_test, sizeof(current_test), __VA_ARGS__); \
 	} while (0)
 
-#define  uffd_test_fail(...)  do {		\
-		printf("failed [reason: ");	\
-		printf(__VA_ARGS__);		\
-		printf("]\n");			\
-		ksft_inc_fail_cnt();		\
+#define  uffd_test_fail(fmt, ...)  do {					\
+		ksft_print_msg("failed reason: [" fmt "]\n", ##__VA_ARGS__); \
+		ksft_test_result_fail("%s\n", current_test);		\
 	} while (0)
 
 static void uffd_test_skip(const char *message)
 {
-	printf("skipped [reason: %s]\n", message);
-	ksft_inc_xskip_cnt();
+	ksft_test_result_skip("%s (%s)\n", current_test, message);
 }
 
-/*
- * Returns 1 if specific userfaultfd supported, 0 otherwise.  Note, we'll
- * return 1 even if some test failed as long as uffd supported, because in
- * that case we still want to proceed with the rest uffd unit tests.
- */
-static int test_uffd_api(bool use_dev)
+static void test_uffd_api(bool use_dev)
 {
 	struct uffdio_api uffdio_api;
 	int uffd;
@@ -140,7 +121,7 @@ static int test_uffd_api(bool use_dev)
 		uffd = uffd_open_sys(UFFD_FLAGS);
 	if (uffd < 0) {
 		uffd_test_skip("cannot open userfaultfd handle");
-		return 0;
+		return;
 	}
 
 	/* Test wrong UFFD_API */
@@ -177,8 +158,6 @@ static int test_uffd_api(bool use_dev)
 	uffd_test_pass();
 out:
 	close(uffd);
-	/* We have a valid uffd handle */
-	return 1;
 }
 
 
@@ -201,62 +180,6 @@ static int pagemap_open(void)
 		err("open pagemap");
 
 	return fd;
-}
-
-static long uffd_pagemap_scan_get_categories_raw(int fd, char *start,
-						 struct page_region *r)
-{
-	struct pm_scan_arg arg = { 0 };
-
-	arg.start = (uintptr_t)start;
-	arg.end = (uintptr_t)(start + psize());
-	arg.vec = (uintptr_t)r;
-	arg.vec_len = 1;
-	arg.flags = 0;
-	arg.size = sizeof(struct pm_scan_arg);
-	arg.max_pages = 0;
-	arg.category_inverted = 0;
-	arg.category_mask = 0;
-	arg.category_anyof_mask = PAGE_IS_WPALLOWED | PAGE_IS_WRITTEN |
-				  PAGE_IS_FILE | PAGE_IS_PRESENT |
-				  PAGE_IS_SWAPPED | PAGE_IS_PFNZERO |
-				  PAGE_IS_HUGE | PAGE_IS_SOFT_DIRTY;
-	arg.return_mask = arg.category_anyof_mask;
-
-	return ioctl(fd, PAGEMAP_SCAN, &arg);
-}
-
-static bool uffd_pagemap_scan_supported(int fd, char *start)
-{
-	static int supported = -1;
-	int ret;
-
-	if (supported != -1)
-		return supported;
-
-	ret = uffd_pagemap_scan_get_categories_raw(fd, start,
-						   (struct page_region *)~0UL);
-	if (ret == 0)
-		err("PAGEMAP_SCAN succeeded unexpectedly");
-
-	supported = errno == EFAULT;
-	return supported;
-}
-
-static bool uffd_pagemap_scan_get_categories(int fd, char *start, uint64_t *categories)
-{
-	struct page_region r = { 0 };
-	long ret;
-
-	if (!uffd_pagemap_scan_supported(fd, start))
-		return false;
-
-	ret = uffd_pagemap_scan_get_categories_raw(fd, start, &r);
-	if (ret < 0)
-		err("PAGEMAP_SCAN failed: %s", strerror(errno));
-
-	*categories = ret ? r.categories : 0;
-	return true;
 }
 
 /* This macro let __LINE__ works in err() */
@@ -376,7 +299,7 @@ static int pagemap_test_fork(uffd_global_test_opts_t *gopts, bool with_event, bo
 		if (test_pin)
 			unpin_pages(&args);
 		/* Succeed */
-		exit(0);
+		_exit(0);
 	}
 	waitpid(child, &result, 0);
 
@@ -844,7 +767,7 @@ static void uffd_sigbus_test_common(uffd_global_test_opts_t *gopts, bool wp)
 		err("fork");
 
 	if (!pid)
-		exit(faulting_process(gopts, 2, wp));
+		_exit(faulting_process(gopts, 2, wp));
 
 	waitpid(pid, &err, 0);
 	if (err)
@@ -898,7 +821,7 @@ static void uffd_events_test_common(uffd_global_test_opts_t *gopts, bool wp)
 		err("fork");
 
 	if (!pid)
-		exit(faulting_process(gopts, 0, wp));
+		_exit(faulting_process(gopts, 0, wp));
 
 	waitpid(pid, &err, 0);
 	if (err)
@@ -1283,119 +1206,6 @@ static void uffd_move_pmd_test(uffd_global_test_opts_t *gopts, uffd_test_args_t 
 			      uffd_move_pmd_handle_fault);
 }
 
-static void uffd_move_pmd_huge_zeropage_test(uffd_global_test_opts_t *gopts,
-					     uffd_test_args_t *targs)
-{
-	unsigned long pmd_size = read_pmd_pagesize();
-	unsigned long pmd_pages;
-	unsigned long bytes = gopts->nr_pages * gopts->page_size;
-	char *orig_area_src = gopts->area_src, *orig_area_dst = gopts->area_dst;
-	char *aligned_src, *aligned_dst;
-	unsigned long src_offs, dst_offs, max_offs;
-	pthread_t uffd_mon;
-	struct uffd_args args = { 0 };
-	char c = '\0';
-	int pagemap_fd;
-	uint64_t categories;
-	unsigned long i;
-
-	if (pmd_size <= gopts->page_size) {
-		uffd_test_skip("huge page size is 0, feature missing?");
-		return;
-	}
-	if (!detect_huge_zeropage()) {
-		uffd_test_skip("transparent huge zeropage disabled");
-		return;
-	}
-
-	pmd_pages = pmd_size / gopts->page_size;
-	if (bytes < pmd_size) {
-		uffd_test_skip("not enough pages for one PMD-sized move");
-		return;
-	}
-
-	aligned_src = ALIGN_UP(orig_area_src, pmd_size);
-	aligned_dst = ALIGN_UP(orig_area_dst, pmd_size);
-	src_offs = (aligned_src - orig_area_src) / gopts->page_size;
-	dst_offs = (aligned_dst - orig_area_dst) / gopts->page_size;
-	max_offs = src_offs > dst_offs ? src_offs : dst_offs;
-	if (max_offs + pmd_pages > gopts->nr_pages) {
-		uffd_test_skip("could not find aligned PMD-sized src/dst window");
-		return;
-	}
-
-	if (madvise(orig_area_dst, bytes, MADV_HUGEPAGE))
-		err("madvise(MADV_HUGEPAGE) failure");
-	if (madvise(orig_area_src, bytes, MADV_DONTFORK))
-		err("madvise(MADV_DONTFORK) failure");
-	if (madvise(aligned_src, pmd_size, MADV_DONTNEED))
-		err("madvise(MADV_DONTNEED) failure");
-
-	/* Materialise a PMD-sized huge zeropage mapping in the source. */
-	force_read_pages(aligned_src, pmd_pages, gopts->page_size);
-
-	pagemap_fd = pagemap_open();
-	if (!uffd_pagemap_scan_get_categories(pagemap_fd, aligned_src, &categories)) {
-		close(pagemap_fd);
-		uffd_test_skip("PAGEMAP_SCAN unsupported");
-		return;
-	}
-	if ((categories & (PAGE_IS_PRESENT | PAGE_IS_PFNZERO | PAGE_IS_HUGE)) !=
-	    (PAGE_IS_PRESENT | PAGE_IS_PFNZERO | PAGE_IS_HUGE)) {
-		close(pagemap_fd);
-		uffd_test_skip("could not materialise a huge zeropage PMD mapping");
-		return;
-	}
-	gopts->area_src = aligned_src;
-	gopts->area_dst = aligned_dst;
-
-	if (uffd_register(gopts->uffd, gopts->area_dst, pmd_size, true, false, false))
-		err("register failure");
-
-	args.gopts = gopts;
-	args.handle_fault = uffd_move_pmd_handle_fault;
-	if (pthread_create(&uffd_mon, NULL, uffd_poll_thread, &args))
-		err("uffd_poll_thread create");
-
-	/*
-	 * One fault on dst should trigger a single PMD-sized UFFDIO_MOVE from
-	 * the huge zeropage PMD we populated in the source.
-	 */
-	force_read_pages(gopts->area_dst, pmd_pages, gopts->page_size);
-
-	if (write(gopts->pipefd[1], &c, sizeof(c)) != sizeof(c))
-		err("pipe write");
-	if (pthread_join(uffd_mon, NULL))
-		err("join() failed");
-
-	if (args.missing_faults != 1 || args.minor_faults != 0) {
-		uffd_test_fail("stats check error");
-	} else if (!uffd_pagemap_scan_get_categories(pagemap_fd, gopts->area_dst,
-						     &categories)) {
-		uffd_test_fail("PAGEMAP_SCAN unsupported");
-	} else if ((categories & (PAGE_IS_PRESENT | PAGE_IS_PFNZERO |
-				  PAGE_IS_HUGE)) !=
-			(PAGE_IS_PRESENT | PAGE_IS_PFNZERO | PAGE_IS_HUGE)) {
-		uffd_test_fail("moved destination is not a huge zeropage PMD");
-	} else if (!check_huge_anon(gopts->area_dst, 0, pmd_size)) {
-		/* vm_normal_page_pmd() must continue to treat the moved PMD as special. */
-		uffd_test_fail("moved huge zeropage PMD counted as AnonHugePages");
-	} else {
-		for (i = 0; i < pmd_size; i++) {
-			if (gopts->area_dst[i]) {
-				uffd_test_fail("moved huge zeropage PMD data is not zero");
-				goto out_restore;
-			}
-		}
-		uffd_test_pass();
-	}
-
-out_restore:
-	gopts->area_src = orig_area_src;
-	gopts->area_dst = orig_area_dst;
-	close(pagemap_fd);
-}
-
 static void uffd_move_pmd_split_test(uffd_global_test_opts_t *gopts, uffd_test_args_t *targs)
 {
 	if (madvise(gopts->area_dst, gopts->nr_pages * gopts->page_size, MADV_NOHUGEPAGE))
@@ -1720,13 +1530,6 @@ uffd_test_case_t uffd_tests[] = {
 		.test_case_ops = &uffd_move_test_pmd_case_ops,
 	},
 	{
-		.name = "move-pmd-huge-zeropage",
-		.uffd_fn = uffd_move_pmd_huge_zeropage_test,
-		.mem_targets = MEM_ANON,
-		.uffd_feature_required = UFFD_FEATURE_MOVE,
-		.test_case_ops = &uffd_move_test_pmd_case_ops,
-	},
-	{
 		.name = "move-pmd-split",
 		.uffd_fn = uffd_move_pmd_split_test,
 		.mem_targets = MEM_ANON,
@@ -1877,18 +1680,58 @@ static void usage(const char *prog)
 	exit(KSFT_FAIL);
 }
 
+static int uffd_count_tests(int n_tests, int n_mems, const char *test_filter)
+{
+	uffd_test_case_t *test;
+	int i, j, count = 0;
+
+	if (!test_filter)
+		count += 2;	/* test_uffd_api(false) + test_uffd_api(true) */
+
+	for (i = 0; i < n_tests; i++) {
+		test = &uffd_tests[i];
+		if (test_filter && !strstr(test->name, test_filter))
+			continue;
+		for (j = 0; j < n_mems; j++)
+			if (test->mem_targets & mem_types[j].mem_flag)
+				count++;
+	}
+
+	return count;
+}
+
+static unsigned long uffd_setup_hugetlb(void)
+{
+	unsigned long nr_hugepages, hp_size;
+
+	hugetlb_save_settings();
+	hp_size = default_huge_page_size();
+
+	if (!hp_size)
+		return 0;
+
+	/* need twice UFFD_TEST_MEM_SIZE, one for src area and one for dst */
+	nr_hugepages = 2 * MAX(UFFD_TEST_MEM_SIZE, hp_size * 2) / hp_size;
+	hugetlb_set_nr_default_pages(nr_hugepages);
+
+	if (hugetlb_free_default_pages() < nr_hugepages)
+		return 0;
+
+	return hp_size;
+}
+
 int main(int argc, char *argv[])
 {
 	int n_tests = sizeof(uffd_tests) / sizeof(uffd_test_case_t);
 	int n_mems = sizeof(mem_types) / sizeof(mem_type_t);
 	const char *test_filter = NULL;
+	unsigned long hugepage_size;
 	bool list_only = false;
 	uffd_test_case_t *test;
 	mem_type_t *mem_type;
 	uffd_test_args_t args;
 	const char *errmsg;
-	int has_uffd, opt;
-	int i, j;
+	int i, j, opt;
 
 	while ((opt = getopt(argc, argv, "f:hl")) != -1) {
 		switch (opt) {
@@ -1906,24 +1749,30 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (!test_filter && !list_only) {
-		has_uffd = test_uffd_api(false);
-		has_uffd |= test_uffd_api(true);
-
-		if (!has_uffd) {
-			printf("Userfaultfd not supported or unprivileged, skip all tests\n");
-			exit(KSFT_SKIP);
+	if (list_only) {
+		for (i = 0; i < n_tests; i++) {
+			test = &uffd_tests[i];
+			if (test_filter && !strstr(test->name, test_filter))
+				continue;
+			printf("%s\n", test->name);
 		}
+		return KSFT_PASS;
+	}
+
+	hugepage_size = uffd_setup_hugetlb();
+
+	ksft_print_header();
+	ksft_set_plan(uffd_count_tests(n_tests, n_mems, test_filter));
+
+	if (!test_filter) {
+		test_uffd_api(false);
+		test_uffd_api(true);
 	}
 
 	for (i = 0; i < n_tests; i++) {
 		test = &uffd_tests[i];
 		if (test_filter && !strstr(test->name, test_filter))
 			continue;
-		if (list_only) {
-			printf("%s\n", test->name);
-			continue;
-		}
 		for (j = 0; j < n_mems; j++) {
 			mem_type = &mem_types[j];
 
@@ -1934,10 +1783,14 @@ int main(int argc, char *argv[])
 			uffd_test_ops = mem_type->mem_ops;
 			uffd_test_case_ops = test->test_case_ops;
 
+			if (!(test->mem_targets & mem_type->mem_flag))
+				continue;
+
+			uffd_test_start("%s on %s", test->name, mem_type->name);
 			if (mem_type->mem_flag & (MEM_HUGETLB_PRIVATE | MEM_HUGETLB)) {
-				gopts.page_size = default_huge_page_size();
+				gopts.page_size = hugepage_size;
 				if (gopts.page_size == 0) {
-					uffd_test_skip("huge page size is 0, feature missing?");
+					uffd_test_skip("not enough HugeTLB pages");
 					continue;
 				}
 			} else {
@@ -1953,10 +1806,6 @@ int main(int argc, char *argv[])
 			/* Initialize test arguments */
 			args.mem_type = mem_type;
 
-			if (!(test->mem_targets & mem_type->mem_flag))
-				continue;
-
-			uffd_test_start("%s on %s", test->name, mem_type->name);
 			if (!uffd_feature_supported(test)) {
 				uffd_test_skip("feature missing");
 				continue;
@@ -1970,10 +1819,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (!list_only)
-		uffd_test_report();
-
-	return ksft_get_fail_cnt() ? KSFT_FAIL : KSFT_PASS;
+	ksft_finished();
 }
 
 #else /* __NR_userfaultfd */
@@ -1982,8 +1828,8 @@ int main(int argc, char *argv[])
 
 int main(void)
 {
-	printf("Skipping %s (missing __NR_userfaultfd)\n", __file__);
-	return KSFT_SKIP;
+	ksft_print_header();
+	ksft_exit_skip("missing __NR_userfaultfd definition\n");
 }
 
 #endif /* __NR_userfaultfd */

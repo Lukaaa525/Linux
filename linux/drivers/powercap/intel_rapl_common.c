@@ -30,23 +30,7 @@
 #include <asm/intel-family.h>
 #include <asm/msr.h>
 
-/* bitmasks for RAPL MSRs, used by primitive access functions */
 #define ENERGY_STATUS_MASK		GENMASK(31, 0)
-
-#define POWER_LIMIT1_MASK		GENMASK(14, 0)
-#define POWER_LIMIT1_ENABLE		BIT(15)
-#define POWER_LIMIT1_CLAMP		BIT(16)
-
-#define POWER_LIMIT2_MASK		GENMASK_ULL(46, 32)
-#define POWER_LIMIT2_ENABLE		BIT_ULL(47)
-#define POWER_LIMIT2_CLAMP		BIT_ULL(48)
-#define POWER_HIGH_LOCK			BIT_ULL(63)
-#define POWER_LOW_LOCK			BIT(31)
-
-#define POWER_LIMIT4_MASK		GENMASK(12, 0)
-
-#define TIME_WINDOW1_MASK		GENMASK_ULL(23, 17)
-#define TIME_WINDOW2_MASK		GENMASK_ULL(55, 49)
 
 #define POWER_UNIT_OFFSET		0x00
 #define POWER_UNIT_MASK			GENMASK(3, 0)
@@ -57,39 +41,7 @@
 #define TIME_UNIT_OFFSET		0x10
 #define TIME_UNIT_MASK			GENMASK(19, 16)
 
-#define POWER_INFO_MAX_MASK		GENMASK_ULL(46, 32)
-#define POWER_INFO_MIN_MASK		GENMASK_ULL(30, 16)
-#define POWER_INFO_MAX_TIME_WIN_MASK	GENMASK_ULL(53, 48)
-#define POWER_INFO_THERMAL_SPEC_MASK	GENMASK(14, 0)
-
-#define PERF_STATUS_THROTTLE_TIME_MASK	GENMASK(31, 0)
-#define PP_POLICY_MASK			GENMASK(4, 0)
-
-/*
- * SPR has different layout for Psys Domain PowerLimit registers.
- * There are 17 bits of PL1 and PL2 instead of 15 bits.
- * The Enable bits and TimeWindow bits are also shifted as a result.
- */
-#define PSYS_POWER_LIMIT1_MASK		GENMASK_ULL(16, 0)
-#define PSYS_POWER_LIMIT1_ENABLE	BIT(17)
-
-#define PSYS_POWER_LIMIT2_MASK		GENMASK_ULL(48, 32)
-#define PSYS_POWER_LIMIT2_ENABLE	BIT_ULL(49)
-
-#define PSYS_TIME_WINDOW1_MASK		GENMASK_ULL(25, 19)
-#define PSYS_TIME_WINDOW2_MASK		GENMASK_ULL(57, 51)
-
-/* bitmasks for RAPL TPMI, used by primitive access functions */
-#define TPMI_POWER_LIMIT_MASK		GENMASK_ULL(17, 0)
-#define TPMI_POWER_LIMIT_ENABLE		BIT_ULL(62)
-#define TPMI_TIME_WINDOW_MASK		GENMASK_ULL(24, 18)
-#define TPMI_INFO_SPEC_MASK		GENMASK_ULL(17, 0)
-#define TPMI_INFO_MIN_MASK		GENMASK_ULL(35, 18)
-#define TPMI_INFO_MAX_MASK		GENMASK_ULL(53, 36)
-#define TPMI_INFO_MAX_TIME_WIN_MASK	GENMASK_ULL(60, 54)
-
 /* Non HW constants */
-#define RAPL_PRIMITIVE_DERIVED		BIT(1)	/* not from raw data */
 #define RAPL_PRIMITIVE_DUMMY		BIT(2)
 
 #define ENERGY_UNIT_SCALE		1000	/* scale from driver unit to powercap unit */
@@ -97,24 +49,9 @@
 /* per domain data, some are optional */
 #define NR_RAW_PRIMITIVES		(NR_RAPL_PRIMITIVES - 2)
 
-#define	DOMAIN_STATE_INACTIVE		BIT(0)
-#define	DOMAIN_STATE_POWER_LIMIT_SET	BIT(1)
-
-/* Sideband MBI registers */
-#define IOSF_CPU_POWER_BUDGET_CTL_BYT	0x02
-#define IOSF_CPU_POWER_BUDGET_CTL_TNG	0xDF
-
 #define PACKAGE_PLN_INT_SAVED		BIT(0)
-#define MAX_PRIM_NAME			32
 
 #define RAPL_EVENT_MASK			GENMASK(7, 0)
-
-enum unit_type {
-	ARBITRARY_UNIT,		/* no translation */
-	POWER_UNIT,
-	ENERGY_UNIT,
-	TIME_UNIT,
-};
 
 static const char *pl_names[NR_POWER_LIMITS] = {
 	[POWER_LIMIT1] = "long_term",
@@ -216,27 +153,6 @@ static const struct rapl_defaults *get_defaults(struct rapl_package *rp)
 {
 	return rp->priv->defaults;
 }
-
-/* per domain data. used to describe individual knobs such that access function
- * can be consolidated into one instead of many inline functions.
- */
-struct rapl_primitive_info {
-	const char *name;
-	u64 mask;
-	int shift;
-	enum rapl_domain_reg_id id;
-	enum unit_type unit;
-	u32 flag;
-};
-
-#define PRIMITIVE_INFO_INIT(p, m, s, i, u, f) {	\
-		.name = #p,			\
-		.mask = m,			\
-		.shift = s,			\
-		.id = i,			\
-		.unit = u,			\
-		.flag = f			\
-	}
 
 static void rapl_init_domains(struct rapl_package *rp);
 static int rapl_read_data_raw(struct rapl_domain *rd,
@@ -644,109 +560,6 @@ static u64 rapl_unit_xlate(struct rapl_domain *rd, enum unit_type type,
 	return div64_u64(value, scale);
 }
 
-/* RAPL primitives for MSR and MMIO I/F */
-static struct rapl_primitive_info rpi_msr[NR_RAPL_PRIMITIVES] = {
-	/* name, mask, shift, msr index, unit divisor */
-	[POWER_LIMIT1]		= PRIMITIVE_INFO_INIT(POWER_LIMIT1, POWER_LIMIT1_MASK, 0,
-						      RAPL_DOMAIN_REG_LIMIT, POWER_UNIT, 0),
-	[POWER_LIMIT2]		= PRIMITIVE_INFO_INIT(POWER_LIMIT2, POWER_LIMIT2_MASK, 32,
-						      RAPL_DOMAIN_REG_LIMIT, POWER_UNIT, 0),
-	[POWER_LIMIT4]		= PRIMITIVE_INFO_INIT(POWER_LIMIT4, POWER_LIMIT4_MASK, 0,
-						      RAPL_DOMAIN_REG_PL4, POWER_UNIT, 0),
-	[ENERGY_COUNTER]	= PRIMITIVE_INFO_INIT(ENERGY_COUNTER, ENERGY_STATUS_MASK, 0,
-						      RAPL_DOMAIN_REG_STATUS, ENERGY_UNIT, 0),
-	[FW_LOCK]		= PRIMITIVE_INFO_INIT(FW_LOCK, POWER_LOW_LOCK, 31,
-						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
-	[FW_HIGH_LOCK]		= PRIMITIVE_INFO_INIT(FW_LOCK, POWER_HIGH_LOCK, 63,
-						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
-	[PL1_ENABLE]		= PRIMITIVE_INFO_INIT(PL1_ENABLE, POWER_LIMIT1_ENABLE, 15,
-						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
-	[PL1_CLAMP]		= PRIMITIVE_INFO_INIT(PL1_CLAMP, POWER_LIMIT1_CLAMP, 16,
-						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
-	[PL2_ENABLE]		= PRIMITIVE_INFO_INIT(PL2_ENABLE, POWER_LIMIT2_ENABLE, 47,
-						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
-	[PL2_CLAMP]		= PRIMITIVE_INFO_INIT(PL2_CLAMP, POWER_LIMIT2_CLAMP, 48,
-						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
-	[TIME_WINDOW1]		= PRIMITIVE_INFO_INIT(TIME_WINDOW1, TIME_WINDOW1_MASK, 17,
-						      RAPL_DOMAIN_REG_LIMIT, TIME_UNIT, 0),
-	[TIME_WINDOW2]		= PRIMITIVE_INFO_INIT(TIME_WINDOW2, TIME_WINDOW2_MASK, 49,
-						      RAPL_DOMAIN_REG_LIMIT, TIME_UNIT, 0),
-	[THERMAL_SPEC_POWER]	= PRIMITIVE_INFO_INIT(THERMAL_SPEC_POWER,
-						      POWER_INFO_THERMAL_SPEC_MASK, 0,
-						      RAPL_DOMAIN_REG_INFO, POWER_UNIT, 0),
-	[MAX_POWER]		= PRIMITIVE_INFO_INIT(MAX_POWER, POWER_INFO_MAX_MASK, 32,
-						      RAPL_DOMAIN_REG_INFO, POWER_UNIT, 0),
-	[MIN_POWER]		= PRIMITIVE_INFO_INIT(MIN_POWER, POWER_INFO_MIN_MASK, 16,
-						      RAPL_DOMAIN_REG_INFO, POWER_UNIT, 0),
-	[MAX_TIME_WINDOW]	= PRIMITIVE_INFO_INIT(MAX_TIME_WINDOW,
-						      POWER_INFO_MAX_TIME_WIN_MASK, 48,
-						      RAPL_DOMAIN_REG_INFO, TIME_UNIT, 0),
-	[THROTTLED_TIME]	= PRIMITIVE_INFO_INIT(THROTTLED_TIME,
-						      PERF_STATUS_THROTTLE_TIME_MASK, 0,
-						      RAPL_DOMAIN_REG_PERF, TIME_UNIT, 0),
-	[PRIORITY_LEVEL]	= PRIMITIVE_INFO_INIT(PRIORITY_LEVEL, PP_POLICY_MASK, 0,
-						      RAPL_DOMAIN_REG_POLICY, ARBITRARY_UNIT, 0),
-	[PSYS_POWER_LIMIT1]	= PRIMITIVE_INFO_INIT(PSYS_POWER_LIMIT1, PSYS_POWER_LIMIT1_MASK, 0,
-						      RAPL_DOMAIN_REG_LIMIT, POWER_UNIT, 0),
-	[PSYS_POWER_LIMIT2]	= PRIMITIVE_INFO_INIT(PSYS_POWER_LIMIT2, PSYS_POWER_LIMIT2_MASK,
-						      32, RAPL_DOMAIN_REG_LIMIT, POWER_UNIT, 0),
-	[PSYS_PL1_ENABLE]	= PRIMITIVE_INFO_INIT(PSYS_PL1_ENABLE, PSYS_POWER_LIMIT1_ENABLE,
-						      17, RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT,
-						      0),
-	[PSYS_PL2_ENABLE]	= PRIMITIVE_INFO_INIT(PSYS_PL2_ENABLE, PSYS_POWER_LIMIT2_ENABLE,
-						      49, RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT,
-						      0),
-	[PSYS_TIME_WINDOW1]	= PRIMITIVE_INFO_INIT(PSYS_TIME_WINDOW1, PSYS_TIME_WINDOW1_MASK,
-						      19, RAPL_DOMAIN_REG_LIMIT, TIME_UNIT, 0),
-	[PSYS_TIME_WINDOW2]	= PRIMITIVE_INFO_INIT(PSYS_TIME_WINDOW2, PSYS_TIME_WINDOW2_MASK,
-						      51, RAPL_DOMAIN_REG_LIMIT, TIME_UNIT, 0),
-	/* non-hardware */
-	[AVERAGE_POWER]		= PRIMITIVE_INFO_INIT(AVERAGE_POWER, 0, 0, 0, POWER_UNIT,
-						      RAPL_PRIMITIVE_DERIVED),
-};
-
-/* RAPL primitives for TPMI I/F */
-static struct rapl_primitive_info rpi_tpmi[NR_RAPL_PRIMITIVES] = {
-	/* name, mask, shift, msr index, unit divisor */
-	[POWER_LIMIT1]		= PRIMITIVE_INFO_INIT(POWER_LIMIT1, TPMI_POWER_LIMIT_MASK, 0,
-						      RAPL_DOMAIN_REG_LIMIT, POWER_UNIT, 0),
-	[POWER_LIMIT2]		= PRIMITIVE_INFO_INIT(POWER_LIMIT2, TPMI_POWER_LIMIT_MASK, 0,
-						      RAPL_DOMAIN_REG_PL2, POWER_UNIT, 0),
-	[POWER_LIMIT4]		= PRIMITIVE_INFO_INIT(POWER_LIMIT4, TPMI_POWER_LIMIT_MASK, 0,
-						      RAPL_DOMAIN_REG_PL4, POWER_UNIT, 0),
-	[ENERGY_COUNTER]	= PRIMITIVE_INFO_INIT(ENERGY_COUNTER, ENERGY_STATUS_MASK, 0,
-						      RAPL_DOMAIN_REG_STATUS, ENERGY_UNIT, 0),
-	[PL1_LOCK]		= PRIMITIVE_INFO_INIT(PL1_LOCK, POWER_HIGH_LOCK, 63,
-						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
-	[PL2_LOCK]		= PRIMITIVE_INFO_INIT(PL2_LOCK, POWER_HIGH_LOCK, 63,
-						      RAPL_DOMAIN_REG_PL2, ARBITRARY_UNIT, 0),
-	[PL4_LOCK]		= PRIMITIVE_INFO_INIT(PL4_LOCK, POWER_HIGH_LOCK, 63,
-						      RAPL_DOMAIN_REG_PL4, ARBITRARY_UNIT, 0),
-	[PL1_ENABLE]		= PRIMITIVE_INFO_INIT(PL1_ENABLE, TPMI_POWER_LIMIT_ENABLE, 62,
-						      RAPL_DOMAIN_REG_LIMIT, ARBITRARY_UNIT, 0),
-	[PL2_ENABLE]		= PRIMITIVE_INFO_INIT(PL2_ENABLE, TPMI_POWER_LIMIT_ENABLE, 62,
-						      RAPL_DOMAIN_REG_PL2, ARBITRARY_UNIT, 0),
-	[PL4_ENABLE]		= PRIMITIVE_INFO_INIT(PL4_ENABLE, TPMI_POWER_LIMIT_ENABLE, 62,
-						      RAPL_DOMAIN_REG_PL4, ARBITRARY_UNIT, 0),
-	[TIME_WINDOW1]		= PRIMITIVE_INFO_INIT(TIME_WINDOW1, TPMI_TIME_WINDOW_MASK, 18,
-						      RAPL_DOMAIN_REG_LIMIT, TIME_UNIT, 0),
-	[TIME_WINDOW2]		= PRIMITIVE_INFO_INIT(TIME_WINDOW2, TPMI_TIME_WINDOW_MASK, 18,
-						      RAPL_DOMAIN_REG_PL2, TIME_UNIT, 0),
-	[THERMAL_SPEC_POWER]	= PRIMITIVE_INFO_INIT(THERMAL_SPEC_POWER, TPMI_INFO_SPEC_MASK, 0,
-						      RAPL_DOMAIN_REG_INFO, POWER_UNIT, 0),
-	[MAX_POWER]		= PRIMITIVE_INFO_INIT(MAX_POWER, TPMI_INFO_MAX_MASK, 36,
-						      RAPL_DOMAIN_REG_INFO, POWER_UNIT, 0),
-	[MIN_POWER]		= PRIMITIVE_INFO_INIT(MIN_POWER, TPMI_INFO_MIN_MASK, 18,
-						      RAPL_DOMAIN_REG_INFO, POWER_UNIT, 0),
-	[MAX_TIME_WINDOW]	= PRIMITIVE_INFO_INIT(MAX_TIME_WINDOW, TPMI_INFO_MAX_TIME_WIN_MASK,
-						      54, RAPL_DOMAIN_REG_INFO, TIME_UNIT, 0),
-	[THROTTLED_TIME]	= PRIMITIVE_INFO_INIT(THROTTLED_TIME, PERF_STATUS_THROTTLE_TIME_MASK,
-						      0, RAPL_DOMAIN_REG_PERF, TIME_UNIT, 0),
-	/* non-hardware */
-	[AVERAGE_POWER]		= PRIMITIVE_INFO_INIT(AVERAGE_POWER, 0, 0, 0, POWER_UNIT,
-						      RAPL_PRIMITIVE_DERIVED),
-};
-
 static struct rapl_primitive_info *get_rpi(struct rapl_package *rp, int prim)
 {
 	struct rapl_primitive_info *rpi = rp->priv->rpi;
@@ -759,19 +572,6 @@ static struct rapl_primitive_info *get_rpi(struct rapl_package *rp, int prim)
 
 static int rapl_config(struct rapl_package *rp)
 {
-	switch (rp->priv->type) {
-	/* MMIO I/F shares the same register layout as MSR registers */
-	case RAPL_IF_MMIO:
-	case RAPL_IF_MSR:
-		rp->priv->rpi = (void *)rpi_msr;
-		break;
-	case RAPL_IF_TPMI:
-		rp->priv->rpi = (void *)rpi_tpmi;
-		break;
-	default:
-		return -EINVAL;
-	}
-
 	/* defaults_msr can be NULL on unsupported platforms */
 	if (!rp->priv->defaults || !rp->priv->rpi)
 		return -ENODEV;
@@ -836,12 +636,6 @@ static int rapl_read_data_raw(struct rapl_domain *rd,
 	ra.reg = rd->regs[rpi->id];
 	if (!ra.reg.val)
 		return -EINVAL;
-
-	/* non-hardware data are collected by the polling thread */
-	if (rpi->flag & RAPL_PRIMITIVE_DERIVED) {
-		*data = rd->rdd.primitives[prim];
-		return 0;
-	}
 
 	ra.mask = rpi->mask;
 
@@ -1647,7 +1441,7 @@ static ssize_t cpumask_show(struct device *dev,
 	}
 	cpus_read_unlock();
 
-	ret = cpumap_print_to_pagebuf(true, buf, cpu_mask);
+	ret = sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpu_mask));
 
 	free_cpumask_var(cpu_mask);
 
@@ -1872,64 +1666,6 @@ void rapl_package_remove_pmu(struct rapl_package *rp)
 EXPORT_SYMBOL_NS_GPL(rapl_package_remove_pmu, "INTEL_RAPL");
 #endif
 
-/* pm notifier for saving/restoring Power Limit settings */
-static void power_limit_state_save(void)
-{
-	struct rapl_package *rp;
-	struct rapl_domain *rd;
-	int ret;
-
-	cpus_read_lock();
-	list_for_each_entry(rp, &rapl_packages, plist) {
-		if (!rp->power_zone)
-			continue;
-		rd = power_zone_to_rapl_domain(rp->power_zone);
-		for (int i = POWER_LIMIT1; i < NR_POWER_LIMITS; i++) {
-			ret = rapl_read_pl_data(rd, i, PL_LIMIT, true,
-						&rd->rpl[i].last_power_limit);
-			if (ret)
-				rd->rpl[i].last_power_limit = 0;
-		}
-	}
-	cpus_read_unlock();
-}
-
-static void power_limit_state_restore(void)
-{
-	struct rapl_package *rp;
-	struct rapl_domain *rd;
-
-	cpus_read_lock();
-	list_for_each_entry(rp, &rapl_packages, plist) {
-		if (!rp->power_zone)
-			continue;
-		rd = power_zone_to_rapl_domain(rp->power_zone);
-		for (int i = POWER_LIMIT1; i < NR_POWER_LIMITS; i++)
-			if (rd->rpl[i].last_power_limit)
-				rapl_write_pl_data(rd, i, PL_LIMIT,
-						   rd->rpl[i].last_power_limit);
-	}
-	cpus_read_unlock();
-}
-
-static int rapl_pm_callback(struct notifier_block *nb,
-			    unsigned long mode, void *_unused)
-{
-	switch (mode) {
-	case PM_SUSPEND_PREPARE:
-		power_limit_state_save();
-		break;
-	case PM_POST_SUSPEND:
-		power_limit_state_restore();
-		break;
-	}
-	return NOTIFY_OK;
-}
-
-static struct notifier_block rapl_pm_notifier = {
-	.notifier_call = rapl_pm_callback,
-};
-
 /* called from CPU hotplug notifier, hotplug lock held */
 void rapl_remove_package_cpuslocked(struct rapl_package *rp)
 {
@@ -1959,9 +1695,6 @@ void rapl_remove_package_cpuslocked(struct rapl_package *rp)
 				 &rd_package->power_zone);
 	list_del(&rp->plist);
 	kfree(rp);
-
-	if (list_empty(&rapl_packages))
-		unregister_pm_notifier(&rapl_pm_notifier);
 }
 EXPORT_SYMBOL_NS_GPL(rapl_remove_package_cpuslocked, "INTEL_RAPL");
 
@@ -2037,7 +1770,8 @@ struct rapl_package *rapl_add_package_cpuslocked(int id, struct rapl_if_priv *pr
 			 topology_physical_package_id(id) : topology_logical_die_id(id);
 		if ((int)(rp->id) < 0) {
 			pr_err("topology_logical_(package/die)_id() returned a negative value");
-			return ERR_PTR(-EINVAL);
+			ret = -EINVAL;
+			goto err_free_package;
 		}
 		rp->lead_cpu = id;
 		if (!rapl_msrs_are_pkg_scope() && topology_max_dies_per_package() > 1)
@@ -2064,8 +1798,6 @@ struct rapl_package *rapl_add_package_cpuslocked(int id, struct rapl_if_priv *pr
 	}
 	ret = rapl_package_register_powercap(rp);
 	if (!ret) {
-		if (list_empty(&rapl_packages))
-			register_pm_notifier(&rapl_pm_notifier);
 		INIT_LIST_HEAD(&rp->plist);
 		list_add(&rp->plist, &rapl_packages);
 		return rp;
@@ -2084,6 +1816,77 @@ struct rapl_package *rapl_add_package(int id, struct rapl_if_priv *priv, bool id
 	return rapl_add_package_cpuslocked(id, priv, id_is_cpu);
 }
 EXPORT_SYMBOL_NS_GPL(rapl_add_package, "INTEL_RAPL");
+
+static void power_limit_state_save(void)
+{
+	struct rapl_package *rp;
+	struct rapl_domain *rd;
+	int ret, i;
+
+	cpus_read_lock();
+	list_for_each_entry(rp, &rapl_packages, plist) {
+		if (!rp->power_zone)
+			continue;
+		rd = power_zone_to_rapl_domain(rp->power_zone);
+		for (i = POWER_LIMIT1; i < NR_POWER_LIMITS; i++) {
+			ret = rapl_read_pl_data(rd, i, PL_LIMIT, true,
+						 &rd->rpl[i].last_power_limit);
+			if (ret)
+				rd->rpl[i].last_power_limit = 0;
+		}
+	}
+	cpus_read_unlock();
+}
+
+static void power_limit_state_restore(void)
+{
+	struct rapl_package *rp;
+	struct rapl_domain *rd;
+	int i;
+
+	cpus_read_lock();
+	list_for_each_entry(rp, &rapl_packages, plist) {
+		if (!rp->power_zone)
+			continue;
+		rd = power_zone_to_rapl_domain(rp->power_zone);
+		for (i = POWER_LIMIT1; i < NR_POWER_LIMITS; i++)
+			if (rd->rpl[i].last_power_limit)
+				rapl_write_pl_data(rd, i, PL_LIMIT,
+					       rd->rpl[i].last_power_limit);
+	}
+	cpus_read_unlock();
+}
+
+static int rapl_pm_callback(struct notifier_block *nb,
+			    unsigned long mode, void *_unused)
+{
+	switch (mode) {
+	case PM_SUSPEND_PREPARE:
+		power_limit_state_save();
+		break;
+	case PM_POST_SUSPEND:
+		power_limit_state_restore();
+		break;
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block rapl_pm_notifier = {
+	.notifier_call = rapl_pm_callback,
+};
+
+static int __init rapl_init(void)
+{
+	return register_pm_notifier(&rapl_pm_notifier);
+}
+
+static void __exit rapl_exit(void)
+{
+	unregister_pm_notifier(&rapl_pm_notifier);
+}
+
+fs_initcall(rapl_init);
+module_exit(rapl_exit);
 
 MODULE_DESCRIPTION("Intel Runtime Average Power Limit (RAPL) common code");
 MODULE_AUTHOR("Jacob Pan <jacob.jun.pan@intel.com>");

@@ -948,17 +948,17 @@ static int ad9523_setup(struct iio_dev *indio_dev)
 
 static int ad9523_probe(struct spi_device *spi)
 {
-	struct ad9523_platform_data *pdata = dev_get_platdata(&spi->dev);
+	struct device *dev = &spi->dev;
+	struct ad9523_platform_data *pdata;
 	struct iio_dev *indio_dev;
 	struct ad9523_state *st;
 	int ret;
 
-	if (!pdata) {
-		dev_err(&spi->dev, "no platform data?\n");
-		return -EINVAL;
-	}
+	pdata = dev_get_platdata(dev);
+	if (!pdata)
+		return dev_err_probe(dev, -EINVAL, "no platform data?\n");
 
-	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	indio_dev = devm_iio_device_alloc(dev, sizeof(*st));
 	if (indio_dev == NULL)
 		return -ENOMEM;
 
@@ -966,16 +966,16 @@ static int ad9523_probe(struct spi_device *spi)
 
 	mutex_init(&st->lock);
 
-	ret = devm_regulator_get_enable(&spi->dev, "vcc");
+	ret = devm_regulator_get_enable(dev, "vcc");
 	if (ret)
 		return ret;
 
-	st->pwrdown_gpio = devm_gpiod_get_optional(&spi->dev, "powerdown",
+	st->pwrdown_gpio = devm_gpiod_get_optional(dev, "powerdown",
 		GPIOD_OUT_HIGH);
 	if (IS_ERR(st->pwrdown_gpio))
 		return PTR_ERR(st->pwrdown_gpio);
 
-	st->reset_gpio = devm_gpiod_get_optional(&spi->dev, "reset",
+	st->reset_gpio = devm_gpiod_get_optional(dev, "reset",
 		GPIOD_OUT_LOW);
 	if (IS_ERR(st->reset_gpio))
 		return PTR_ERR(st->reset_gpio);
@@ -985,12 +985,11 @@ static int ad9523_probe(struct spi_device *spi)
 		gpiod_direction_output(st->reset_gpio, 1);
 	}
 
-	st->sync_gpio = devm_gpiod_get_optional(&spi->dev, "sync",
+	st->sync_gpio = devm_gpiod_get_optional(dev, "sync",
 		GPIOD_OUT_HIGH);
 	if (IS_ERR(st->sync_gpio))
 		return PTR_ERR(st->sync_gpio);
 
-	spi_set_drvdata(spi, indio_dev);
 	st->spi = spi;
 	st->pdata = pdata;
 
@@ -1005,11 +1004,11 @@ static int ad9523_probe(struct spi_device *spi)
 	if (ret < 0)
 		return ret;
 
-	return devm_iio_device_register(&spi->dev, indio_dev);
+	return devm_iio_device_register(dev, indio_dev);
 }
 
 static const struct spi_device_id ad9523_id[] = {
-	{"ad9523-1", 9523},
+	{ .name = "ad9523-1" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad9523_id);

@@ -44,6 +44,7 @@
 #include <linux/hashtable.h>
 #include <linux/dma-fence.h>
 #include <linux/pci.h>
+#include <linux/xarray.h>
 
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_placement.h>
@@ -103,8 +104,8 @@
 #include "amdgpu_smuio.h"
 #include "amdgpu_fdinfo.h"
 #include "amdgpu_mca.h"
-#include "amdgpu_aca.h"
 #include "amdgpu_ras.h"
+#include "amdgpu_lockdep.h"
 #include "amdgpu_cper.h"
 #include "amdgpu_xcp.h"
 #include "amdgpu_seq64.h"
@@ -112,6 +113,7 @@
 #include "amdgpu_userq.h"
 #include "amdgpu_eviction_fence.h"
 #include "amdgpu_ip.h"
+#include "amdgpu_sa.h"
 #if defined(CONFIG_DRM_AMD_ISP)
 #include "amdgpu_isp.h"
 #endif
@@ -267,10 +269,10 @@ extern int amdgpu_rebar;
 
 extern int amdgpu_wbrf;
 extern int amdgpu_user_queue;
+extern int amdgpu_ptl;
 
 extern uint amdgpu_hdmi_hpd_debounce_delay_ms;
 
-#define AMDGPU_VM_MAX_NUM_CTX			4096
 #define AMDGPU_SG_THRESHOLD			(256*1024*1024)
 #define AMDGPU_WAIT_IDLE_TIMEOUT_IN_MS	        3000
 #define AMDGPU_MAX_USEC_TIMEOUT			100000	/* 100 ms */
@@ -303,9 +305,10 @@ extern uint amdgpu_hdmi_hpd_debounce_delay_ms;
 
 /* reset mask */
 #define AMDGPU_RESET_TYPE_FULL (1 << 0) /* full adapter reset, mode1/mode2/BACO/etc. */
-#define AMDGPU_RESET_TYPE_SOFT_RESET (1 << 1) /* IP level soft reset */
+#define AMDGPU_RESET_TYPE_SOFT_RECOVERY (1 << 1) /* soft recovery, eg. kill shaders */
 #define AMDGPU_RESET_TYPE_PER_QUEUE (1 << 2) /* per queue */
 #define AMDGPU_RESET_TYPE_PER_PIPE (1 << 3) /* per pipe */
+#define AMDGPU_RESET_TYPE_IP_BLOCK_SOFT_RESET (1 << 4) /* soft-resets an IP block */
 
 /* max cursor sizes (in pixels) */
 #define CIK_CURSOR_WIDTH 128
@@ -385,37 +388,6 @@ struct amdgpu_clock {
 	uint32_t max_pixel_clock;
 };
 
-/* sub-allocation manager, it has to be protected by another lock.
- * By conception this is an helper for other part of the driver
- * like the indirect buffer or semaphore, which both have their
- * locking.
- *
- * Principe is simple, we keep a list of sub allocation in offset
- * order (first entry has offset == 0, last entry has the highest
- * offset).
- *
- * When allocating new object we first check if there is room at
- * the end total_size - (last_object_offset + last_object_size) >=
- * alloc_size. If so we allocate new object there.
- *
- * When there is not enough room at the end, we start waiting for
- * each sub object until we reach object_offset+object_size >=
- * alloc_size, this object then become the sub object we return.
- *
- * Alignment can't be bigger than page size.
- *
- * Hole are not considered for allocation to keep things simple.
- * Assumption is that there won't be hole (all object on same
- * alignment).
- */
-
-struct amdgpu_sa_manager {
-	struct drm_suballoc_manager	base;
-	struct amdgpu_bo		*bo;
-	uint64_t			gpu_addr;
-	void				*cpu_ptr;
-};
-
 /*
  * IRQS.
  */
@@ -444,8 +416,7 @@ struct amdgpu_fpriv {
 	struct amdgpu_bo_va	*prt_va;
 	struct amdgpu_bo_va	*csa_va;
 	struct amdgpu_bo_va	*seq64_va;
-	struct mutex		bo_list_lock;
-	struct idr		bo_list_handles;
+	struct xarray		bo_list_handles;
 	struct amdgpu_ctx_mgr	ctx_mgr;
 	struct amdgpu_userq_mgr	userq_mgr;
 
@@ -464,7 +435,7 @@ int amdgpu_file_to_fpriv(struct file *filp, struct amdgpu_fpriv **fpriv);
 #define AMDGPU_MAX_WB 1024	/* Reserve at most 1024 WB slots for amdgpu-owned rings. */
 
 /**
- * amdgpu_wb - This struct is used for small GPU memory allocation.
+ * struct amdgpu_wb - This struct is used for small GPU memory allocation.
  *
  * This struct is used to allocate a small amount of GPU memory that can be
  * used to shadow certain states into the memory. This is especially useful for
@@ -538,44 +509,6 @@ struct amdgpu_allowed_register_entry {
 	bool grbm_indexed;
 };
 
-/**
- * enum amd_reset_method - Methods for resetting AMD GPU devices
- *
- * @AMD_RESET_METHOD_NONE: The device will not be reset.
- * @AMD_RESET_LEGACY: Method reserved for SI, CIK and VI ASICs.
- * @AMD_RESET_MODE0: Reset the entire ASIC. Not currently available for the
- *                   any device.
- * @AMD_RESET_MODE1: Resets all IP blocks on the ASIC (SDMA, GFX, VCN, etc.)
- *                   individually. Suitable only for some discrete GPU, not
- *                   available for all ASICs.
- * @AMD_RESET_MODE2: Resets a lesser level of IPs compared to MODE1. Which IPs
- *                   are reset depends on the ASIC. Notably doesn't reset IPs
- *                   shared with the CPU on APUs or the memory controllers (so
- *                   VRAM is not lost). Not available on all ASICs.
- * @AMD_RESET_LINK: Triggers SW-UP link reset on other GPUs
- * @AMD_RESET_BACO: BACO (Bus Alive, Chip Off) method powers off and on the card
- *                  but without powering off the PCI bus. Suitable only for
- *                  discrete GPUs.
- * @AMD_RESET_PCI: Does a full bus reset using core Linux subsystem PCI reset
- *                 and does a secondary bus reset or FLR, depending on what the
- *                 underlying hardware supports.
- *
- * Methods available for AMD GPU driver for resetting the device. Not all
- * methods are suitable for every device. User can override the method using
- * module parameter `reset_method`.
- */
-enum amd_reset_method {
-	AMD_RESET_METHOD_NONE = -1,
-	AMD_RESET_METHOD_LEGACY = 0,
-	AMD_RESET_METHOD_MODE0,
-	AMD_RESET_METHOD_MODE1,
-	AMD_RESET_METHOD_MODE2,
-	AMD_RESET_METHOD_LINK,
-	AMD_RESET_METHOD_BACO,
-	AMD_RESET_METHOD_PCI,
-	AMD_RESET_METHOD_ON_INIT,
-};
-
 struct amdgpu_video_codec_info {
 	u32 codec_type;
 	u32 max_width;
@@ -623,8 +556,6 @@ struct amdgpu_asic_funcs {
 	/* invalidate hdp read cache */
 	void (*invalidate_hdp)(struct amdgpu_device *adev,
 			       struct amdgpu_ring *ring);
-	/* check if the asic needs a full reset of if soft reset will work */
-	bool (*need_full_reset)(struct amdgpu_device *adev);
 	/* initialize doorbell layout for specific asic*/
 	void (*init_doorbell_index)(struct amdgpu_device *adev);
 	/* PCIe bandwidth usage */
@@ -690,6 +621,7 @@ enum amdgpu_uid_type {
 	AMDGPU_UID_TYPE_XCD,
 	AMDGPU_UID_TYPE_AID,
 	AMDGPU_UID_TYPE_SOC,
+	AMDGPU_UID_TYPE_MID,
 	AMDGPU_UID_TYPE_MAX
 };
 
@@ -886,6 +818,7 @@ struct amdgpu_device {
 	struct dev_pm_domain		vga_pm_domain;
 	bool				have_disp_power_ref;
 	bool                            have_atomics_support;
+	bool				is_sw_smu;
 
 	/* BIOS */
 	bool				is_atom_fw;
@@ -1044,11 +977,6 @@ struct amdgpu_device {
 	struct amdgpu_mqd               mqds[AMDGPU_HW_IP_NUM];
 	const struct amdgpu_userq_funcs *userq_funcs[AMDGPU_HW_IP_NUM];
 
-	/* xarray used to retrieve the user queue fence driver reference
-	 * in the EOP interrupt handler to signal the particular user
-	 * queue fence.
-	 */
-	struct xarray			userq_xa;
 	/**
 	 * @userq_doorbell_xa: Global user queue map (doorbell index → queue)
 	 * Key: doorbell_index (unique global identifier for the queue)
@@ -1061,9 +989,6 @@ struct amdgpu_device {
 
 	/* MCA */
 	struct amdgpu_mca               mca;
-
-	/* ACA */
-	struct amdgpu_aca		aca;
 
 	/* CPER */
 	struct amdgpu_cper		cper;
@@ -1115,6 +1040,7 @@ struct amdgpu_device {
 	long				psp_timeout;
 
 	uint64_t			unique_id;
+	uint8_t				unitid;
 	uint64_t	df_perfmon_config_assign_mask[AMDGPU_MAX_DF_PERFMONS];
 
 	/* enable runtime pm on the device */
@@ -1175,6 +1101,8 @@ struct amdgpu_device {
 	bool                            debug_vm_userptr;
 	bool                            debug_disable_ce_logs;
 	bool                            debug_enable_ce_cs;
+	bool                            debug_hibernation_thaw_resume_gpu;
+	bool                            debug_disable_ip_block_soft_reset;
 
 	/* Protection for the following isolation structure */
 	struct mutex                    enforce_isolation_mutex;
@@ -1194,7 +1122,6 @@ struct amdgpu_device {
 	bool                            apu_prefer_gtt;
 
 	bool                            userq_halt_for_enforce_isolation;
-	struct work_struct              userq_reset_work;
 	struct amdgpu_uid *uid_info;
 
 	struct amdgpu_uma_carveout_info uma_info;
@@ -1377,6 +1304,8 @@ int emu_soc_asic_init(struct amdgpu_device *adev);
 #define RBIOS16(i) (RBIOS8(i) | (RBIOS8((i)+1) << 8))
 #define RBIOS32(i) ((RBIOS16(i)) | (RBIOS16((i)+2) << 16))
 
+#include "amdgpu_reset.h"
+
 /*
  * ASICs macro.
  */
@@ -1394,7 +1323,6 @@ int emu_soc_asic_init(struct amdgpu_device *adev);
 #define amdgpu_asic_read_bios_from_rom(adev, b, l) (adev)->asic_funcs->read_bios_from_rom((adev), (b), (l))
 #define amdgpu_asic_read_register(adev, se, sh, offset, v)((adev)->asic_funcs->read_register((adev), (se), (sh), (offset), (v)))
 #define amdgpu_asic_get_config_memsize(adev) (adev)->asic_funcs->get_config_memsize((adev))
-#define amdgpu_asic_need_full_reset(adev) (adev)->asic_funcs->need_full_reset((adev))
 #define amdgpu_asic_init_doorbell_index(adev) (adev)->asic_funcs->init_doorbell_index((adev))
 #define amdgpu_asic_get_pcie_usage(adev, cnt0, cnt1) ((adev)->asic_funcs->get_pcie_usage((adev), (cnt0), (cnt1)))
 #define amdgpu_asic_need_reset_on_init(adev) (adev)->asic_funcs->need_reset_on_init((adev))
@@ -1466,6 +1394,8 @@ ssize_t amdgpu_get_soft_full_reset_mask(struct amdgpu_ring *ring);
 ssize_t amdgpu_show_reset_mask(char *buf, uint32_t supported_reset);
 void amdgpu_sdma_set_vm_pte_scheds(struct amdgpu_device *adev,
 				   const struct amdgpu_vm_pte_funcs *vm_pte_funcs);
+void amdgpu_sdma_set_buffer_funcs_scheds(struct amdgpu_device *adev,
+					 const struct amdgpu_buffer_funcs *buffer_funcs);
 
 /* atpx handler */
 #if defined(CONFIG_VGA_SWITCHEROO)
@@ -1504,6 +1434,8 @@ int amdgpu_enable_vblank_kms(struct drm_crtc *crtc);
 void amdgpu_disable_vblank_kms(struct drm_crtc *crtc);
 int amdgpu_info_ioctl(struct drm_device *dev, void *data,
 		      struct drm_file *filp);
+int amdgpu_proc_options_ioctl(struct drm_device *dev, void *data,
+			      struct drm_file *filp);
 
 /*
  * functions used by amdgpu_encoder.c

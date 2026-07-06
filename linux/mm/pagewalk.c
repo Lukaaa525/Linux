@@ -108,9 +108,15 @@ static int walk_pmd_range(pud_t *pud, unsigned long addr, unsigned long end,
 	/*
 	 * For PTE handling, pte_offset_map_lock() takes care of checking
 	 * whether there actually is a page table. But it also has to be
-	 * very careful about concurrent page table reclaim. If we spot a PMD
-	 * table, it cannot go away, so we can just walk it. However, if we find
-	 * something else, we have to retry.
+	 * very careful about concurrent page table reclaim.
+	 *
+	 * Similarly, we have to be careful here - a PUD entry that points
+	 * to a PMD table cannot go away, so we can just walk it. But if
+	 * it's something else, we need to ensure we didn't race something,
+	 * so need to retry.
+	 *
+	 * A pertinent example of this is a PUD refault after PUD split -
+	 * we will need to split again or risk accessing invalid memory.
 	 */
 	if (!pud_present(pudval) || pud_leaf(pudval)) {
 		walk->action = ACTION_AGAIN;
@@ -236,7 +242,6 @@ static int walk_pud_range(p4d_t *p4d, unsigned long addr, unsigned long end,
 
 		if (walk->action == ACTION_AGAIN)
 			goto again;
-
 	} while (pud++, addr = next, addr != end);
 
 	return err;

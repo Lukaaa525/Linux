@@ -7,10 +7,12 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/align.h>
 #include <linux/fs.h>
 #include <linux/dmi.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/string.h>
 #include <linux/sysfs.h>
 #include <linux/wmi.h>
 #include "dell-wmi-sysman.h"
@@ -34,7 +36,7 @@ static int reset_option = -1;
  * @buffer_len: length of the destination buffer
  * @str: the string to insert into buffer
  */
-ssize_t populate_string_buffer(char *buffer, size_t buffer_len, const char *str)
+ssize_t populate_string_buffer(u8 *buffer, size_t buffer_len, const char *str)
 {
 	u16 *length = (u16 *)buffer;
 	u16 *target = length + 1;
@@ -73,13 +75,9 @@ size_t calculate_string_buffer(const char *str)
  *
  * Currently only supported type is Admin password
  */
-size_t calculate_security_buffer(char *authentication)
+size_t calculate_security_buffer(const char *authentication)
 {
-	if (strlen(authentication) > 0) {
-		return (sizeof(u32) * 2) + strlen(authentication) +
-			strlen(authentication) % 2;
-	}
-	return sizeof(u32) * 2;
+	return sizeof(u32) * 2 + ALIGN(strlen(authentication), 2);
 }
 
 /**
@@ -89,18 +87,18 @@ size_t calculate_security_buffer(char *authentication)
  *
  * Currently only supported type is PLAIN TEXT
  */
-void populate_security_buffer(char *buffer, char *authentication)
+void populate_security_buffer(u8 *buffer, const char *authentication)
 {
-	char *auth = buffer + sizeof(u32) * 2;
+	size_t seclen = strlen(authentication);
+	u8 *auth = buffer + sizeof(u32) * 2;
 	u32 *sectype = (u32 *) buffer;
-	u32 *seclen = sectype + 1;
+	u32 *seclenp = sectype + 1;
 
-	*sectype = strlen(authentication) > 0 ? 1 : 0;
-	*seclen = strlen(authentication);
+	*sectype = !!seclen;
+	*seclenp = seclen;
 
 	/* plain text */
-	if (strlen(authentication) > 0)
-		memcpy(auth, authentication, *seclen);
+	memcpy(auth, authentication, seclen);
 }
 
 /**
@@ -315,7 +313,7 @@ static int alloc_attributes_data(int attr_type)
  * destroy_attribute_objs() - Free a kset of kobjects
  * @kset: The kset to destroy
  *
- * Fress kobjects created for each attribute_name under attribute type kset
+ * Frees kobjects created for each attribute_name under attribute type kset.
  */
 static void destroy_attribute_objs(struct kset *kset)
 {

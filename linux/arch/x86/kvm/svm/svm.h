@@ -23,7 +23,9 @@
 #include <asm/sev-common.h>
 
 #include "cpuid.h"
-#include "kvm_cache_regs.h"
+#include "regs.h"
+#include "x86.h"
+#include "pmu.h"
 
 /*
  * Helpers to convert to/from physical addresses for pages whose address is
@@ -44,6 +46,7 @@ static inline struct page *__sme_pa_to_page(unsigned long pa)
 #define	IOPM_SIZE PAGE_SIZE * 3
 #define	MSRPM_SIZE PAGE_SIZE * 2
 
+extern bool gmet_enabled;
 extern bool npt_enabled;
 extern int nrips;
 extern int vgif;
@@ -92,6 +95,7 @@ enum {
 /* TPR and CR2 are always written before VMRUN */
 #define VMCB_ALWAYS_DIRTY_MASK	((1U << VMCB_INTR) | (1U << VMCB_CR2))
 
+#ifdef CONFIG_KVM_AMD_SEV
 struct kvm_sev_info {
 	bool active;		/* SEV enabled guest */
 	bool es_active;		/* SEV-ES enabled guest */
@@ -117,6 +121,7 @@ struct kvm_sev_info {
 	cpumask_var_t have_run_cpus; /* CPUs that have done VMRUN for this VM. */
 	bool snp_certs_enabled;	/* SNP certificate-fetching support. */
 };
+#endif
 
 struct kvm_svm {
 	struct kvm kvm;
@@ -127,7 +132,9 @@ struct kvm_svm {
 	u64 *avic_physical_id_table;
 	struct hlist_node hnode;
 
+#ifdef CONFIG_KVM_AMD_SEV
 	struct kvm_sev_info sev_info;
+#endif
 };
 
 struct kvm_vcpu;
@@ -161,6 +168,7 @@ struct vmcb_save_area_cached {
 	u64 isst_addr;
 	u64 rax;
 	u64 cr2;
+	u64 g_pat;
 	u64 dbgctl;
 	u64 br_from;
 	u64 br_to;
@@ -215,10 +223,6 @@ struct svm_nested_state {
 	 */
 	void *msrpm;
 
-	/* A VMRUN has started but has not yet been performed, so
-	 * we cannot inject a nested vmexit yet.  */
-	bool nested_run_pending;
-
 	/* cache for control fields of the guest */
 	struct vmcb_ctrl_area_cached ctl;
 
@@ -257,9 +261,12 @@ struct vcpu_sev_es_state {
 	bool ghcb_sa_free;
 
 	/* SNP Page-State-Change buffer entries currently being processed */
-	u16 psc_idx;
-	u16 psc_inflight;
-	bool psc_2m;
+	struct {
+		u16 cur_idx;
+		u16 end_idx;
+		u16 batch_size;
+		bool is_2m;
+	} psc;
 
 	u64 ghcb_registered_gpa;
 
@@ -383,34 +390,58 @@ static __always_inline struct kvm_svm *to_kvm_svm(struct kvm *kvm)
 	return container_of(kvm, struct kvm_svm, kvm);
 }
 
+#ifdef CONFIG_KVM_AMD_SEV
 static __always_inline struct kvm_sev_info *to_kvm_sev_info(struct kvm *kvm)
 {
 	return &to_kvm_svm(kvm)->sev_info;
 }
 
-#ifdef CONFIG_KVM_AMD_SEV
-static __always_inline bool sev_guest(struct kvm *kvm)
+static __always_inline bool ____sev_guest(struct kvm *kvm)
 {
 	return to_kvm_sev_info(kvm)->active;
 }
-static __always_inline bool sev_es_guest(struct kvm *kvm)
+static __always_inline bool ____sev_es_guest(struct kvm *kvm)
 {
 	struct kvm_sev_info *sev = to_kvm_sev_info(kvm);
 
 	return sev->es_active && !WARN_ON_ONCE(!sev->active);
 }
 
-static __always_inline bool sev_snp_guest(struct kvm *kvm)
+static __always_inline bool ____sev_snp_guest(struct kvm *kvm)
 {
 	struct kvm_sev_info *sev = to_kvm_sev_info(kvm);
 
 	return (sev->vmsa_features & SVM_SEV_FEAT_SNP_ACTIVE) &&
-	       !WARN_ON_ONCE(!sev_es_guest(kvm));
+	       !WARN_ON_ONCE(!____sev_es_guest(kvm));
+}
+
+static __always_inline bool is_sev_guest(struct kvm_vcpu *vcpu)
+{
+	return ____sev_guest(vcpu->kvm);
+}
+static __always_inline bool is_sev_es_guest(struct kvm_vcpu *vcpu)
+{
+	return ____sev_es_guest(vcpu->kvm);
+}
+
+static __always_inline bool is_sev_snp_guest(struct kvm_vcpu *vcpu)
+{
+	return ____sev_snp_guest(vcpu->kvm);
 }
 #else
-#define sev_guest(kvm) false
-#define sev_es_guest(kvm) false
-#define sev_snp_guest(kvm) false
+static __always_inline bool is_sev_guest(struct kvm_vcpu *vcpu)
+{
+	return false;
+}
+static __always_inline bool is_sev_es_guest(struct kvm_vcpu *vcpu)
+{
+	return false;
+}
+
+static __always_inline bool is_sev_snp_guest(struct kvm_vcpu *vcpu)
+{
+	return false;
+}
 #endif
 
 static inline bool ghcb_gpa_is_registered(struct vcpu_svm *svm, u64 val)
@@ -439,6 +470,12 @@ static inline bool vmcb12_is_dirty(struct vmcb_ctrl_area_cached *control, int bi
 	return !test_bit(bit, (unsigned long *)&control->clean);
 }
 
+static inline void vmcb_set_gpat(struct vmcb *vmcb, u64 data)
+{
+	vmcb->save.g_pat = data;
+	vmcb_mark_dirty(vmcb, VMCB_NPT);
+}
+
 static __always_inline struct vcpu_svm *to_svm(struct kvm_vcpu *vcpu)
 {
 	return container_of(vcpu, struct vcpu_svm, vcpu);
@@ -460,7 +497,7 @@ static inline bool svm_is_vmrun_failure(u64 exit_code)
  * KVM_REQ_LOAD_MMU_PGD is always requested when the cached vcpu->arch.cr3
  * is changed.  svm_load_mmu_pgd() then syncs the new CR3 value into the VMCB.
  */
-#define SVM_REGS_LAZY_LOAD_SET	(1 << VCPU_EXREG_PDPTR)
+#define SVM_REGS_LAZY_LOAD_SET	(BIT(VCPU_REG_PDPTR))
 
 static inline void __vmcb_set_intercept(unsigned long *intercepts, u32 bit)
 {
@@ -614,6 +651,16 @@ static inline bool gif_set(struct vcpu_svm *svm)
 static inline bool nested_npt_enabled(struct vcpu_svm *svm)
 {
 	return svm->nested.ctl.misc_ctl & SVM_MISC_ENABLE_NP;
+}
+
+static inline bool l2_has_separate_pat(struct kvm_vcpu *vcpu)
+{
+	/*
+	 * If KVM_X86_QUIRK_NESTED_SVM_SHARED_PAT is disabled while a vCPU
+	 * is running, the L2 IA32_PAT semantics for that vCPU are undefined.
+	 */
+	return nested_npt_enabled(to_svm(vcpu)) &&
+	       !kvm_check_has_quirk(vcpu->kvm, KVM_X86_QUIRK_NESTED_SVM_SHARED_PAT);
 }
 
 static inline bool nested_vnmi_enabled(struct vcpu_svm *svm)
@@ -789,6 +836,8 @@ static inline void svm_enable_intercept_for_msr(struct kvm_vcpu *vcpu,
 	svm_set_intercept_for_msr(vcpu, msr, type, true);
 }
 
+int svm_skip_emulated_instruction(struct kvm_vcpu *vcpu);
+
 /* nested.c */
 
 #define NESTED_EXIT_HOST	0	/* Exit handled on host level */
@@ -850,8 +899,29 @@ void nested_copy_vmcb_control_to_cache(struct vcpu_svm *svm,
 void nested_copy_vmcb_save_to_cache(struct vcpu_svm *svm,
 				    struct vmcb_save_area *save);
 void nested_sync_control_from_vmcb02(struct vcpu_svm *svm);
-void nested_vmcb02_compute_g_pat(struct vcpu_svm *svm);
 void svm_switch_vmcb(struct vcpu_svm *svm, struct kvm_vmcb_info *target_vmcb);
+
+
+static inline void __svm_pmu_handle_nested_transition(struct vcpu_svm *svm,
+						      bool defer)
+{
+	struct kvm_pmu *pmu = vcpu_to_pmu(&svm->vcpu);
+	u64 counters = *(u64 *)pmu->pmc_has_mode_specific_enables;
+
+	__kvm_pmu_reprogram_counters(pmu, counters, defer);
+}
+
+static inline void svm_pmu_handle_nested_transition(struct vcpu_svm *svm)
+{
+	/*
+	 * Do NOT defer reprogramming the counters by default.  Instructions
+	 * causing a state change are counted based on the _new_ CPU state
+	 * (e.g. a successful VMRUN is counted in guest mode). Hence, the
+	 * counters should be reprogrammed with the new state _before_ the
+	 * instruction is potentially counted upon emulation completion.
+	 */
+	__svm_pmu_handle_nested_transition(svm, false);
+}
 
 extern struct kvm_x86_nested_ops svm_nested_ops;
 
@@ -928,6 +998,7 @@ static inline struct page *snp_safe_alloc_page(void)
 
 int sev_vcpu_create(struct kvm_vcpu *vcpu);
 void sev_free_vcpu(struct kvm_vcpu *vcpu);
+void sev_vm_init(struct kvm *kvm);
 void sev_vm_destroy(struct kvm *kvm);
 void __init sev_set_cpu_caps(void);
 void __init sev_hardware_setup(void);
@@ -954,6 +1025,7 @@ static inline struct page *snp_safe_alloc_page(void)
 
 static inline int sev_vcpu_create(struct kvm_vcpu *vcpu) { return 0; }
 static inline void sev_free_vcpu(struct kvm_vcpu *vcpu) {}
+static inline void sev_vm_init(struct kvm *kvm) {}
 static inline void sev_vm_destroy(struct kvm *kvm) {}
 static inline void __init sev_set_cpu_caps(void) {}
 static inline void __init sev_hardware_setup(void) {}
@@ -981,9 +1053,9 @@ static inline void sev_free_decrypted_vmsa(struct kvm_vcpu *vcpu, struct vmcb_sa
 
 /* vmenter.S */
 
-void __svm_sev_es_vcpu_run(struct vcpu_svm *svm, bool spec_ctrl_intercepted,
+void __svm_sev_es_vcpu_run(struct vcpu_svm *svm, unsigned int flags,
 			   struct sev_es_save_area *hostsa);
-void __svm_vcpu_run(struct vcpu_svm *svm, bool spec_ctrl_intercepted);
+void __svm_vcpu_run(struct vcpu_svm *svm, unsigned int flags);
 
 #define DEFINE_KVM_GHCB_ACCESSORS(field)						\
 static __always_inline u64 kvm_ghcb_get_##field(struct vcpu_svm *svm)			\

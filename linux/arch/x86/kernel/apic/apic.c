@@ -64,6 +64,7 @@
 #include <asm/tsc.h>
 #include <asm/hypervisor.h>
 #include <asm/cpu_device_id.h>
+#include <asm/cpuid/api.h>
 #include <asm/intel-family.h>
 #include <asm/irq_regs.h>
 #include <asm/cpu.h>
@@ -332,7 +333,7 @@ static void __setup_APIC_LVTT(unsigned int clocks, int oneshot, int irqen)
  * Since the offsets must be consistent for all cores, we keep track
  * of the LVT offsets in software and reserve the offset for the same
  * vector also to be used on other cores. An offset is freed by
- * setting the entry to APIC_EILVT_MASKED.
+ * setting the entry to APIC_LVT_MASKED.
  *
  * If the BIOS is right, there should be no conflicts. Otherwise a
  * "[Firmware Bug]: ..." error message is generated. However, if
@@ -344,9 +345,9 @@ static atomic_t eilvt_offsets[APIC_EILVT_NR_MAX];
 
 static inline int eilvt_entry_is_changeable(unsigned int old, unsigned int new)
 {
-	return (old & APIC_EILVT_MASKED)
-		|| (new == APIC_EILVT_MASKED)
-		|| ((new & ~APIC_EILVT_MASKED) == old);
+	return (old & APIC_LVT_MASKED)
+		|| (new == APIC_LVT_MASKED)
+		|| ((new & ~APIC_LVT_MASKED) == old);
 }
 
 static unsigned int reserve_eilvt_offset(int offset, unsigned int new)
@@ -358,13 +359,13 @@ static unsigned int reserve_eilvt_offset(int offset, unsigned int new)
 
 	rsvd = atomic_read(&eilvt_offsets[offset]);
 	do {
-		vector = rsvd & ~APIC_EILVT_MASKED;	/* 0: unassigned */
+		vector = rsvd & ~APIC_LVT_MASKED;	/* 0: unassigned */
 		if (vector && !eilvt_entry_is_changeable(vector, new))
 			/* may not change if vectors are different */
 			return rsvd;
 	} while (!atomic_try_cmpxchg(&eilvt_offsets[offset], &rsvd, new));
 
-	rsvd = new & ~APIC_EILVT_MASKED;
+	rsvd = new & ~APIC_LVT_MASKED;
 	if (rsvd && rsvd != vector)
 		pr_info("LVT offset %d assigned for vector 0x%02x\n",
 			offset, rsvd);
@@ -1045,7 +1046,7 @@ static void local_apic_timer_interrupt(void)
 	/*
 	 * the NMI deadlock-detector uses this.
 	 */
-	inc_irq_stat(apic_timer_irqs);
+	inc_irq_stat(APIC_TIMER);
 
 	evt->event_handler(evt);
 }
@@ -1190,11 +1191,11 @@ void disable_local_APIC(void)
 	 * restore the disabled state.
 	 */
 	if (enabled_via_apicbase) {
-		unsigned int l, h;
+		struct msr val;
 
-		rdmsr(MSR_IA32_APICBASE, l, h);
-		l &= ~MSR_IA32_APICBASE_ENABLE;
-		wrmsr(MSR_IA32_APICBASE, l, h);
+		rdmsrq(MSR_IA32_APICBASE, val.q);
+		val.l &= ~MSR_IA32_APICBASE_ENABLE;
+		wrmsrq(MSR_IA32_APICBASE, val.q);
 	}
 #endif
 }
@@ -1959,7 +1960,8 @@ static bool __init detect_init_APIC(void)
 
 static bool __init apic_verify(unsigned long addr)
 {
-	u32 features, h, l;
+	struct msr val;
+	u32 features;
 
 	/*
 	 * The APIC feature bit should now be enabled
@@ -1974,9 +1976,9 @@ static bool __init apic_verify(unsigned long addr)
 
 	/* The BIOS may have set up the APIC at some other address */
 	if (boot_cpu_data.x86 >= 6) {
-		rdmsr(MSR_IA32_APICBASE, l, h);
-		if (l & MSR_IA32_APICBASE_ENABLE)
-			addr = l & MSR_IA32_APICBASE_BASE;
+		rdmsrq(MSR_IA32_APICBASE, val.q);
+		if (val.l & MSR_IA32_APICBASE_ENABLE)
+			addr = val.l & MSR_IA32_APICBASE_BASE;
 	}
 
 	register_lapic_address(addr);
@@ -1986,7 +1988,7 @@ static bool __init apic_verify(unsigned long addr)
 
 bool __init apic_force_enable(unsigned long addr)
 {
-	u32 h, l;
+	struct msr val;
 
 	if (apic_is_disabled)
 		return false;
@@ -1997,12 +1999,12 @@ bool __init apic_force_enable(unsigned long addr)
 	 * and AMD K7 (Model > 1) or later.
 	 */
 	if (boot_cpu_data.x86 >= 6) {
-		rdmsr(MSR_IA32_APICBASE, l, h);
-		if (!(l & MSR_IA32_APICBASE_ENABLE)) {
+		rdmsrq(MSR_IA32_APICBASE, val.q);
+		if (!(val.l & MSR_IA32_APICBASE_ENABLE)) {
 			pr_info("Local APIC disabled by BIOS -- reenabling.\n");
-			l &= ~MSR_IA32_APICBASE_BASE;
-			l |= MSR_IA32_APICBASE_ENABLE | addr;
-			wrmsr(MSR_IA32_APICBASE, l, h);
+			val.l &= ~MSR_IA32_APICBASE_BASE;
+			val.l |= MSR_IA32_APICBASE_ENABLE | addr;
+			wrmsrq(MSR_IA32_APICBASE, val.q);
 			enabled_via_apicbase = 1;
 		}
 	}
@@ -2114,7 +2116,7 @@ static noinline void handle_spurious_interrupt(u8 vector)
 
 	trace_spurious_apic_entry(vector);
 
-	inc_irq_stat(irq_spurious_count);
+	irq_stat_inc_and_enable(IRQ_COUNT_SPURIOUS);
 
 	/*
 	 * If this is a spurious interrupt then do not acknowledge
@@ -2186,7 +2188,7 @@ DEFINE_IDTENTRY_SYSVEC(sysvec_error_interrupt)
 		apic_write(APIC_ESR, 0);
 	v = apic_read(APIC_ESR);
 	apic_eoi();
-	atomic_inc(&irq_err_count);
+	irq_stat_inc_and_enable(IRQ_COUNT_PIC_APIC_ERROR);
 
 	apic_pr_debug("APIC error on CPU%d: %02x", smp_processor_id(), v);
 
@@ -2441,7 +2443,7 @@ static int lapic_suspend(void *data)
 
 static void lapic_resume(void *data)
 {
-	unsigned int l, h;
+	struct msr val;
 	unsigned long flags;
 	int maxlvt;
 
@@ -2474,10 +2476,10 @@ static void lapic_resume(void *data)
 		 * SMP! We'll need to do this as part of the CPU restore!
 		 */
 		if (boot_cpu_data.x86 >= 6) {
-			rdmsr(MSR_IA32_APICBASE, l, h);
-			l &= ~MSR_IA32_APICBASE_BASE;
-			l |= MSR_IA32_APICBASE_ENABLE | mp_lapic_addr;
-			wrmsr(MSR_IA32_APICBASE, l, h);
+			rdmsrq(MSR_IA32_APICBASE, val.q);
+			val.l &= ~MSR_IA32_APICBASE_BASE;
+			val.l |= MSR_IA32_APICBASE_ENABLE | mp_lapic_addr;
+			wrmsrq(MSR_IA32_APICBASE, val.q);
 		}
 	}
 

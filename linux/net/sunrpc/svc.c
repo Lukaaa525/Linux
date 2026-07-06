@@ -476,6 +476,35 @@ __svc_init_bc(struct svc_serv *serv)
 }
 #endif
 
+static int svc_pool_init_counters(struct svc_pool *pool)
+{
+	int err;
+
+	err = percpu_counter_init(&pool->sp_messages_arrived, 0, GFP_KERNEL);
+	if (err)
+		return err;
+	err = percpu_counter_init(&pool->sp_sockets_queued, 0, GFP_KERNEL);
+	if (err)
+		goto err_sockets;
+	err = percpu_counter_init(&pool->sp_threads_woken, 0, GFP_KERNEL);
+	if (err)
+		goto err_threads;
+	return 0;
+
+err_threads:
+	percpu_counter_destroy(&pool->sp_sockets_queued);
+err_sockets:
+	percpu_counter_destroy(&pool->sp_messages_arrived);
+	return err;
+}
+
+static void svc_pool_destroy_counters(struct svc_pool *pool)
+{
+	percpu_counter_destroy(&pool->sp_messages_arrived);
+	percpu_counter_destroy(&pool->sp_sockets_queued);
+	percpu_counter_destroy(&pool->sp_threads_woken);
+}
+
 /*
  * Create an RPC service
  */
@@ -540,12 +569,18 @@ __svc_create(struct svc_program *prog, int nprogs, struct svc_stat *stats,
 		INIT_LIST_HEAD(&pool->sp_all_threads);
 		init_llist_head(&pool->sp_idle_threads);
 
-		percpu_counter_init(&pool->sp_messages_arrived, 0, GFP_KERNEL);
-		percpu_counter_init(&pool->sp_sockets_queued, 0, GFP_KERNEL);
-		percpu_counter_init(&pool->sp_threads_woken, 0, GFP_KERNEL);
+		if (svc_pool_init_counters(pool))
+			goto out_err;
 	}
 
 	return serv;
+
+out_err:
+	while (i--)
+		svc_pool_destroy_counters(&serv->sv_pools[i]);
+	kfree(serv->sv_pools);
+	kfree(serv);
+	return NULL;
 }
 
 /**
@@ -624,9 +659,7 @@ svc_destroy(struct svc_serv **servp)
 	for (i = 0; i < serv->sv_nrpools; i++) {
 		struct svc_pool *pool = &serv->sv_pools[i];
 
-		percpu_counter_destroy(&pool->sp_messages_arrived);
-		percpu_counter_destroy(&pool->sp_sockets_queued);
-		percpu_counter_destroy(&pool->sp_threads_woken);
+		svc_pool_destroy_counters(pool);
 	}
 	kfree(serv->sv_pools);
 	kfree(serv);
@@ -638,13 +671,25 @@ svc_init_buffer(struct svc_rqst *rqstp, const struct svc_serv *serv, int node)
 {
 	rqstp->rq_maxpages = svc_serv_maxpages(serv);
 
-	/* rq_pages' last entry is NULL for historical reasons. */
+	/* +1 for a NULL sentinel readable by nfsd_splice_actor() */
 	rqstp->rq_pages = kcalloc_node(rqstp->rq_maxpages + 1,
 				       sizeof(struct page *),
 				       GFP_KERNEL, node);
 	if (!rqstp->rq_pages)
 		return false;
 
+	/* +1 for a NULL sentinel at rq_page_end (see svc_rqst_replace_page) */
+	rqstp->rq_respages = kcalloc_node(rqstp->rq_maxpages + 1,
+					  sizeof(struct page *),
+					  GFP_KERNEL, node);
+	if (!rqstp->rq_respages) {
+		kfree(rqstp->rq_pages);
+		rqstp->rq_pages = NULL;
+		return false;
+	}
+
+	rqstp->rq_pages_nfree = rqstp->rq_maxpages;
+	rqstp->rq_next_page = rqstp->rq_respages + rqstp->rq_maxpages;
 	return true;
 }
 
@@ -656,10 +701,19 @@ svc_release_buffer(struct svc_rqst *rqstp)
 {
 	unsigned long i;
 
-	for (i = 0; i < rqstp->rq_maxpages; i++)
-		if (rqstp->rq_pages[i])
-			put_page(rqstp->rq_pages[i]);
-	kfree(rqstp->rq_pages);
+	if (rqstp->rq_pages) {
+		for (i = 0; i < rqstp->rq_maxpages; i++)
+			if (rqstp->rq_pages[i])
+				put_page(rqstp->rq_pages[i]);
+		kfree(rqstp->rq_pages);
+	}
+
+	if (rqstp->rq_respages) {
+		for (i = 0; i < rqstp->rq_maxpages; i++)
+			if (rqstp->rq_respages[i])
+				put_page(rqstp->rq_respages[i]);
+		kfree(rqstp->rq_respages);
+	}
 }
 
 static void
@@ -934,11 +988,11 @@ svc_set_num_threads(struct svc_serv *serv, unsigned int min_threads,
 EXPORT_SYMBOL_GPL(svc_set_num_threads);
 
 /**
- * svc_rqst_replace_page - Replace one page in rq_pages[]
+ * svc_rqst_replace_page - Replace one page in rq_respages[]
  * @rqstp: svc_rqst with pages to replace
  * @page: replacement page
  *
- * When replacing a page in rq_pages, batch the release of the
+ * When replacing a page in rq_respages, batch the release of the
  * replaced pages to avoid hammering the page allocator.
  *
  * Return values:
@@ -947,19 +1001,16 @@ EXPORT_SYMBOL_GPL(svc_set_num_threads);
  */
 bool svc_rqst_replace_page(struct svc_rqst *rqstp, struct page *page)
 {
-	struct page **begin = rqstp->rq_pages;
-	struct page **end = &rqstp->rq_pages[rqstp->rq_maxpages];
+	struct page **begin = rqstp->rq_respages;
+	struct page **end = rqstp->rq_page_end;
 
 	if (unlikely(rqstp->rq_next_page < begin || rqstp->rq_next_page > end)) {
 		trace_svc_replace_page_err(rqstp);
 		return false;
 	}
 
-	if (*rqstp->rq_next_page) {
-		if (!folio_batch_add(&rqstp->rq_fbatch,
-				page_folio(*rqstp->rq_next_page)))
-			__folio_batch_release(&rqstp->rq_fbatch);
-	}
+	if (*rqstp->rq_next_page)
+		svc_rqst_page_release(rqstp, *rqstp->rq_next_page);
 
 	get_page(page);
 	*(rqstp->rq_next_page++) = page;
@@ -971,18 +1022,24 @@ EXPORT_SYMBOL_GPL(svc_rqst_replace_page);
  * svc_rqst_release_pages - Release Reply buffer pages
  * @rqstp: RPC transaction context
  *
- * Release response pages that might still be in flight after
- * svc_send, and any spliced filesystem-owned pages.
+ * Release response pages in the range [rq_respages, rq_next_page).
+ * NULL entries in this range are skipped, allowing transports to
+ * transfer pages to a send context before this function runs.
  */
 void svc_rqst_release_pages(struct svc_rqst *rqstp)
 {
-	int i, count = rqstp->rq_next_page - rqstp->rq_respages;
+	struct page **pp;
 
-	if (count) {
-		release_pages(rqstp->rq_respages, count);
-		for (i = 0; i < count; i++)
-			rqstp->rq_respages[i] = NULL;
+	for (pp = rqstp->rq_respages; pp < rqstp->rq_next_page; pp++) {
+		if (*pp) {
+			if (!folio_batch_add(&rqstp->rq_fbatch,
+					     page_folio(*pp)))
+				__folio_batch_release(&rqstp->rq_fbatch);
+			*pp = NULL;
+		}
 	}
+	if (rqstp->rq_fbatch.nr)
+		__folio_batch_release(&rqstp->rq_fbatch);
 }
 
 /**
@@ -1574,6 +1631,12 @@ static void svc_release_rqst(struct svc_rqst *rqstp)
 
 	if (procp && procp->pc_release)
 		procp->pc_release(rqstp);
+
+	/*
+	 * A subsequent svc_release_rqst() on this rqstp must not
+	 * re-invoke pc_release against released state.
+	 */
+	rqstp->rq_procinfo = NULL;
 }
 
 /**
@@ -1591,6 +1654,9 @@ void svc_process(struct svc_rqst *rqstp)
 	    should_fail(&fail_sunrpc.attr, 1))
 		svc_xprt_deferred_close(rqstp->rq_xprt);
 #endif
+
+	/* Discard a stale release hook from a previous RPC. */
+	rqstp->rq_procinfo = NULL;
 
 	/*
 	 * Setup response xdr_buf.
@@ -1648,6 +1714,7 @@ void svc_process_bc(struct rpc_rqst *req, struct svc_rqst *rqstp)
 	int proc_error;
 
 	/* Build the svc_rqst used by the common processing routine */
+	rqstp->rq_procinfo = NULL;
 	rqstp->rq_xid = req->rq_xid;
 	rqstp->rq_prot = req->rq_xprt->prot;
 	rqstp->rq_bc_net = req->rq_xprt->xprt_net;

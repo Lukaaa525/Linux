@@ -61,12 +61,12 @@ manpages_url = 'https://man7.org/linux/man-pages/man{section}/{page}.{section}.h
 
 def config_init(app, config):
     """
-    Initialize path-dependent variabled
+    Initialize path-dependent variables
 
     On Sphinx, all directories are relative to what it is passed as
     SOURCEDIR parameter for sphinx-build. Due to that, all patterns
     that have directory names on it need to be dynamically set, after
-    converting them to a relative patch.
+    converting them to a relative path.
 
     As Sphinx doesn't include any patterns outside SOURCEDIR, we should
     exclude relative patterns that start with "../".
@@ -455,6 +455,7 @@ if html_theme == "alabaster":
 # The name of an image file (relative to this directory) to place at the top
 # of the sidebar.
 html_logo = "images/logo.svg"
+html_favicon = "images/logo.svg"
 
 # Output file base name for HTML help builder.
 htmlhelp_basename = "TheLinuxKerneldoc"

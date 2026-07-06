@@ -23,8 +23,52 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/sockptr.h>
+#include <linux/uio.h>
 
 #include <uapi/linux/net.h>
+
+/**
+ * struct sockopt - socket option value container
+ * @iter_in: iov_iter for reading optval with the content from the caller.
+ *	     Use copy_from_iter() given this iov direction is ITER_SOURCE
+ * @iter_out: iov_iter for protocols to update optval data to userspace
+ *	      Use _copy_to_iter() given iov direction is ITER_DEST
+ * @optlen: serves as both input (buffer size) and output (returned data size).
+ *
+ * Type-safe wrapper for socket option data that works with both
+ * user and kernel buffers.
+ *
+ * The optlen field allows callbacks to return a specific length value
+ * independent of the bytes written via copy_to_iter().
+ */
+typedef struct sockopt {
+	struct iov_iter iter_in;
+	struct iov_iter iter_out;
+	int optlen;
+} sockopt_t;
+
+/*
+ * Initialize a user-backed sockopt_t from the (optval, optlen) __user pair of
+ * a getsockopt() callback. Used by transitional __user getsockopt wrappers
+ * while the proto-layer callbacks are converted to take a sockopt_t; the
+ * caller writes opt->optlen back to the user optlen after the callback.
+ */
+static inline int sockopt_init_user(sockopt_t *opt, char __user *optval,
+				    int __user *optlen)
+{
+	int len;
+
+	if (get_user(len, optlen))
+		return -EFAULT;
+	if (len < 0)
+		return -EINVAL;
+
+	iov_iter_ubuf(&opt->iter_out, ITER_DEST, optval, len);
+	iov_iter_ubuf(&opt->iter_in, ITER_SOURCE, optval, len);
+	opt->optlen = len;
+
+	return 0;
+}
 
 struct poll_table_struct;
 struct pipe_inode_info;
@@ -192,6 +236,8 @@ struct proto_ops {
 				      unsigned int optlen);
 	int		(*getsockopt)(struct socket *sock, int level,
 				      int optname, char __user *optval, int __user *optlen);
+	int		(*getsockopt_iter)(struct socket *sock, int level,
+					   int optname, sockopt_t *opt);
 	void		(*show_fdinfo)(struct seq_file *m, struct socket *sock);
 	int		(*sendmsg)   (struct socket *sock, struct msghdr *m,
 				      size_t total_len);
@@ -223,6 +269,7 @@ struct proto_ops {
 	int		(*sendmsg_locked)(struct sock *sk, struct msghdr *msg,
 					  size_t size);
 	int		(*set_rcvlowat)(struct sock *sk, int val);
+	void		(*set_rcvbuf)(struct sock *sk, int val);
 };
 
 #define DECLARE_SOCKADDR(type, dst, src)	\
@@ -261,6 +308,7 @@ int sock_recvmsg(struct socket *sock, struct msghdr *msg, int flags);
 struct file *sock_alloc_file(struct socket *sock, int flags, const char *dname);
 struct socket *sockfd_lookup(int fd, int *err);
 struct socket *sock_from_file(struct file *file);
+int sock_read_xattr(struct socket *sock, const char *name, void *value, size_t size);
 #define		     sockfd_put(sock) fput(sock->file)
 int net_ratelimit(void);
 

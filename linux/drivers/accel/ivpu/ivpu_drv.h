@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (C) 2020-2025 Intel Corporation
+ * Copyright (C) 2020-2026 Intel Corporation
  */
 
 #ifndef __IVPU_DRV_H__
@@ -13,6 +13,7 @@
 #include <drm/drm_print.h>
 
 #include <linux/hashtable.h>
+#include <linux/llist.h>
 #include <linux/pci.h>
 #include <linux/xarray.h>
 #include <uapi/drm/ivpu_accel.h>
@@ -36,6 +37,7 @@
 #define IVPU_HW_IP_60XX 60
 
 #define IVPU_HW_IP_REV_LNL_B0 4
+#define IVPU_HW_IP_REV_NVL_A0 0
 
 #define IVPU_HW_BTRS_MTL 1
 #define IVPU_HW_BTRS_LNL 2
@@ -110,7 +112,6 @@ struct ivpu_wa_table {
 	bool clear_runtime_mem;
 	bool interrupt_clear_with_0;
 	bool disable_clock_relinquish;
-	bool disable_d0i3_msg;
 	bool wp0_during_power_up;
 	bool disable_d0i2;
 };
@@ -157,9 +158,11 @@ struct ivpu_device {
 	struct xa_limit db_limit;
 	u32 db_next;
 
-	struct work_struct irq_ipc_work;
 	struct work_struct irq_dct_work;
 	struct work_struct context_abort_work;
+	struct llist_head job_destroy_list;
+	struct work_struct job_destroy_work;
+	struct workqueue_struct *job_destroy_wq;
 
 	struct mutex bo_list_lock; /* Protects bo_list */
 	struct list_head bo_list;
@@ -168,6 +171,7 @@ struct ivpu_device {
 	struct xarray submitted_jobs_xa;
 	struct ivpu_ipc_consumer job_done_consumer;
 	atomic_t job_timeout_counter;
+	atomic_t faults_detected;
 
 	atomic64_t unique_id_counter;
 
@@ -218,8 +222,6 @@ extern bool ivpu_force_snoop;
 #define IVPU_TEST_MODE_FW_TEST            BIT(0)
 #define IVPU_TEST_MODE_NULL_HW            BIT(1)
 #define IVPU_TEST_MODE_NULL_SUBMISSION    BIT(2)
-#define IVPU_TEST_MODE_D0I3_MSG_DISABLE   BIT(4)
-#define IVPU_TEST_MODE_D0I3_MSG_ENABLE    BIT(5)
 #define IVPU_TEST_MODE_MIP_DISABLE        BIT(6)
 #define IVPU_TEST_MODE_DISABLE_TIMEOUTS   BIT(8)
 #define IVPU_TEST_MODE_TURBO_ENABLE       BIT(9)

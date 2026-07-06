@@ -817,9 +817,11 @@ static int meson_sar_adc_temp_sensor_init(struct iio_dev *indio_dev)
 	}
 
 	priv->tsc_regmap = syscon_regmap_lookup_by_phandle(dev->of_node, "amlogic,hhi-sysctrl");
-	if (IS_ERR(priv->tsc_regmap))
+	if (IS_ERR(priv->tsc_regmap)) {
+		kfree(buf);
 		return dev_err_probe(dev, PTR_ERR(priv->tsc_regmap),
 				     "failed to get amlogic,hhi-sysctrl regmap\n");
+	}
 
 	trimming_bits = priv->param->temperature_trimming_bits;
 	trimming_mask = BIT(trimming_bits) - 1;
@@ -1314,6 +1316,11 @@ static const struct meson_sar_adc_data meson_sar_adc_g12a_data = {
 	.name = "meson-g12a-saradc",
 };
 
+static const struct meson_sar_adc_data meson_sar_adc_s4_data = {
+	.param = &meson_sar_adc_g12a_param,
+	.name = "meson-s4-saradc",
+};
+
 static const struct of_device_id meson_sar_adc_of_match[] = {
 	{
 		.compatible = "amlogic,meson8-saradc",
@@ -1342,6 +1349,9 @@ static const struct of_device_id meson_sar_adc_of_match[] = {
 	}, {
 		.compatible = "amlogic,meson-g12a-saradc",
 		.data = &meson_sar_adc_g12a_data,
+	}, {
+		.compatible = "amlogic,meson-s4-saradc",
+		.data = &meson_sar_adc_s4_data,
 	},
 	{ }
 };

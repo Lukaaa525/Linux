@@ -5,7 +5,6 @@
 #include <linux/kernel.h>
 #include <linux/device.h>
 #include <linux/mutex.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/export.h>
 #include <linux/gpio/driver.h>
@@ -663,6 +662,15 @@ int mcp23s08_probe_one(struct mcp23s08 *mcp, struct device *dev,
 
 	if (mcp->irq && mcp->irq_controller) {
 		struct gpio_irq_chip *girq = &mcp->chip.irq;
+
+		/*
+		 * Disable all pin interrupts, to prevent the interrupt handler from
+		 * calling nested handlers for any currently-enabled interrupts that
+		 * do not (yet) have an actual handler.
+		 */
+		ret = mcp_write(mcp, MCP_GPINTEN, 0);
+		if (ret < 0)
+			return dev_err_probe(dev, ret, "can't disable interrupts\n");
 
 		gpio_irq_chip_set_chip(girq, &mcp23s08_irq_chip);
 		/* This will let us handle the parent IRQ in the driver */

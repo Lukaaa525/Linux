@@ -38,6 +38,7 @@
 #include <linux/backlight.h>
 #include <linux/bitfield.h>
 #include <linux/bitops.h>
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/dmi.h>
 #include <linux/freezer.h>
@@ -299,7 +300,6 @@ struct ibm_struct;
 
 struct tp_acpi_drv_struct {
 	const struct acpi_device_id *hid;
-	struct acpi_driver *driver;
 
 	void (*notify) (struct ibm_struct *, u32);
 	acpi_handle *handle;
@@ -322,7 +322,6 @@ struct ibm_struct {
 	struct tp_acpi_drv_struct *acpi;
 
 	struct {
-		u8 acpi_driver_registered:1;
 		u8 acpi_notify_installed:1;
 		u8 proc_created:1;
 		u8 init_called:1;
@@ -374,7 +373,7 @@ static struct {
 	u32 hotkey_poll_active:1;
 	u32 has_adaptive_kbd:1;
 	u32 kbd_lang:1;
-	u32 trackpoint_doubletap:1;
+	u32 trackpoint_doubletap_enable:1;
 	struct quirk_entry *quirks;
 } tp_features;
 
@@ -832,9 +831,9 @@ static int __init setup_acpi_notify(struct ibm_struct *ibm)
 	vdbg_printk(TPACPI_DBG_INIT,
 		"setting up ACPI notify for %s\n", ibm->name);
 
-	ibm->acpi->device = acpi_fetch_acpi_dev(*ibm->acpi->handle);
+	ibm->acpi->device = acpi_get_acpi_dev(*ibm->acpi->handle);
 	if (!ibm->acpi->device) {
-		pr_err("acpi_fetch_acpi_dev(%s) failed\n", ibm->name);
+		pr_err("acpi_get_acpi_dev(%s) failed\n", ibm->name);
 		return -ENODEV;
 	}
 
@@ -858,44 +857,6 @@ static int __init setup_acpi_notify(struct ibm_struct *ibm)
 	ibm->flags.acpi_notify_installed = 1;
 	return 0;
 }
-
-static int __init tpacpi_device_add(struct acpi_device *device)
-{
-	return 0;
-}
-
-static int __init register_tpacpi_subdriver(struct ibm_struct *ibm)
-{
-	int rc;
-
-	dbg_printk(TPACPI_DBG_INIT,
-		"registering %s as an ACPI driver\n", ibm->name);
-
-	BUG_ON(!ibm->acpi);
-
-	ibm->acpi->driver = kzalloc_obj(struct acpi_driver);
-	if (!ibm->acpi->driver) {
-		pr_err("failed to allocate memory for ibm->acpi->driver\n");
-		return -ENOMEM;
-	}
-
-	sprintf(ibm->acpi->driver->name, "%s_%s", TPACPI_NAME, ibm->name);
-	ibm->acpi->driver->ids = ibm->acpi->hid;
-
-	ibm->acpi->driver->ops.add = &tpacpi_device_add;
-
-	rc = acpi_bus_register_driver(ibm->acpi->driver);
-	if (rc < 0) {
-		pr_err("acpi_bus_register_driver(%s) failed: %d\n",
-		       ibm->name, rc);
-		kfree(ibm->acpi->driver);
-		ibm->acpi->driver = NULL;
-	} else if (!rc)
-		ibm->flags.acpi_driver_registered = 1;
-
-	return rc;
-}
-
 
 /****************************************************************************
  ****************************************************************************
@@ -2509,7 +2470,7 @@ static int hotkey_kthread(void *data)
 	bool was_frozen;
 
 	if (tpacpi_lifecycle == TPACPI_LIFE_EXITING)
-		goto exit;
+		return 0;
 
 	set_freezable();
 
@@ -2566,7 +2527,6 @@ static int hotkey_kthread(void *data)
 		si ^= 1;
 	}
 
-exit:
 	return 0;
 }
 
@@ -3019,6 +2979,31 @@ static const struct attribute_group adaptive_kbd_attr_group = {
 	.attrs = adaptive_kbd_attributes,
 };
 
+/* sysfs doubletap enable --------------------------------------------- */
+static ssize_t doubletap_enable_show(struct device *dev,
+				     struct device_attribute *attr,
+				     char *buf)
+{
+	return sysfs_emit(buf, "%d\n", tp_features.trackpoint_doubletap_enable);
+}
+
+static ssize_t doubletap_enable_store(struct device *dev,
+				      struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	bool enable;
+	int err;
+
+	err = kstrtobool(buf, &enable);
+	if (err)
+		return err;
+
+	tp_features.trackpoint_doubletap_enable = enable;
+	return count;
+}
+
+static DEVICE_ATTR_RW(doubletap_enable);
+
 /* --------------------------------------------------------------------- */
 
 static struct attribute *hotkey_attributes[] = {
@@ -3033,6 +3018,7 @@ static struct attribute *hotkey_attributes[] = {
 	&dev_attr_hotkey_recommended_mask.attr,
 	&dev_attr_hotkey_tablet_mode.attr,
 	&dev_attr_hotkey_radio_sw.attr,
+	&dev_attr_doubletap_enable.attr,
 #ifdef CONFIG_THINKPAD_ACPI_HOTKEY_POLL
 	&dev_attr_hotkey_source_mask.attr,
 	&dev_attr_hotkey_poll_freq.attr,
@@ -3558,8 +3544,8 @@ static int __init hotkey_init(struct ibm_init_struct *iibm)
 
 	hotkey_poll_setup_safe(true);
 
-	/* Enable doubletap by default */
-	tp_features.trackpoint_doubletap = 1;
+	/* Enable TrackPoint doubletap event reporting by default. */
+	tp_features.trackpoint_doubletap_enable = 1;
 
 	return 0;
 }
@@ -3864,9 +3850,9 @@ static bool hotkey_notify_8xxx(const u32 hkey, bool *send_acpi_ev)
 {
 	switch (hkey) {
 	case TP_HKEY_EV_TRACK_DOUBLETAP:
-		if (tp_features.trackpoint_doubletap)
-			tpacpi_input_send_key(hkey, send_acpi_ev);
-
+		/* Only send event if doubletap is enabled */
+		if (!tp_features.trackpoint_doubletap_enable)
+			*send_acpi_ev = false;
 		return true;
 	default:
 		return false;
@@ -9249,9 +9235,6 @@ static int fan_write_cmd_speed(const char *cmd, int *rc)
 {
 	int speed;
 
-	/* TODO:
-	 * Support speed <low> <medium> <high> ? */
-
 	if (sscanf(cmd, "speed %d", &speed) != 1)
 		return 0;
 
@@ -11234,6 +11217,26 @@ static ssize_t hwdd_status_show(struct device *dev,
 
 	return sysfs_emit(buf, "0\n");
 }
+
+/* sysfs type-c damage detection raw data - accessed via debugfs*/
+static int hwdd_raw_show(struct seq_file *m, void *v)
+{
+	unsigned int damage_status;
+	int err;
+
+	if (!ucdd_supported)
+		return -ENODEV;
+
+	/* Get USB TYPE-C damage status */
+	err = hwdd_command(HWDD_GET_DMG_USBC, &damage_status);
+	if (err)
+		return err;
+
+	seq_printf(m, "HWDD: 0x%x\n", damage_status);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(hwdd_raw);
+
 static DEVICE_ATTR_RO(hwdd_status);
 static DEVICE_ATTR_RO(hwdd_detail);
 
@@ -11488,7 +11491,9 @@ static bool tpacpi_driver_event(const unsigned int hkey_event)
 		mutex_unlock(&tpacpi_inputdev_send_mutex);
 		return true;
 	case TP_HKEY_EV_DOUBLETAP_TOGGLE:
-		tp_features.trackpoint_doubletap = !tp_features.trackpoint_doubletap;
+		/* Toggle kernel-level doubletap event filtering */
+		tp_features.trackpoint_doubletap_enable =
+			!tp_features.trackpoint_doubletap_enable;
 		return true;
 	case TP_HKEY_EV_PROFILE_TOGGLE:
 	case TP_HKEY_EV_PROFILE_TOGGLE2:
@@ -11519,6 +11524,20 @@ static const char * __init str_supported(int is_supported)
 }
 #endif /* CONFIG_THINKPAD_ACPI_DEBUG */
 
+static struct dentry *tpacpi_dbg;
+static void tpacpi_debugfs_init(void)
+{
+	tpacpi_dbg = debugfs_create_dir("tpacpi", NULL);
+
+	/* HWDD raw data */
+	debugfs_create_file("hwdd-raw", 0444, tpacpi_dbg, NULL, &hwdd_raw_fops);
+}
+
+static void tpacpi_debugfs_remove(void)
+{
+	debugfs_remove_recursive(tpacpi_dbg);
+}
+
 static void ibm_exit(struct ibm_struct *ibm)
 {
 	dbg_printk(TPACPI_DBG_EXIT, "removing %s\n", ibm->name);
@@ -11532,6 +11551,8 @@ static void ibm_exit(struct ibm_struct *ibm)
 		acpi_remove_notify_handler(*ibm->acpi->handle,
 					   ibm->acpi->type,
 					   dispatch_acpi_notify);
+		ibm->acpi->device->driver_data = NULL;
+		acpi_dev_put(ibm->acpi->device);
 		ibm->flags.acpi_notify_installed = 0;
 	}
 
@@ -11540,16 +11561,6 @@ static void ibm_exit(struct ibm_struct *ibm)
 			"%s: remove_proc_entry\n", ibm->name);
 		remove_proc_entry(ibm->name, proc_dir);
 		ibm->flags.proc_created = 0;
-	}
-
-	if (ibm->flags.acpi_driver_registered) {
-		dbg_printk(TPACPI_DBG_EXIT,
-			"%s: acpi_bus_unregister_driver\n", ibm->name);
-		BUG_ON(!ibm->acpi);
-		acpi_bus_unregister_driver(ibm->acpi->driver);
-		kfree(ibm->acpi->driver);
-		ibm->acpi->driver = NULL;
-		ibm->flags.acpi_driver_registered = 0;
 	}
 
 	if (ibm->flags.init_called && ibm->exit) {
@@ -11587,12 +11598,6 @@ static int __init ibm_init(struct ibm_init_struct *iibm)
 	}
 
 	if (ibm->acpi) {
-		if (ibm->acpi->hid) {
-			ret = register_tpacpi_subdriver(ibm);
-			if (ret)
-				goto err_out;
-		}
-
 		if (ibm->acpi->notify) {
 			ret = setup_acpi_notify(ibm);
 			if (ret == -ENODEV) {
@@ -12097,6 +12102,8 @@ static void thinkpad_acpi_module_exit(void)
 		remove_proc_entry(TPACPI_PROC_DIR, acpi_root_dir);
 	if (tpacpi_wq)
 		destroy_workqueue(tpacpi_wq);
+	if (tpacpi_dbg)
+		tpacpi_debugfs_remove();
 
 	kfree(thinkpad_id.bios_version_str);
 	kfree(thinkpad_id.ec_version_str);
@@ -12226,6 +12233,8 @@ static int __init thinkpad_acpi_module_init(void)
 		thinkpad_acpi_module_exit();
 		return -ENODEV;
 	}
+
+	tpacpi_debugfs_init();
 
 	dmi_id = dmi_first_match(fwbug_list);
 	if (dmi_id)

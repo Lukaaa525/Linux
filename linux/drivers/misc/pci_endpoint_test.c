@@ -61,6 +61,7 @@
 #define STATUS_BAR_SUBRANGE_SETUP_FAIL		BIT(15)
 #define STATUS_BAR_SUBRANGE_CLEAR_SUCCESS	BIT(16)
 #define STATUS_BAR_SUBRANGE_CLEAR_FAIL		BIT(17)
+#define STATUS_NO_RESOURCE			BIT(18)
 
 #define PCI_ENDPOINT_TEST_LOWER_SRC_ADDR	0x0c
 #define PCI_ENDPOINT_TEST_UPPER_SRC_ADDR	0x10
@@ -113,6 +114,9 @@
 #define PCI_DEVICE_ID_RENESAS_R8A779F0		0x0031
 
 #define PCI_DEVICE_ID_ROCKCHIP_RK3588		0x3588
+
+#define PCI_DEVICE_ID_NVIDIA_TEGRA194_EP	0x1ad4
+#define PCI_DEVICE_ID_NVIDIA_TEGRA234_EP	0x229b
 
 #define PCI_ENDPOINT_TEST_BAR_SUBRANGE_NSUB	2
 
@@ -477,7 +481,7 @@ static int pci_endpoint_test_bar_subrange_cmd(struct pci_endpoint_test *test,
 
 	status = pci_endpoint_test_readl(test, PCI_ENDPOINT_TEST_STATUS);
 	if (status & fail_bit)
-		return -EIO;
+		return (status & STATUS_NO_RESOURCE) ? -ENOSPC : -EIO;
 
 	if (!(status & ok_bit))
 		return -EIO;
@@ -547,7 +551,7 @@ static int pci_endpoint_test_bar_subrange(struct pci_endpoint_test *test,
 
 	sub_size = bar_size / nsub;
 	if (sub_size < sizeof(u32)) {
-		ret = -ENOSPC;
+		ret = -EINVAL;
 		goto out_clear;
 	}
 
@@ -1096,7 +1100,6 @@ static int pci_endpoint_test_doorbell(struct pci_endpoint_test *test)
 
 	data = pci_endpoint_test_readl(test, PCI_ENDPOINT_TEST_DB_DATA);
 	addr = pci_endpoint_test_readl(test, PCI_ENDPOINT_TEST_DB_OFFSET);
-	bar = pci_endpoint_test_readl(test, PCI_ENDPOINT_TEST_DB_BAR);
 
 	pci_endpoint_test_writel(test, PCI_ENDPOINT_TEST_IRQ_TYPE, irq_type);
 	pci_endpoint_test_writel(test, PCI_ENDPOINT_TEST_IRQ_NUMBER, 1);
@@ -1104,6 +1107,11 @@ static int pci_endpoint_test_doorbell(struct pci_endpoint_test *test)
 	pci_endpoint_test_writel(test, PCI_ENDPOINT_TEST_STATUS, 0);
 
 	bar = pci_endpoint_test_readl(test, PCI_ENDPOINT_TEST_DB_BAR);
+	if (bar < BAR_0 || bar >= PCI_STD_NUM_BARS) {
+		dev_err(dev, "BAR %d reported by endpoint out of range [0, %u]\n",
+			bar, PCI_STD_NUM_BARS - 1);
+		return -ERANGE;
+	}
 
 	writel(data, test->bar[bar] + addr);
 
@@ -1438,6 +1446,8 @@ static const struct pci_device_id pci_endpoint_test_tbl[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_ROCKCHIP, PCI_DEVICE_ID_ROCKCHIP_RK3588),
 	  .driver_data = (kernel_ulong_t)&rk3588_data,
 	},
+	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_TEGRA194_EP),},
+	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_TEGRA234_EP),},
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, pci_endpoint_test_tbl);

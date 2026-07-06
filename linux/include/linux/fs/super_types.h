@@ -30,6 +30,7 @@ struct mount;
 struct mtd_info;
 struct quotactl_ops;
 struct shrinker;
+struct super_dev;
 struct unicode_map;
 struct user_namespace;
 struct workqueue_struct;
@@ -132,6 +133,7 @@ struct super_operations {
 struct super_block {
 	struct list_head			s_list;		/* Keep this first */
 	dev_t					s_dev;		/* search index; _not_ kdev_t */
+	struct super_dev			*s_super_dev;	/* sget_fc()'s device table claim */
 	unsigned char				s_blocksize_bits;
 	unsigned long				s_blocksize;
 	loff_t					s_maxbytes;	/* Max file size */
@@ -145,7 +147,7 @@ struct super_block {
 	unsigned long				s_magic;
 	struct dentry				*s_root;
 	struct rw_semaphore			s_umount;
-	int					s_count;
+	refcount_t				s_passive;
 	atomic_t				s_active;
 #ifdef CONFIG_SECURITY
 	void					*s_security;
@@ -162,7 +164,8 @@ struct super_block {
 	struct unicode_map			*s_encoding;
 	__u16					s_encoding_flags;
 #endif
-	struct hlist_bl_head			s_roots;	/* alternate root dentries for NFS */
+	struct hlist_head			s_roots;	/* alternate root dentries for NFS */
+	spinlock_t				s_roots_lock;
 	struct mount				*s_mounts;	/* list of mounts; _not_ for fs use */
 	struct block_device			*s_bdev;	/* can go away once we use an accessor for @s_bdev_file */
 	struct file				*s_bdev_file;
@@ -274,6 +277,14 @@ struct super_block {
 
 	/* number of fserrors that are being sent to fsnotify/filesystems */
 	refcount_t				s_pending_errors;
+
+#ifdef CONFIG_CGROUP_WRITEBACK
+	/*
+	 * Number of in-flight inode wb switches for this sb.  Drained by
+	 * cgroup_writeback_umount() before tear-down.
+	 */
+	atomic_t				s_isw_nr_in_flight;
+#endif
 } __randomize_layout;
 
 /*
@@ -326,7 +337,7 @@ struct super_block {
 #define SB_I_STABLE_WRITES 0x00000008	/* don't modify blks until WB is done */
 
 /* sb->s_iflags to limit user namespace mounts */
-#define SB_I_USERNS_VISIBLE		0x00000010 /* fstype already mounted */
+#define SB_I_RESTRICTED_VARIANT		0x00000010
 #define SB_I_IMA_UNVERIFIABLE_SIGNATURE	0x00000020
 #define SB_I_UNTRUSTED_MOUNTER		0x00000040
 #define SB_I_EVM_HMAC_UNSUPPORTED	0x00000080
@@ -338,5 +349,6 @@ struct super_block {
 #define SB_I_NOUMASK	0x00001000	/* VFS does not apply umask */
 #define SB_I_NOIDMAP	0x00002000	/* No idmapped mounts on this superblock */
 #define SB_I_ALLOW_HSM	0x00004000	/* Allow HSM events on this superblock */
+#define SB_I_NO_DATA_INTEGRITY	0x00008000 /* fs cannot guarantee data persistence on sync */
 
 #endif /* _LINUX_FS_SUPER_TYPES_H */

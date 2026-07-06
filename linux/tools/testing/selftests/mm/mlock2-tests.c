@@ -344,34 +344,33 @@ static void test_munlockall1(void)
 	munmap(map, 2 * page_size);
 }
 
-/*
- * Droppable memory should not be lockable.
- */
+/* Droppable memory should not be lockable.  */
 static void test_mlock_droppable(void)
 {
 	char *map;
 	unsigned long page_size = getpagesize();
 
-	/*
-	 * Ensure MCL_FUTURE is not set.
-	 */
-	if (mlockall(MCL_CURRENT))
-		ksft_exit_fail_msg("mlockall(MCL_CURRENT): %s\n", strerror(errno));
-	if (munlockall())
-		ksft_exit_fail_msg("munlockall() %s\n", strerror(errno));
+	/* Ensure MCL_FUTURE is not set. */
+	if (munlockall()) {
+		ksft_test_result_fail("munlockall() %s\n", strerror(errno));
+		return;
+	}
 
 	map = mmap(NULL, 2 * page_size, PROT_READ | PROT_WRITE,
 		   MAP_ANONYMOUS | MAP_DROPPABLE, -1, 0);
-	if (map == MAP_FAILED)
-		ksft_exit_fail_msg("mmap error: %s", strerror(errno));
-
-	if (mlock2_(map, 2 * page_size, 0)) {
-		munmap(map, 2 * page_size);
-		ksft_exit_fail_msg("mlock2(0): %s\n", strerror(errno));
+	if (map == MAP_FAILED) {
+		if ((errno == EOPNOTSUPP) || (errno == EINVAL))
+			ksft_test_result_skip("%s: MAP_DROPPABLE not supported\n", __func__);
+		else
+			ksft_test_result_fail("mmap error: %s\n", strerror(errno));
+		return;
 	}
 
-	ksft_test_result(!unlock_lock_check(map, false), "%s: droppable memory not locked\n",
-			__func__);
+	if (mlock2_(map, 2 * page_size, 0))
+		ksft_test_result_fail("mlock2(0): %s\n", strerror(errno));
+	else
+		ksft_test_result(!unlock_lock_check(map, false),
+				"%s: droppable memory not locked\n", __func__);
 
 	munmap(map, 2 * page_size);
 }
@@ -381,20 +380,27 @@ static void test_mlockall_future_droppable(void)
 	char *map;
 	unsigned long page_size = getpagesize();
 
-	if (mlockall(MCL_CURRENT | MCL_FUTURE))
-		ksft_exit_fail_msg("mlockall(MCL_CURRENT | MCL_FUTURE): %s\n", strerror(errno));
+	if (mlockall(MCL_CURRENT | MCL_FUTURE)) {
+		ksft_test_result_fail("mlockall(MCL_CURRENT | MCL_FUTURE): %s\n", strerror(errno));
+		return;
+	}
 
 	map = mmap(NULL, 2 * page_size, PROT_READ | PROT_WRITE,
 		   MAP_ANONYMOUS | MAP_DROPPABLE, -1, 0);
 
+	if (map == MAP_FAILED) {
+		if ((errno == EOPNOTSUPP) || (errno == EINVAL))
+			ksft_test_result_skip("%s: MAP_DROPPABLE not supported\n", __func__);
+		else
+			ksft_test_result_fail("mmap error: %s\n", strerror(errno));
+		munlockall();
+		return;
+	}
+
 	ksft_test_result(!unlock_lock_check(map, false), "%s: droppable memory not locked\n",
 			__func__);
 
-	if (munlockall()) {
-		munmap(map, 2 * page_size);
-		ksft_exit_fail_msg("munlockall() %s\n", strerror(errno));
-	}
-
+	munlockall();
 	munmap(map, 2 * page_size);
 }
 

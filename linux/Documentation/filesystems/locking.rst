@@ -61,7 +61,7 @@ inode_operations
 
 prototypes::
 
-	int (*create) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t, bool);
+	int (*create) (struct mnt_idmap *, struct inode *,struct dentry *,umode_t);
 	struct dentry * (*lookup) (struct inode *,struct dentry *, unsigned int);
 	int (*link) (struct dentry *,struct inode *,struct dentry *);
 	int (*unlink) (struct inode *,struct dentry *);
@@ -416,20 +416,6 @@ lm_open_conflict	yes		no			no
 lm_breaker_timedout     yes             no                      no
 ======================	=============	=================	=========
 
-buffer_head
-===========
-
-prototypes::
-
-	void (*b_end_io)(struct buffer_head *bh, int uptodate);
-
-locking rules:
-
-called from interrupts. In other words, extreme care is needed here.
-bh is locked, but that's all warranties we have here. Currently only RAID1,
-highmem, fs/buffer.c, and fs/ntfs/aops.c are providing these. Block devices
-call this method upon the IO completion.
-
 block_device_operations
 =======================
 prototypes::
@@ -584,7 +570,7 @@ write_info:	yes		dqonoff_sem
 FS recursion means calling ->quota_read() and ->quota_write() from superblock
 operations.
 
-More details about quota locking can be found in fs/dquot.c.
+More details about quota locking can be found in fs/quota/dquot.c.
 
 vm_operations_struct
 ====================

@@ -1635,6 +1635,11 @@ sub dodie {
 	print " See $opt{LOG_FILE} for more info.\n";
     }
 
+    # Fatal paths bypass fail(), so STORE_FAILURES needs to be handled here.
+    if (defined($store_failures)) {
+	save_logs("fail", $store_failures);
+    }
+
     if ($email_on_error) {
 	my $name = get_test_name;
 	my $log_file;
@@ -1850,7 +1855,7 @@ sub save_logs {
     my ($result, $basedir) = @_;
     my @t = localtime;
     my $date = sprintf "%04d%02d%02d%02d%02d%02d",
-	1900+$t[5],$t[4],$t[3],$t[2],$t[1],$t[0];
+	1900+$t[5],$t[4]+1,$t[3],$t[2],$t[1],$t[0];
 
     my $type = $build_type;
     if ($type =~ /useconfig/) {
@@ -1872,6 +1877,12 @@ sub save_logs {
 	"dmesg" => $dmesg,
 	"testlog" => $testlog,
     );
+
+    if (defined($opt{"LOG_FILE"})) {
+	if (-f $opt{"LOG_FILE"}) {
+	    cp $opt{"LOG_FILE"}, "$dir/logfile";
+	}
+    }
 
     while (my ($name, $source) = each(%files)) {
 	if (-f "$source") {

@@ -24,7 +24,6 @@
 #include <linux/page_owner.h>
 #include <linux/psi.h>
 #include <linux/cpuset.h>
-#include <linux/mmzone_lock.h>
 #include "internal.h"
 
 #ifdef CONFIG_COMPACTION
@@ -503,36 +502,19 @@ static bool test_and_set_skip(struct compact_control *cc, struct page *page)
  *
  * Always returns true which makes it easier to track lock state in callers.
  */
-static bool compact_zone_lock_irqsave(struct zone *zone,
-				      unsigned long *flags,
-				      struct compact_control *cc)
-	__acquires(&zone->_lock)
+static bool compact_lock_irqsave(spinlock_t *lock, unsigned long *flags,
+						struct compact_control *cc)
+	__acquires(lock)
 {
 	/* Track if the lock is contended in async mode */
 	if (cc->mode == MIGRATE_ASYNC && !cc->contended) {
-		if (zone_trylock_irqsave(zone, *flags))
+		if (spin_trylock_irqsave(lock, *flags))
 			return true;
 
 		cc->contended = true;
 	}
 
-	zone_lock_irqsave(zone, *flags);
-	return true;
-}
-
-static bool compact_lruvec_lock_irqsave(struct lruvec *lruvec,
-					unsigned long *flags,
-					struct compact_control *cc)
-	__acquires(&lruvec->lru_lock)
-{
-	if (cc->mode == MIGRATE_ASYNC && !cc->contended) {
-		if (spin_trylock_irqsave(&lruvec->lru_lock, *flags))
-			return true;
-
-		cc->contended = true;
-	}
-
-	spin_lock_irqsave(&lruvec->lru_lock, *flags);
+	spin_lock_irqsave(lock, *flags);
 	return true;
 }
 
@@ -545,7 +527,7 @@ compact_folio_lruvec_lock_irqsave(struct folio *folio, unsigned long *flags,
 	rcu_read_lock();
 retry:
 	lruvec = folio_lruvec(folio);
-	compact_lruvec_lock_irqsave(lruvec, flags, cc);
+	compact_lock_irqsave(&lruvec->lru_lock, flags, cc);
 	if (unlikely(lruvec_memcg(lruvec) != folio_memcg(folio))) {
 		spin_unlock_irqrestore(&lruvec->lru_lock, *flags);
 		goto retry;
@@ -566,13 +548,11 @@ retry:
  * Returns true if compaction should abort due to fatal signal pending.
  * Returns false when compaction can continue.
  */
-static bool compact_unlock_should_abort(struct zone *zone,
-					unsigned long flags,
-					bool *locked,
-					struct compact_control *cc)
+static bool compact_unlock_should_abort(spinlock_t *lock,
+		unsigned long flags, bool *locked, struct compact_control *cc)
 {
 	if (*locked) {
-		zone_unlock_irqrestore(zone, flags);
+		spin_unlock_irqrestore(lock, flags);
 		*locked = false;
 	}
 
@@ -620,8 +600,9 @@ static unsigned long isolate_freepages_block(struct compact_control *cc,
 		 * contention, to give chance to IRQs. Abort if fatal signal
 		 * pending.
 		 */
-		if (!(blockpfn % COMPACT_CLUSTER_MAX) &&
-		    compact_unlock_should_abort(cc->zone, flags, &locked, cc))
+		if (!(blockpfn % COMPACT_CLUSTER_MAX)
+		    && compact_unlock_should_abort(&cc->zone->lock, flags,
+								&locked, cc))
 			break;
 
 		nr_scanned++;
@@ -650,7 +631,8 @@ static unsigned long isolate_freepages_block(struct compact_control *cc,
 
 		/* If we already hold the lock, we can skip some rechecking. */
 		if (!locked) {
-			locked = compact_zone_lock_irqsave(cc->zone, &flags, cc);
+			locked = compact_lock_irqsave(&cc->zone->lock,
+								&flags, cc);
 
 			/* Recheck this is a buddy page under lock */
 			if (!PageBuddy(page))
@@ -685,7 +667,7 @@ isolate_fail:
 	}
 
 	if (locked)
-		zone_unlock_irqrestore(cc->zone, flags);
+		spin_unlock_irqrestore(&cc->zone->lock, flags);
 
 	/*
 	 * Be careful to not go outside of the pageblock.
@@ -1141,7 +1123,7 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		 * To minimise LRU disruption, the caller can indicate with
 		 * ISOLATE_ASYNC_MIGRATE that it only wants to isolate pages
 		 * it will be able to migrate without blocking - clean pages
-		 * for the most part.  PageWriteback would require blocking.
+		 * for the most part.  Writeback would require blocking.
 		 */
 		if ((mode & ISOLATE_ASYNC_MIGRATE) && folio_test_writeback(folio))
 			goto isolate_fail_put;
@@ -1419,7 +1401,7 @@ static bool suitable_migration_target(struct compact_control *cc,
 		int order = cc->order > 0 ? cc->order : pageblock_order;
 
 		/*
-		 * We are checking page_order without zone lock taken. But
+		 * We are checking page_order without zone->lock taken. But
 		 * the only small danger is that we skip a potentially suitable
 		 * pageblock, so it's not worth to check order for valid range.
 		 */
@@ -1590,7 +1572,7 @@ static void fast_isolate_freepages(struct compact_control *cc)
 		if (!area->nr_free)
 			continue;
 
-		zone_lock_irqsave(cc->zone, flags);
+		spin_lock_irqsave(&cc->zone->lock, flags);
 		freelist = &area->free_list[MIGRATE_MOVABLE];
 		list_for_each_entry_reverse(freepage, freelist, buddy_list) {
 			unsigned long pfn;
@@ -1649,7 +1631,7 @@ static void fast_isolate_freepages(struct compact_control *cc)
 			}
 		}
 
-		zone_unlock_irqrestore(cc->zone, flags);
+		spin_unlock_irqrestore(&cc->zone->lock, flags);
 
 		/* Skip fast search if enough freepages isolated */
 		if (cc->nr_freepages >= cc->nr_migratepages)
@@ -1893,15 +1875,14 @@ static void compaction_free(struct folio *dst, unsigned long data)
 	int order = folio_order(dst);
 	struct page *page = &dst->page;
 
-	if (folio_put_testzero(dst)) {
-		free_pages_prepare(page, order);
+	if (folio_put_testzero(dst) && free_pages_prepare(page, order)) {
 		list_add(&dst->lru, &cc->freepages[order]);
 		cc->nr_freepages += 1 << order;
 	}
 	cc->nr_migratepages += 1 << order;
 	/*
-	 * someone else has referenced the page, we cannot take it back to our
-	 * free list.
+	 * someone else has referenced the page or free_pages_prepare() fails,
+	 * we cannot take it back to our free list.
 	 */
 }
 
@@ -2023,7 +2004,7 @@ static unsigned long fast_find_migrateblock(struct compact_control *cc)
 		if (!area->nr_free)
 			continue;
 
-		zone_lock_irqsave(cc->zone, flags);
+		spin_lock_irqsave(&cc->zone->lock, flags);
 		freelist = &area->free_list[MIGRATE_MOVABLE];
 		list_for_each_entry(freepage, freelist, buddy_list) {
 			unsigned long free_pfn;
@@ -2056,7 +2037,7 @@ static unsigned long fast_find_migrateblock(struct compact_control *cc)
 				break;
 			}
 		}
-		zone_unlock_irqrestore(cc->zone, flags);
+		spin_unlock_irqrestore(&cc->zone->lock, flags);
 	}
 
 	cc->total_migrate_scanned += nr_scanned;
@@ -2358,7 +2339,8 @@ static enum compact_result __compact_finished(struct compact_control *cc)
 		 * Job done if allocation would steal freepages from
 		 * other migratetype buddy lists.
 		 */
-		if (find_suitable_fallback(area, order, migratetype, true) >= 0)
+		if (find_suitable_fallback(area, order, migratetype, true, NULL)
+		    == FALLBACK_FOUND)
 			/*
 			 * Movable pages are OK in any pageblock. If we are
 			 * stealing for a non-movable allocation, make sure
@@ -2465,7 +2447,7 @@ bool compaction_suitable(struct zone *zone, int order, unsigned long watermark,
 
 /* Used by direct reclaimers */
 bool compaction_zonelist_suitable(struct alloc_context *ac, int order,
-		int alloc_flags)
+		int alloc_flags, gfp_t gfp_mask)
 {
 	struct zone *zone;
 	struct zoneref *z;
@@ -2477,6 +2459,10 @@ bool compaction_zonelist_suitable(struct alloc_context *ac, int order,
 	for_each_zone_zonelist_nodemask(zone, z, ac->zonelist,
 				ac->highest_zoneidx, ac->nodemask) {
 		unsigned long available;
+
+		if (cpusets_enabled() && (alloc_flags & ALLOC_CPUSET) &&
+		    !__cpuset_zone_allowed(zone, gfp_mask))
+			continue;
 
 		/*
 		 * Do not consider all the reclaimable memory because we do not

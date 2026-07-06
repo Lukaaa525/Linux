@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
 
-menu "Crypto library routines"
-
 config CRYPTO_HASH_INFO
 	bool
 
@@ -41,7 +39,7 @@ config CRYPTO_LIB_AES_CBC_MACS
 config CRYPTO_LIB_AESGCM
 	tristate
 	select CRYPTO_LIB_AES
-	select CRYPTO_LIB_GF128MUL
+	select CRYPTO_LIB_GF128HASH
 	select CRYPTO_LIB_UTILS
 
 config CRYPTO_LIB_ARC4
@@ -110,18 +108,28 @@ config CRYPTO_LIB_CURVE25519_GENERIC
 config CRYPTO_LIB_DES
 	tristate
 
+config CRYPTO_LIB_GF128HASH
+	tristate
+	help
+	  The GHASH and POLYVAL library functions.  Select this if your module
+	  uses any of the functions from <crypto/gf128hash.h>.
+
+config CRYPTO_LIB_GF128HASH_ARCH
+	bool
+	depends on CRYPTO_LIB_GF128HASH && !UML
+	default y if ARM && KERNEL_MODE_NEON
+	default y if ARM64
+	default y if PPC64 && VSX
+	default y if RISCV && 64BIT && TOOLCHAIN_HAS_VECTOR_CRYPTO && \
+		     RISCV_EFFICIENT_VECTOR_UNALIGNED_ACCESS
+	default y if S390
+	default y if X86_64
+
 config CRYPTO_LIB_MD5
 	tristate
 	help
 	  The MD5 and HMAC-MD5 library functions.  Select this if your module
 	  uses any of the functions from <crypto/md5.h>.
-
-config CRYPTO_LIB_MD5_ARCH
-	bool
-	depends on CRYPTO_LIB_MD5 && !UML
-	default y if MIPS && CPU_CAVIUM_OCTEON
-	default y if PPC
-	default y if SPARC64
 
 config CRYPTO_LIB_MLDSA
 	tristate
@@ -177,18 +185,6 @@ config CRYPTO_LIB_POLY1305_RSIZE
 	default 11 if X86_64
 	default 9 if ARM || ARM64
 	default 1
-
-config CRYPTO_LIB_POLYVAL
-	tristate
-	help
-	  The POLYVAL library functions.  Select this if your module uses any of
-	  the functions from <crypto/polyval.h>.
-
-config CRYPTO_LIB_POLYVAL_ARCH
-	bool
-	depends on CRYPTO_LIB_POLYVAL && !UML
-	default y if ARM64
-	default y if X86_64
 
 config CRYPTO_LIB_CHACHA20POLY1305
 	tristate
@@ -267,7 +263,14 @@ config CRYPTO_LIB_SHA3_ARCH
 
 config CRYPTO_LIB_SM3
 	tristate
+	help
+	  The SM3 library functions.  Select this if your module uses any of the
+	  functions from <crypto/sm3.h>.
 
-source "lib/crypto/tests/Kconfig"
-
-endmenu
+config CRYPTO_LIB_SM3_ARCH
+	bool
+	depends on CRYPTO_LIB_SM3 && !UML
+	default y if ARM64
+	default y if RISCV && 64BIT && TOOLCHAIN_HAS_VECTOR_CRYPTO && \
+		     RISCV_EFFICIENT_VECTOR_UNALIGNED_ACCESS
+	default y if X86_64

@@ -111,9 +111,9 @@ struct rt_link_detect_t {
 
 /* used for mlme_priv.roam_flags */
 enum {
-	RTW_ROAM_ON_EXPIRED = BIT0,
-	RTW_ROAM_ON_RESUME = BIT1,
-	RTW_ROAM_ACTIVE = BIT2,
+	RTW_ROAM_ON_EXPIRED = BIT(0),
+	RTW_ROAM_ON_RESUME = BIT(1),
+	RTW_ROAM_ACTIVE = BIT(2),
 };
 
 struct mlme_priv {
@@ -362,9 +362,9 @@ extern void _rtw_free_network_nolock(struct mlme_priv *pmlmepriv, struct wlan_ne
 
 extern struct wlan_network *_rtw_find_network(struct __queue *scanned_queue, u8 *addr);
 
-extern signed int rtw_if_up(struct adapter *padapter);
+bool rtw_if_up(struct adapter *padapter);
 
-signed int rtw_linked_check(struct adapter *padapter);
+bool rtw_linked_check(struct adapter *padapter);
 
 u8 *rtw_get_capability_from_ie(u8 *ie);
 u8 *rtw_get_beacon_interval_from_ie(u8 *ie);
@@ -379,7 +379,7 @@ void rtw_update_ht_cap(struct adapter *padapter, u8 *pie, uint ie_len, u8 channe
 void rtw_issue_addbareq_cmd(struct adapter *padapter, struct xmit_frame *pxmitframe);
 void rtw_append_exented_cap(struct adapter *padapter, u8 *out_ie, uint *pout_len);
 
-int rtw_is_same_ibss(struct adapter *adapter, struct wlan_network *pnetwork);
+bool rtw_is_same_ibss(struct adapter *adapter, struct wlan_network *pnetwork);
 int is_same_network(struct wlan_bssid_ex *src, struct wlan_bssid_ex *dst, u8 feature);
 
 #define rtw_roam_flags(adapter) ((adapter)->mlmepriv.roam_flags)

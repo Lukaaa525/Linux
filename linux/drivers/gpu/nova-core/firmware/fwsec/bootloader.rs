@@ -7,11 +7,12 @@
 //! be loaded using PIO.
 
 use kernel::{
-    alloc::KVec,
     device::{
         self,
         Device, //
     },
+    dma::Coherent,
+    io::{register::WithBase, Io},
     prelude::*,
     ptr::{
         Alignable,
@@ -25,7 +26,6 @@ use kernel::{
 };
 
 use crate::{
-    dma::DmaObject,
     driver::Bar0,
     falcon::{
         self,
@@ -33,7 +33,6 @@ use crate::{
         Falcon,
         FalconBromParams,
         FalconDmaLoadable,
-        FalconEngine,
         FalconFbifMemType,
         FalconFbifTarget,
         FalconFirmware,
@@ -48,7 +47,7 @@ use crate::{
         FIRMWARE_VERSION, //
     },
     gpu::Chipset,
-    num::FromSafeCast,
+    num::FromSafeCast, //
     regs,
 };
 
@@ -126,7 +125,7 @@ unsafe impl AsBytes for BootloaderDmemDescV2 {}
 /// operation.
 pub(crate) struct FwsecFirmwareWithBl {
     /// DMA object the bootloader will copy the firmware from.
-    _firmware_dma: DmaObject,
+    _firmware_dma: Coherent<[u8]>,
     /// Code of the bootloader to be loaded into non-secure IMEM.
     ucode: KVec<u8>,
     /// Descriptor to be loaded into DMEM for the bootloader to read.
@@ -208,7 +207,7 @@ impl FwsecFirmwareWithBl {
 
             (
                 align_padding,
-                DmaObject::from_data(dev, firmware_obj.as_slice())?,
+                Coherent::from_slice(dev, firmware_obj.as_slice(), GFP_KERNEL)?,
             )
         };
 
@@ -276,30 +275,30 @@ impl FwsecFirmwareWithBl {
     pub(crate) fn run(
         &self,
         dev: &Device<device::Bound>,
-        falcon: &Falcon<Gsp>,
-        bar: &Bar0,
+        falcon: &Falcon<'_, Gsp>,
+        bar: Bar0<'_>,
     ) -> Result<()> {
         // Reset falcon, load the firmware, and run it.
         falcon
-            .reset(bar)
+            .reset()
             .inspect_err(|e| dev_err!(dev, "Failed to reset GSP falcon: {:?}\n", e))?;
         falcon
-            .pio_load(bar, self)
+            .pio_load(self)
             .inspect_err(|e| dev_err!(dev, "Failed to load FWSEC firmware: {:?}\n", e))?;
 
         // Configure DMA index for the bootloader to fetch the FWSEC firmware from system memory.
-        regs::NV_PFALCON_FBIF_TRANSCFG::try_update(
-            bar,
-            &Gsp::ID,
-            usize::from_safe_cast(self.dmem_desc.ctx_dma),
+        bar.update(
+            regs::NV_PFALCON_FBIF_TRANSCFG::of::<Gsp>()
+                .try_at(usize::from_safe_cast(self.dmem_desc.ctx_dma))
+                .ok_or(EINVAL)?,
             |v| {
-                v.set_target(FalconFbifTarget::CoherentSysmem)
-                    .set_mem_type(FalconFbifMemType::Physical)
+                v.with_target(FalconFbifTarget::CoherentSysmem)
+                    .with_mem_type(FalconFbifMemType::Physical)
             },
-        )?;
+        );
 
         let (mbox0, _) = falcon
-            .boot(bar, Some(0), None)
+            .boot(Some(0), None)
             .inspect_err(|e| dev_err!(dev, "Failed to boot FWSEC firmware: {:?}\n", e))?;
         if mbox0 != 0 {
             dev_err!(dev, "FWSEC firmware returned error {}\n", mbox0);

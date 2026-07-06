@@ -84,8 +84,11 @@ static int i2c_acpi_resource_count(struct acpi_resource *ares, void *data)
  * i2c_acpi_client_count - Count the number of I2cSerialBus resources
  * @adev:	ACPI device
  *
- * Returns the number of I2cSerialBus resources in the ACPI-device's
+ * Return:
+ * The number of I2cSerialBus resources in the ACPI-device's
  * resource-list; or a negative error code.
+ *
+ * Specifically returns -ENOENT when no resources found.
  */
 int i2c_acpi_client_count(struct acpi_device *adev)
 {
@@ -97,7 +100,7 @@ int i2c_acpi_client_count(struct acpi_device *adev)
 		return ret;
 
 	acpi_dev_free_resource_list(&r);
-	return count;
+	return count ?: -ENOENT;
 }
 EXPORT_SYMBOL_GPL(i2c_acpi_client_count);
 
@@ -165,9 +168,12 @@ static int i2c_acpi_do_lookup(struct acpi_device *adev,
 	INIT_LIST_HEAD(&resource_list);
 	ret = acpi_dev_get_resources(adev, &resource_list,
 				     i2c_acpi_fill_info, lookup);
+	if (ret < 0)
+		return ret;
+
 	acpi_dev_free_resource_list(&resource_list);
 
-	if (ret < 0 || !info->addr)
+	if (!info->addr)
 		return -EINVAL;
 
 	return 0;
@@ -371,7 +377,9 @@ static const struct acpi_device_id i2c_acpi_force_100khz_device_ids[] = {
 	 * a 400KHz frequency. The root cause of the issue is not known.
 	 */
 	{ "DLL0945", 0 },
+	{ "ELAN0678", 0 },
 	{ "ELAN06FA", 0 },
+	{ "ELAN1300", 0 },
 	{}
 };
 

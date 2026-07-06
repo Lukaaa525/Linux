@@ -4329,18 +4329,28 @@ lpfc_format_edc_cgn_desc(struct lpfc_hba *phba, struct fc_tlv_desc *tlv)
 static bool
 lpfc_link_is_lds_capable(struct lpfc_hba *phba)
 {
-	if (!(phba->lmt & LMT_64Gb))
+	if (!(phba->lmt & (LMT_64Gb | LMT_128Gb)))
 		return false;
 	if (phba->sli_rev != LPFC_SLI_REV4)
 		return false;
 
 	if (phba->sli4_hba.conf_trunk) {
-		if (phba->trunk_link.phy_lnk_speed == LPFC_USER_LINK_SPEED_64G)
+		switch (phba->trunk_link.phy_lnk_speed) {
+		case LPFC_USER_LINK_SPEED_128G:
+		case LPFC_USER_LINK_SPEED_64G:
 			return true;
-	} else if (phba->fc_linkspeed == LPFC_LINK_SPEED_64GHZ) {
-		return true;
+		default:
+			return false;
+		}
 	}
-	return false;
+
+	switch (phba->fc_linkspeed) {
+	case LPFC_LINK_SPEED_128GHZ:
+	case LPFC_LINK_SPEED_64GHZ:
+		return true;
+	default:
+		return false;
+	}
 }
 
  /**
@@ -4840,7 +4850,7 @@ lpfc_els_retry(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 
 	case IOSTAT_LS_RJT:
 		stat.un.ls_rjt_error_be = cpu_to_be32(ulp_word4);
-		/* Added for Vendor specifc support
+		/* Added for Vendor specific support
 		 * Just keep retrying for these Rsn / Exp codes
 		 */
 		if (test_bit(FC_PT2PT, &vport->fc_flag) &&
@@ -10301,10 +10311,8 @@ cleanup:
 						cpu_to_le16(value);
 					cp->cgn_warn_freq =
 						cpu_to_le16(value);
-					crc = lpfc_cgn_calc_crc32
-						(cp,
-						LPFC_CGN_INFO_SZ,
-						LPFC_CGN_CRC32_SEED);
+					crc = lpfc_cgn_calc_crc32(
+						cp, LPFC_CGN_INFO_SZ);
 					cp->cgn_info_crc = cpu_to_le32(crc);
 				}
 

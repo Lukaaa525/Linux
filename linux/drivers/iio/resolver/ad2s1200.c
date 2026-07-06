@@ -12,7 +12,6 @@
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/spi/spi.h>
 #include <linux/sysfs.h>
@@ -183,8 +182,8 @@ static const struct of_device_id ad2s1200_of_match[] = {
 MODULE_DEVICE_TABLE(of, ad2s1200_of_match);
 
 static const struct spi_device_id ad2s1200_id[] = {
-	{ "ad2s1200" },
-	{ "ad2s1205" },
+	{ .name = "ad2s1200" },
+	{ .name = "ad2s1205" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad2s1200_id);

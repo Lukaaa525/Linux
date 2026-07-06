@@ -8,17 +8,6 @@ config BINARY_PRINTF
 
 menu "Library routines"
 
-config RAID6_PQ
-	tristate
-
-config RAID6_PQ_BENCHMARK
-	bool "Automatically choose fastest RAID6 PQ functions"
-	depends on RAID6_PQ
-	default y
-	help
-	  Benchmark all available RAID6 PQ functions on init and choose the
-	  fastest one.
-
 config LINEAR_RANGES
 	tristate
 
@@ -52,27 +41,28 @@ config PACKING_KUNIT_TEST
 
 	  When in doubt, say N.
 
-config PERCPU_COUNTER_TREE_TEST
-	tristate "Hierarchical Per-CPU counter test" if !KUNIT_ALL_TESTS
-	depends on KUNIT
-	default KUNIT_ALL_TESTS
-	help
-	  This builds Kunit tests for the hierarchical per-cpu counters.
-
-	  For more information on KUnit and unit tests in general,
-	  please refer to the KUnit documentation in Documentation/dev-tools/kunit/.
-
-	  When in doubt, say N.
-
 config BITREVERSE
 	tristate
+	select GENERIC_BITREVERSE if !HAVE_ARCH_BITREVERSE
 
 config HAVE_ARCH_BITREVERSE
 	bool
 	default n
+	depends on BITREVERSE
 	help
 	  This option enables the use of hardware bit-reversal instructions on
 	  architectures which support such operations.
+
+config GENERIC_BITREVERSE
+	tristate
+	depends on BITREVERSE
+	help
+	  Generic bit reversal implementation. Drivers should never enable
+	  it explicitly. Instead, enable BITREVERSE.
+
+	  Architectures may want to select it as a fall-back option for
+	  HAVE_ARCH_BITREVERSE, when the hardware-accelerated bit reverse
+	  instruction set is optional, like RISC-V ZBKB extension.
 
 config ARCH_HAS_STRNCPY_FROM_USER
 	bool
@@ -168,12 +158,6 @@ config AUDIT_COMPAT_GENERIC
 	bool
 	depends on AUDIT_GENERIC && AUDIT_ARCH_COMPAT_GENERIC && COMPAT
 	default y
-
-config RANDOM32_SELFTEST
-	bool "PRNG perform self test on init"
-	help
-	  This option enables the 32 bit PRNG library functions to perform a
-	  self test on initialization.
 
 #
 # compression support is select'ed if needed
@@ -602,7 +586,7 @@ config OBJAGG
 config LWQ_TEST
 	bool "Boot-time test for lwq queuing"
 	help
-          Run boot-time test of light-weight queuing.
+	  Run boot-time test of light-weight queuing.
 
 endmenu
 

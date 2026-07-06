@@ -137,6 +137,16 @@ static inline bool is_acr_event_group(struct perf_event *event)
 	return check_leader_group(event->group_leader, PERF_X86_EVENT_ACR);
 }
 
+static inline bool is_acr_self_reload_event(struct perf_event *event)
+{
+	struct hw_perf_event *hwc = &event->hw;
+
+	if (hwc->idx < 0)
+		return false;
+
+	return test_bit(hwc->idx, (unsigned long *)&hwc->config1);
+}
+
 struct amd_nb {
 	int nb_id;  /* NorthBridge id */
 	int refcnt; /* reference count */
@@ -312,10 +322,8 @@ struct cpu_hw_events {
 	u64			fixed_ctrl_val;
 	u64			active_fixed_ctrl_val;
 
-	/* Intel ACR configuration */
+	/* Intel ACR/arch-PEBS configuration */
 	u64			acr_cfg_b[X86_PMC_IDX_MAX];
-	u64			acr_cfg_c[X86_PMC_IDX_MAX];
-	/* Cached CFG_C values */
 	u64			cfg_c_val[X86_PMC_IDX_MAX];
 
 	/*
@@ -660,7 +668,7 @@ union perf_capabilities {
 		u64	perf_metrics:1;
 		u64	pebs_output_pt_available:1;
 		u64	pebs_timing_info:1;
-		u64	anythread_deprecated:1;
+		u64	__reserved:1;
 		u64	rdpmc_metrics_clear:1;
 	};
 	u64	capabilities;
@@ -1336,7 +1344,7 @@ static inline u64 x86_pmu_get_event_config(struct perf_event *event)
 static inline bool x86_pmu_has_rdpmc_user_disable(struct pmu *pmu)
 {
 	return !!(hybrid(pmu, config_mask) &
-		 ARCH_PERFMON_EVENTSEL_RDPMC_USER_DISABLE);
+		  ARCH_PERFMON_EVENTSEL_RDPMC_USER_DISABLE);
 }
 
 extern struct event_constraint emptyconstraint;
@@ -1702,7 +1710,9 @@ extern struct event_constraint intel_glp_pebs_event_constraints[];
 
 extern struct event_constraint intel_grt_pebs_event_constraints[];
 
-extern struct event_constraint intel_arw_pebs_event_constraints[];
+extern struct event_constraint intel_cmt_pebs_event_constraints[];
+
+extern struct event_constraint intel_dkt_pebs_event_constraints[];
 
 extern struct event_constraint intel_nehalem_pebs_event_constraints[];
 

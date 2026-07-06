@@ -11,7 +11,6 @@
 #include <linux/fs.h>
 #include <linux/backing-file.h>
 #include <linux/splice.h>
-#include <linux/uio.h>
 #include <linux/mm.h>
 #include <linux/security.h>
 
@@ -19,32 +18,33 @@
 
 /**
  * backing_file_open - open a backing file for kernel internal use
- * @user_path:	path that the user reuqested to open
- * @user_cred:	credentials that the user used for open
+ * @user_file:  file the user requested to open
  * @flags:	open flags
  * @real_path:	path of the backing file
- * @cred:	credentials for open of the backing file
+ * @cred:	credentials for open
  *
  * Open a backing file for a stackable filesystem (e.g., overlayfs).
- * @user_path may be on the stackable filesystem and @real_path on the
- * underlying filesystem.  In this case, we want to be able to return the
- * @user_path of the stackable filesystem. This is done by embedding the
- * returned file into a container structure that also stores the stacked
- * file's path, which can be retrieved using backing_file_user_path().
+ * @user_file->f_path may be on the stackable filesystem and @real_path
+ * on the underlying filesystem. In this case, we want to be able to
+ * return the path of the stackable filesystem. This is done by
+ * embedding the returned file into a container structure that also
+ * stores the stacked file's path, which can be retrieved using
+ * backing_file_user_path().
  */
-struct file *backing_file_open(const struct path *user_path,
-			       const struct cred *user_cred, int flags,
+struct file *backing_file_open(const struct file *user_file, int flags,
 			       const struct path *real_path,
 			       const struct cred *cred)
 {
+	const struct path *user_path = &user_file->f_path;
 	struct file *f;
 	int error;
 
-	f = alloc_empty_backing_file(flags, cred, user_cred);
+	f = alloc_empty_backing_file(flags, cred, user_file);
 	if (IS_ERR(f))
 		return f;
 
-	backing_file_open_user_path(f, user_path);
+	path_get(user_path);
+	backing_file_set_user_path(f, user_path);
 	error = vfs_open(real_path, f);
 	if (error) {
 		fput(f);
@@ -55,20 +55,21 @@ struct file *backing_file_open(const struct path *user_path,
 }
 EXPORT_SYMBOL_GPL(backing_file_open);
 
-struct file *backing_tmpfile_open(const struct path *user_path,
-				  const struct cred *user_cred, int flags,
+struct file *backing_tmpfile_open(const struct file *user_file, int flags,
 				  const struct path *real_parentpath,
 				  umode_t mode, const struct cred *cred)
 {
 	struct mnt_idmap *real_idmap = mnt_idmap(real_parentpath->mnt);
+	const struct path *user_path = &user_file->f_path;
 	struct file *f;
 	int error;
 
-	f = alloc_empty_backing_file(flags, cred, user_cred);
+	f = alloc_empty_backing_file(flags, cred, user_file);
 	if (IS_ERR(f))
 		return f;
 
-	backing_file_open_user_path(f, user_path);
+	path_get(user_path);
+	backing_file_set_user_path(f, user_path);
 	error = vfs_tmpfile(real_idmap, real_parentpath, f, mode);
 	if (error) {
 		fput(f);

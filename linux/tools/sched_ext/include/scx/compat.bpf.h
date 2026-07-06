@@ -108,6 +108,31 @@ static inline struct task_struct *__COMPAT_scx_bpf_dsq_peek(u64 dsq_id)
 	return p;
 }
 
+/*
+ * v7.1: scx_bpf_sub_dispatch() for sub-sched dispatch. Preserve until
+ * we drop the compat layer for older kernels that lack the kfunc.
+ */
+bool scx_bpf_sub_dispatch___compat(u64 cgroup_id) __ksym __weak;
+
+static inline bool scx_bpf_sub_dispatch(u64 cgroup_id)
+{
+	if (bpf_ksym_exists(scx_bpf_sub_dispatch___compat))
+		return scx_bpf_sub_dispatch___compat(cgroup_id);
+	return false;
+}
+
+/*
+ * v7.2: scx_bpf_cid_override() for explicit cpu->cid mapping. Ignore if
+ * missing.
+ */
+void scx_bpf_cid_override___compat(const s32 *cpu_to_cid, u32 cpu_to_cid__sz) __ksym __weak;
+
+static inline void scx_bpf_cid_override(const s32 *cpu_to_cid, u32 cpu_to_cid__sz)
+{
+	if (bpf_ksym_exists(scx_bpf_cid_override___compat))
+		return scx_bpf_cid_override___compat(cpu_to_cid, cpu_to_cid__sz);
+}
+
 /**
  * __COMPAT_is_enq_cpu_selected - Test if SCX_ENQ_CPU_SELECTED is on
  * in a compatible way. We will preserve this __COMPAT helper until v6.16.
@@ -207,23 +232,6 @@ static inline bool __COMPAT_is_enq_cpu_selected(u64 enq_flags)
 	(bpf_ksym_exists(scx_bpf_pick_any_cpu_node) ?				\
 	 scx_bpf_pick_any_cpu_node(cpus_allowed, node, flags) :			\
 	 scx_bpf_pick_any_cpu(cpus_allowed, flags))
-
-/*
- * v6.18: Add a helper to retrieve the current task running on a CPU.
- *
- * Keep this helper available until v6.20 for compatibility.
- */
-static inline struct task_struct *__COMPAT_scx_bpf_cpu_curr(int cpu)
-{
-	struct rq *rq;
-
-	if (bpf_ksym_exists(scx_bpf_cpu_curr))
-		return scx_bpf_cpu_curr(cpu);
-
-	rq = scx_bpf_cpu_rq(cpu);
-
-	return rq ? rq->curr : NULL;
-}
 
 /*
  * v6.19: To work around BPF maximum parameter limit, the following kfuncs are
@@ -410,17 +418,26 @@ static inline void scx_bpf_dsq_reenq(u64 dsq_id, u64 reenq_flags)
 }
 
 /*
- * v7.1: %SCX_ENQ_IMMED.
- */
-#define SCX_ENQ_IMMED	__COMPAT_ENUM_OR_ZERO(enum scx_enq_flags, SCX_ENQ_IMMED)
-
-/*
- * Define sched_ext_ops. This may be expanded to define multiple variants for
- * backward compatibility. See compat.h::SCX_OPS_LOAD/ATTACH().
+ * Define sched_ext_ops. See compat.h::SCX_OPS_OPEN() for how backward
+ * compatibility is handled (this macro can be expanded to emit multiple
+ * variants for incompatible op changes; SCX_OPS_OPEN() handles purely
+ * additive changes at load time).
  */
 #define SCX_OPS_DEFINE(__name, ...)						\
 	SEC(".struct_ops.link")							\
 	struct sched_ext_ops __name = {						\
+		__VA_ARGS__,							\
+	};
+
+/*
+ * Define a cid-form sched_ext_ops. Programs targeting this struct_ops type
+ * use cid-form callback signatures (select_cid, set_cmask, cid_online/offline,
+ * dispatch with cid arg, etc.) and may only call the cid-form scx_bpf_*
+ * kfuncs (kick_cid, task_cid, this_cid, ...).
+ */
+#define SCX_OPS_CID_DEFINE(__name, ...)						\
+	SEC(".struct_ops.link")							\
+	struct sched_ext_ops_cid __name = {					\
 		__VA_ARGS__,							\
 	};
 

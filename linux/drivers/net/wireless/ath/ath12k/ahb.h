@@ -27,7 +27,7 @@
 #define ATH12K_USERPD_SPAWN_TIMEOUT		(5 * HZ)
 #define ATH12K_USERPD_READY_TIMEOUT		(10 * HZ)
 #define ATH12K_USERPD_STOP_TIMEOUT		(5 * HZ)
-#define ATH12K_USERPD_ID_MASK			GENMASK(9, 8)
+#define ATH12K_USERPD_ID_MASK			GENMASK(10, 8)
 #define ATH12K_USERPD_FW_NAME_LEN		35
 
 enum ath12k_ahb_smp2p_msg_id {
@@ -68,6 +68,7 @@ struct ath12k_ahb {
 	int userpd_irq_num[ATH12K_USERPD_MAX_IRQ];
 	const struct ath12k_ahb_ops *ahb_ops;
 	const struct ath12k_ahb_device_family_ops *device_family_ops;
+	bool scm_auth_enabled;
 };
 
 struct ath12k_ahb_driver {

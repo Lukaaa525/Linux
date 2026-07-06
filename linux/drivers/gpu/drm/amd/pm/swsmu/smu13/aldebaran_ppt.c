@@ -425,6 +425,7 @@ static int aldebaran_set_default_dpm_table(struct smu_context *smu)
 		dpm_table->dpm_levels[0].enabled = true;
 		dpm_table->dpm_levels[1].value = pptable->GfxclkFmax;
 		dpm_table->dpm_levels[1].enabled = true;
+		dpm_table->flags |= SMU_DPM_TABLE_FINE_GRAINED;
 	} else {
 		dpm_table->count = 1;
 		dpm_table->dpm_levels[0].value = smu->smu_table.boot_values.gfxclk / 100;
@@ -1846,6 +1847,7 @@ static int aldebaran_mode2_reset(struct smu_context *smu)
 		amdgpu_device_load_pci_state(adev->pdev);
 
 		dev_dbg(adev->dev, "wait for reset ack\n");
+		ret = -ETIME;
 		while (ret == -ETIME && timeout)  {
 			ret = smu_msg_wait_response(ctl, 0);
 			/* Wait a bit more time for getting ACK */
@@ -1855,7 +1857,7 @@ static int aldebaran_mode2_reset(struct smu_context *smu)
 				continue;
 			}
 
-			if (ret != 1) {
+			if (ret != 0) {
 				dev_err(adev->dev, "failed to send mode2 message \tparam: 0x%08x response %#x\n",
 						SMU_RESET_MODE_2, ret);
 				goto out;
@@ -1865,10 +1867,9 @@ static int aldebaran_mode2_reset(struct smu_context *smu)
 	} else {
 		dev_err(adev->dev, "smu fw 0x%x does not support MSG_GfxDeviceDriverReset MSG\n",
 				smu->smc_fw_version);
+		ret = -EOPNOTSUPP;
 	}
 
-	if (ret == 1)
-		ret = 0;
 out:
 	mutex_unlock(&ctl->lock);
 
@@ -2003,7 +2004,6 @@ static const struct pptable_funcs aldebaran_ppt_funcs = {
 	.disable_thermal_alert = smu_v13_0_disable_thermal_alert,
 	.set_xgmi_pstate = smu_v13_0_set_xgmi_pstate,
 	.register_irq_handler = smu_v13_0_register_irq_handler,
-	.set_azalia_d3_pme = smu_v13_0_set_azalia_d3_pme,
 	.get_max_sustainable_clocks_by_dc = smu_v13_0_get_max_sustainable_clocks_by_dc,
 	.get_bamaco_support = aldebaran_get_bamaco_support,
 	.get_dpm_ultimate_freq = aldebaran_get_dpm_ultimate_freq,

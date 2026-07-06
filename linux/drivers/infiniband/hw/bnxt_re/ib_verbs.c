@@ -265,7 +265,10 @@ int bnxt_re_query_device(struct ib_device *ibdev,
 		resp.packet_pacing_caps.supported_qpts =
 			1 << IB_QPT_RC;
 	}
-	return ib_respond_udata(udata, resp);
+
+	if (udata)
+		return ib_respond_udata(udata, resp);
+	return 0;
 }
 
 int bnxt_re_modify_device(struct ib_device *ibdev,
@@ -1024,6 +1027,9 @@ int bnxt_re_destroy_qp(struct ib_qp *ib_qp, struct ib_udata *udata)
 	if (rc)
 		ibdev_err(&rdev->ibdev, "Failed to destroy HW QP");
 
+	if (qp->dbr_obj)
+		kref_put(&qp->dbr_obj->usecnt, bnxt_re_dbr_kref_release);
+
 	if (rdma_is_kernel_res(&qp->ib_qp.res)) {
 		flags = bnxt_re_lock_cqs(qp);
 		bnxt_qplib_clean_qp(&qp->qplib_qp);
@@ -1136,23 +1142,42 @@ static int bnxt_re_setup_swqe_size(struct bnxt_re_qp *qp,
 	return 0;
 }
 
-static int bnxt_re_init_user_qp(struct bnxt_re_dev *rdev, struct bnxt_re_pd *pd,
-				struct bnxt_re_qp *qp, struct bnxt_re_ucontext *cntx,
-				struct bnxt_re_qp_req *ureq)
+static int bnxt_re_setup_sginfo(struct bnxt_re_dev *rdev,
+				struct ib_umem *umem,
+				struct bnxt_qplib_sg_info *sginfo)
 {
-	struct bnxt_qplib_qp *qplib_qp;
-	int bytes = 0, psn_sz;
-	struct ib_umem *umem;
-	int psn_nume;
+	unsigned long page_size;
 
-	qplib_qp = &qp->qplib_qp;
+	if (!umem)
+		return -EINVAL;
 
-	bytes = (qplib_qp->sq.max_wqe * qplib_qp->sq.wqe_size);
-	/* Consider mapping PSN search memory only for RC QPs. */
-	if (qplib_qp->type == CMDQ_CREATE_QP_TYPE_RC) {
+	page_size = ib_umem_find_best_pgsz(umem, SZ_4K, 0);
+	if (!page_size || page_size != SZ_4K)
+		return -EINVAL;
+
+	sginfo->umem = umem;
+	sginfo->npages = ib_umem_num_dma_blocks(umem, page_size);
+	sginfo->pgsize = page_size;
+	sginfo->pgshft = __builtin_ctz(page_size);
+	return 0;
+}
+
+static int bnxt_re_get_psn_bytes(struct bnxt_re_dev *rdev,
+				 struct bnxt_re_ucontext *cntx,
+				 struct bnxt_qplib_qp *qplib_qp,
+				 struct bnxt_re_qp_req *ureq,
+				 bool fixed_que_attr)
+{
+	int psn_sz, psn_nume;
+
+	if (rdev->dev_attr &&
+	    _is_host_msn_table(rdev->dev_attr->dev_cap_flags2))
+		psn_sz = sizeof(struct sq_msn_search);
+	else
 		psn_sz = bnxt_qplib_is_chip_gen_p5_p7(rdev->chip_ctx) ?
-						   sizeof(struct sq_psn_search_ext) :
-						   sizeof(struct sq_psn_search);
+					sizeof(struct sq_psn_search_ext) :
+					sizeof(struct sq_psn_search);
+	if (!fixed_que_attr) {
 		if (cntx && bnxt_re_is_var_size_supported(rdev, cntx)) {
 			psn_nume = ureq->sq_slots;
 		} else {
@@ -1162,43 +1187,80 @@ static int bnxt_re_init_user_qp(struct bnxt_re_dev *rdev, struct bnxt_re_pd *pd,
 		}
 		if (_is_host_msn_table(rdev->qplib_res.dattr->dev_cap_flags2))
 			psn_nume = roundup_pow_of_two(psn_nume);
-		bytes += (psn_nume * psn_sz);
+	} else {
+		psn_nume = ureq->sq_npsn;
 	}
 
+	return psn_nume * psn_sz;
+}
+
+static int bnxt_re_init_user_qp(struct bnxt_re_dev *rdev, struct bnxt_re_pd *pd,
+				struct bnxt_re_qp *qp, struct bnxt_re_ucontext *cntx,
+				struct bnxt_re_qp_req *ureq,
+				bool fixed_que_attr,
+				struct bnxt_re_dbr_obj *dbr_obj,
+				struct uverbs_attr_bundle *attrs)
+{
+	struct bnxt_qplib_qp *qplib_qp;
+	struct ib_umem *umem;
+	int bytes;
+	int rc;
+
+	qplib_qp = &qp->qplib_qp;
+
+	bytes = (qplib_qp->sq.max_wqe * qplib_qp->sq.wqe_size);
+	/* Consider mapping PSN search memory only for RC QPs. */
+	if (qplib_qp->type == CMDQ_CREATE_QP_TYPE_RC)
+		bytes += bnxt_re_get_psn_bytes(rdev, cntx, qplib_qp, ureq, fixed_que_attr);
+
 	bytes = PAGE_ALIGN(bytes);
-	umem = ib_umem_get(&rdev->ibdev, ureq->qpsva, bytes,
-			   IB_ACCESS_LOCAL_WRITE);
+	umem = ib_umem_get_attr_or_va(&rdev->ibdev, attrs,
+				      UVERBS_ATTR_CREATE_QP_SQ_BUF_UMEM,
+				      ureq->qpsva, bytes, IB_ACCESS_LOCAL_WRITE);
 	if (IS_ERR(umem))
 		return PTR_ERR(umem);
 
 	qp->sumem = umem;
-	qplib_qp->sq.sg_info.umem = umem;
-	qplib_qp->sq.sg_info.pgsize = PAGE_SIZE;
-	qplib_qp->sq.sg_info.pgshft = PAGE_SHIFT;
-	qplib_qp->qp_handle = ureq->qp_handle;
+	rc = bnxt_re_setup_sginfo(rdev, qp->sumem, &qplib_qp->sq.sg_info);
+	if (rc)
+		goto fail;
 
-	if (!qp->qplib_qp.srq) {
-		bytes = (qplib_qp->rq.max_wqe * qplib_qp->rq.wqe_size);
-		bytes = PAGE_ALIGN(bytes);
-		umem = ib_umem_get(&rdev->ibdev, ureq->qprva, bytes,
-				   IB_ACCESS_LOCAL_WRITE);
-		if (IS_ERR(umem))
-			goto rqfail;
-		qp->rumem = umem;
-		qplib_qp->rq.sg_info.umem = umem;
-		qplib_qp->rq.sg_info.pgsize = PAGE_SIZE;
-		qplib_qp->rq.sg_info.pgshft = PAGE_SHIFT;
+	if (qp->qplib_qp.srq)
+		goto done;
+
+	bytes = (qplib_qp->rq.max_wqe * qplib_qp->rq.wqe_size);
+	bytes = PAGE_ALIGN(bytes);
+	umem = ib_umem_get_attr_or_va(&rdev->ibdev, attrs,
+				      UVERBS_ATTR_CREATE_QP_RQ_BUF_UMEM,
+				      ureq->qprva, bytes, IB_ACCESS_LOCAL_WRITE);
+	if (IS_ERR(umem)) {
+		rc = PTR_ERR(umem);
+		goto fail;
 	}
 
-	qplib_qp->dpi = &cntx->dpi;
+	qp->rumem = umem;
+	rc = bnxt_re_setup_sginfo(rdev, qp->rumem, &qplib_qp->rq.sg_info);
+	if (rc)
+		goto rqfail;
+
+done:
+	if (dbr_obj)
+		qplib_qp->dpi = &dbr_obj->dpi;
+	else
+		qplib_qp->dpi = &cntx->dpi;
+	qplib_qp->qp_handle = ureq->qp_handle;
 	qplib_qp->is_user = true;
 	return 0;
+
 rqfail:
+	ib_umem_release(qp->rumem);
+	qp->rumem = NULL;
+	memset(&qplib_qp->rq.sg_info, 0, sizeof(qplib_qp->rq.sg_info));
+fail:
 	ib_umem_release(qp->sumem);
 	qp->sumem = NULL;
 	memset(&qplib_qp->sq.sg_info, 0, sizeof(qplib_qp->sq.sg_info));
-
-	return PTR_ERR(umem);
+	return rc;
 }
 
 static struct bnxt_re_ah *bnxt_re_create_shadow_qp_ah
@@ -1297,7 +1359,7 @@ free_orrq_hwq:
 	return rc;
 }
 
-static int bnxt_re_setup_qp_hwqs(struct bnxt_re_qp *qp)
+static int bnxt_re_setup_qp_hwqs(struct bnxt_re_qp *qp, bool fixed_que_attr)
 {
 	struct bnxt_qplib_res *res = &qp->rdev->qplib_res;
 	struct bnxt_qplib_qp *qplib_qp = &qp->qplib_qp;
@@ -1311,12 +1373,17 @@ static int bnxt_re_setup_qp_hwqs(struct bnxt_re_qp *qp)
 	hwq_attr.res = res;
 	hwq_attr.sginfo = &sq->sg_info;
 	hwq_attr.stride = bnxt_qplib_get_stride();
-	hwq_attr.depth = bnxt_qplib_get_depth(sq, wqe_mode, true);
 	hwq_attr.aux_stride = qplib_qp->psn_sz;
-	hwq_attr.aux_depth = (qplib_qp->psn_sz) ?
-		bnxt_qplib_set_sq_size(sq, wqe_mode) : 0;
-	if (qplib_qp->is_host_msn_tbl && qplib_qp->psn_sz)
+	if (!fixed_que_attr) {
+		hwq_attr.depth = bnxt_qplib_get_depth(sq, wqe_mode, true);
+		hwq_attr.aux_depth = (qplib_qp->psn_sz) ?
+				bnxt_qplib_set_sq_size(sq, wqe_mode) : 0;
+		if (qplib_qp->is_host_msn_tbl && qplib_qp->psn_sz)
+			hwq_attr.aux_depth = qplib_qp->msn_tbl_sz;
+	} else {
+		hwq_attr.depth = sq->max_wqe;
 		hwq_attr.aux_depth = qplib_qp->msn_tbl_sz;
+	}
 	hwq_attr.type = HWQ_TYPE_QUEUE;
 	rc = bnxt_qplib_alloc_init_hwq(&sq->hwq, &hwq_attr);
 	if (rc)
@@ -1326,6 +1393,9 @@ static int bnxt_re_setup_qp_hwqs(struct bnxt_re_qp *qp)
 	pg_sz_lvl |= ((sq->hwq.level & CMDQ_CREATE_QP_SQ_LVL_MASK) <<
 		      CMDQ_CREATE_QP_SQ_LVL_SFT);
 	sq->hwq.pg_sz_lvl = pg_sz_lvl;
+
+	if (qplib_qp->srq)
+		goto done;
 
 	hwq_attr.res = res;
 	hwq_attr.sginfo = &rq->sg_info;
@@ -1343,6 +1413,7 @@ static int bnxt_re_setup_qp_hwqs(struct bnxt_re_qp *qp)
 		      CMDQ_CREATE_QP_RQ_LVL_SFT);
 	rq->hwq.pg_sz_lvl = pg_sz_lvl;
 
+done:
 	if (qplib_qp->psn_sz) {
 		rc = bnxt_re_qp_alloc_init_xrrq(qp);
 		if (rc)
@@ -1411,7 +1482,7 @@ static struct bnxt_re_qp *bnxt_re_create_shadow_qp
 	qp->qplib_qp.rq_hdr_buf_size = BNXT_QPLIB_MAX_GRH_HDR_SIZE_IPV6;
 	qp->qplib_qp.dpi = &rdev->dpi_privileged;
 
-	rc = bnxt_re_setup_qp_hwqs(qp);
+	rc = bnxt_re_setup_qp_hwqs(qp, false);
 	if (rc)
 		goto fail;
 
@@ -1436,13 +1507,13 @@ fail:
 
 static int bnxt_re_init_rq_attr(struct bnxt_re_qp *qp,
 				struct ib_qp_init_attr *init_attr,
-				struct bnxt_re_ucontext *uctx)
+				struct bnxt_re_ucontext *uctx,
+				bool fixed_que_attr)
 {
 	struct bnxt_qplib_dev_attr *dev_attr;
 	struct bnxt_qplib_qp *qplqp;
 	struct bnxt_re_dev *rdev;
 	struct bnxt_qplib_q *rq;
-	int entries;
 
 	rdev = qp->rdev;
 	qplqp = &qp->qplib_qp;
@@ -1462,11 +1533,16 @@ static int bnxt_re_init_rq_attr(struct bnxt_re_qp *qp,
 		init_attr->cap.max_recv_sge = rq->max_sge;
 		rq->wqe_size = bnxt_re_setup_rwqe_size(qplqp, rq->max_sge,
 						       dev_attr->max_qp_sges);
-		/* Allocate 1 more than what's provided so posting max doesn't
-		 * mean empty.
-		 */
-		entries = bnxt_re_init_depth(init_attr->cap.max_recv_wr + 1, uctx);
-		rq->max_wqe = min_t(u32, entries, dev_attr->max_qp_wqes + 1);
+		if (!fixed_que_attr) {
+			/* Allocate 1 more than what's provided so posting max doesn't
+			 * mean empty.
+			 */
+			rq->max_wqe = bnxt_re_init_depth(init_attr->cap.max_recv_wr + 1,
+							 dev_attr->max_qp_wqes + 1,
+							 uctx);
+		} else {
+			rq->max_wqe = init_attr->cap.max_recv_wr;
+		}
 		rq->max_sw_wqe = rq->max_wqe;
 		rq->q_full_delta = 0;
 		rq->sg_info.pgsize = PAGE_SIZE;
@@ -1497,14 +1573,14 @@ static void bnxt_re_adjust_gsi_rq_attr(struct bnxt_re_qp *qp)
 static int bnxt_re_init_sq_attr(struct bnxt_re_qp *qp,
 				struct ib_qp_init_attr *init_attr,
 				struct bnxt_re_ucontext *uctx,
-				struct bnxt_re_qp_req *ureq)
+				struct bnxt_re_qp_req *ureq,
+				bool fixed_que_attr)
 {
 	struct bnxt_qplib_dev_attr *dev_attr;
 	struct bnxt_qplib_qp *qplqp;
 	struct bnxt_re_dev *rdev;
 	struct bnxt_qplib_q *sq;
 	int diff = 0;
-	int entries;
 	int rc;
 
 	rdev = qp->rdev;
@@ -1513,7 +1589,6 @@ static int bnxt_re_init_sq_attr(struct bnxt_re_qp *qp,
 	dev_attr = rdev->dev_attr;
 
 	sq->max_sge = init_attr->cap.max_send_sge;
-	entries = init_attr->cap.max_send_wr;
 	if (uctx && qplqp->wqe_mode == BNXT_QPLIB_WQE_MODE_VARIABLE) {
 		sq->max_wqe = ureq->sq_slots;
 		sq->max_sw_wqe = ureq->sq_slots;
@@ -1529,23 +1604,29 @@ static int bnxt_re_init_sq_attr(struct bnxt_re_qp *qp,
 			return rc;
 
 		/* Allocate 128 + 1 more than what's provided */
-		diff = (qplqp->wqe_mode == BNXT_QPLIB_WQE_MODE_VARIABLE) ?
-			0 : BNXT_QPLIB_RESERVED_QP_WRS;
-		entries = bnxt_re_init_depth(entries + diff + 1, uctx);
-		sq->max_wqe = min_t(u32, entries, dev_attr->max_qp_wqes + diff + 1);
+		if (qplqp->wqe_mode != BNXT_QPLIB_WQE_MODE_VARIABLE)
+			diff = BNXT_QPLIB_RESERVED_QP_WRS;
+		sq->max_wqe = bnxt_re_init_depth(
+			init_attr->cap.max_send_wr + diff + 1,
+			dev_attr->max_qp_wqes + diff + 1, uctx);
 		if (qplqp->wqe_mode == BNXT_QPLIB_WQE_MODE_VARIABLE)
 			sq->max_sw_wqe = bnxt_qplib_get_depth(sq, qplqp->wqe_mode, true);
 		else
 			sq->max_sw_wqe = sq->max_wqe;
 
 	}
-	sq->q_full_delta = diff + 1;
-	/*
-	 * Reserving one slot for Phantom WQE. Application can
-	 * post one extra entry in this case. But allowing this to avoid
-	 * unexpected Queue full condition
-	 */
-	qplqp->sq.q_full_delta -= 1;
+	if (!fixed_que_attr) {
+		sq->q_full_delta = diff + 1;
+		/*
+		 * Reserving one slot for Phantom WQE. Application can
+		 * post one extra entry in this case. But allowing this to avoid
+		 * unexpected Queue full condition
+		 */
+		qplqp->sq.q_full_delta -= 1;
+	} else {
+		sq->q_full_delta = 0;
+	}
+
 	qplqp->sq.sg_info.pgsize = PAGE_SIZE;
 	qplqp->sq.sg_info.pgshft = PAGE_SHIFT;
 
@@ -1559,16 +1640,15 @@ static void bnxt_re_adjust_gsi_sq_attr(struct bnxt_re_qp *qp,
 	struct bnxt_qplib_dev_attr *dev_attr;
 	struct bnxt_qplib_qp *qplqp;
 	struct bnxt_re_dev *rdev;
-	int entries;
 
 	rdev = qp->rdev;
 	qplqp = &qp->qplib_qp;
 	dev_attr = rdev->dev_attr;
 
 	if (!bnxt_qplib_is_chip_gen_p5_p7(rdev->chip_ctx)) {
-		entries = bnxt_re_init_depth(init_attr->cap.max_send_wr + 1, uctx);
-		qplqp->sq.max_wqe = min_t(u32, entries,
-					  dev_attr->max_qp_wqes + 1);
+		qplqp->sq.max_wqe =
+			bnxt_re_init_depth(init_attr->cap.max_send_wr + 1,
+					   dev_attr->max_qp_wqes + 1, uctx);
 		qplqp->sq.q_full_delta = qplqp->sq.max_wqe -
 			init_attr->cap.max_send_wr;
 		qplqp->sq.max_sge++; /* Need one extra sge to put UD header */
@@ -1599,7 +1679,9 @@ out:
 	return qptype;
 }
 
-static void bnxt_re_qp_calculate_msn_psn_size(struct bnxt_re_qp *qp)
+static void bnxt_re_qp_calculate_msn_psn_size(struct bnxt_re_qp *qp,
+					      bool fixed_que_attr,
+					      struct bnxt_re_qp_req *req)
 {
 	struct bnxt_qplib_qp *qplib_qp = &qp->qplib_qp;
 	struct bnxt_qplib_q *sq = &qplib_qp->sq;
@@ -1622,12 +1704,17 @@ static void bnxt_re_qp_calculate_msn_psn_size(struct bnxt_re_qp *qp)
 
 	/* Update msn tbl size */
 	if (qplib_qp->is_host_msn_tbl && qplib_qp->psn_sz) {
-		if (wqe_mode == BNXT_QPLIB_WQE_MODE_STATIC)
-			qplib_qp->msn_tbl_sz =
-				roundup_pow_of_two(bnxt_qplib_set_sq_size(sq, wqe_mode));
-		else
-			qplib_qp->msn_tbl_sz =
-				roundup_pow_of_two(bnxt_qplib_set_sq_size(sq, wqe_mode)) / 2;
+		if (!fixed_que_attr) {
+			if (wqe_mode == BNXT_QPLIB_WQE_MODE_STATIC)
+				qplib_qp->msn_tbl_sz =
+					roundup_pow_of_two(bnxt_qplib_set_sq_size(sq, wqe_mode));
+			else
+				qplib_qp->msn_tbl_sz =
+					roundup_pow_of_two(bnxt_qplib_set_sq_size(sq, wqe_mode))
+						/ 2;
+		} else {
+			qplib_qp->msn_tbl_sz = req->sq_npsn;
+		}
 		qplib_qp->msn = 0;
 	}
 }
@@ -1635,7 +1722,10 @@ static void bnxt_re_qp_calculate_msn_psn_size(struct bnxt_re_qp *qp)
 static int bnxt_re_init_qp_attr(struct bnxt_re_qp *qp, struct bnxt_re_pd *pd,
 				struct ib_qp_init_attr *init_attr,
 				struct bnxt_re_ucontext *uctx,
-				struct bnxt_re_qp_req *ureq)
+				struct bnxt_re_qp_req *ureq,
+				struct bnxt_re_dbr_obj *dbr_obj,
+				bool fixed_que_attr,
+				struct uverbs_attr_bundle *attrs)
 {
 	struct bnxt_qplib_dev_attr *dev_attr;
 	struct bnxt_qplib_qp *qplqp;
@@ -1658,6 +1748,16 @@ static int bnxt_re_init_qp_attr(struct bnxt_re_qp *qp, struct bnxt_re_pd *pd,
 		return qptype;
 	qplqp->type = (u8)qptype;
 	qplqp->wqe_mode = bnxt_re_is_var_size_supported(rdev, uctx);
+	if (uctx && qplqp->wqe_mode == BNXT_QPLIB_WQE_MODE_VARIABLE &&
+	    (!ureq->sq_slots || ureq->sq_slots > BNXT_RE_MAX_SQ_SLOTS))
+		return -EINVAL;
+	if (fixed_que_attr) {
+		if (qplqp->wqe_mode != BNXT_QPLIB_WQE_MODE_VARIABLE)
+			return -EOPNOTSUPP;
+		if (!ureq->sq_npsn ||
+		    ureq->sq_npsn > roundup_pow_of_two(ureq->sq_slots / 2))
+			return -EINVAL;
+	}
 	qplqp->dev_cap_flags = dev_attr->dev_cap_flags;
 	qplqp->cctx = rdev->chip_ctx;
 	if (init_attr->qp_type == IB_QPT_RC) {
@@ -1687,28 +1787,29 @@ static int bnxt_re_init_qp_attr(struct bnxt_re_qp *qp, struct bnxt_re_pd *pd,
 	}
 
 	/* Setup RQ/SRQ */
-	rc = bnxt_re_init_rq_attr(qp, init_attr, uctx);
+	rc = bnxt_re_init_rq_attr(qp, init_attr, uctx, fixed_que_attr);
 	if (rc)
 		return rc;
 	if (init_attr->qp_type == IB_QPT_GSI)
 		bnxt_re_adjust_gsi_rq_attr(qp);
 
 	/* Setup SQ */
-	rc = bnxt_re_init_sq_attr(qp, init_attr, uctx, ureq);
+	rc = bnxt_re_init_sq_attr(qp, init_attr, uctx, ureq, fixed_que_attr);
 	if (rc)
 		return rc;
 	if (init_attr->qp_type == IB_QPT_GSI)
 		bnxt_re_adjust_gsi_sq_attr(qp, init_attr, uctx);
 
 	if (uctx) { /* This will update DPI and qp_handle */
-		rc = bnxt_re_init_user_qp(rdev, pd, qp, uctx, ureq);
+		rc = bnxt_re_init_user_qp(rdev, pd, qp, uctx, ureq, fixed_que_attr,
+					  dbr_obj, attrs);
 		if (rc)
 			return rc;
 	}
 
-	bnxt_re_qp_calculate_msn_psn_size(qp);
+	bnxt_re_qp_calculate_msn_psn_size(qp, fixed_que_attr, ureq);
 
-	rc = bnxt_re_setup_qp_hwqs(qp);
+	rc = bnxt_re_setup_qp_hwqs(qp, fixed_que_attr);
 	if (rc)
 		goto free_umem;
 
@@ -1837,8 +1938,11 @@ static int bnxt_re_add_unique_gid(struct bnxt_re_dev *rdev)
 int bnxt_re_create_qp(struct ib_qp *ib_qp, struct ib_qp_init_attr *qp_init_attr,
 		      struct ib_udata *udata)
 {
+	struct uverbs_attr_bundle *attrs = NULL;
+	struct bnxt_re_dbr_obj *dbr_obj = NULL;
 	struct bnxt_qplib_dev_attr *dev_attr;
 	struct bnxt_re_ucontext *uctx;
+	bool fixed_que_attr = false;
 	struct bnxt_re_qp_req ureq;
 	struct bnxt_re_dev *rdev;
 	struct bnxt_re_pd *pd;
@@ -1855,9 +1959,23 @@ int bnxt_re_create_qp(struct ib_qp *ib_qp, struct ib_qp_init_attr *qp_init_attr,
 
 	uctx = rdma_udata_to_drv_context(udata, struct bnxt_re_ucontext, ib_uctx);
 	if (udata) {
-		rc = ib_copy_validate_udata_in_cm(udata, ureq, qp_handle, 0);
+		rc = ib_copy_validate_udata_in_cm(udata, ureq, qp_handle,
+						  BNXT_RE_QP_REQ_MASK_FIXED_QUE_ATTR);
 		if (rc)
 			return rc;
+
+		attrs = rdma_udata_to_uverbs_attr_bundle(udata);
+		if (uverbs_attr_is_valid(attrs,
+					 BNXT_RE_CREATE_QP_ATTR_DBR_HANDLE)) {
+			dbr_obj = uverbs_attr_get_obj(attrs,
+						      BNXT_RE_CREATE_QP_ATTR_DBR_HANDLE);
+			if (IS_ERR(dbr_obj))
+				return PTR_ERR(dbr_obj);
+			kref_get(&dbr_obj->usecnt);
+			qp->dbr_obj = dbr_obj;
+		}
+		if (ureq.comp_mask & BNXT_RE_QP_REQ_MASK_FIXED_QUE_ATTR)
+			fixed_que_attr = true;
 	}
 
 	rc = bnxt_re_test_qp_limits(rdev, qp_init_attr, dev_attr);
@@ -1867,7 +1985,8 @@ int bnxt_re_create_qp(struct ib_qp *ib_qp, struct ib_qp_init_attr *qp_init_attr,
 	}
 
 	qp->rdev = rdev;
-	rc = bnxt_re_init_qp_attr(qp, pd, qp_init_attr, uctx, &ureq);
+	rc = bnxt_re_init_qp_attr(qp, pd, qp_init_attr, uctx, &ureq,
+				  dbr_obj, fixed_que_attr, attrs);
 	if (rc)
 		goto fail;
 
@@ -1886,7 +2005,7 @@ int bnxt_re_create_qp(struct ib_qp *ib_qp, struct ib_qp_init_attr *qp_init_attr,
 		}
 
 		if (udata) {
-			struct bnxt_re_qp_resp resp;
+			struct bnxt_re_qp_resp resp = {};
 
 			resp.qpid = qp->qplib_qp.id;
 			resp.rsvd = 0;
@@ -1937,6 +2056,8 @@ free_hwq:
 	bnxt_qplib_free_qp_res(&rdev->qplib_res, &qp->qplib_qp);
 	bnxt_re_qp_free_umem(qp);
 fail:
+	if (dbr_obj)
+		kref_put(&dbr_obj->usecnt, bnxt_re_dbr_kref_release);
 	return rc;
 }
 
@@ -2031,11 +2152,11 @@ int bnxt_re_destroy_srq(struct ib_srq *ib_srq, struct ib_udata *udata)
 	if (ret)
 		return ret;
 
-	if (rdev->chip_ctx->modes.toggle_bits & BNXT_QPLIB_SRQ_TOGGLE_BIT) {
-		free_page((unsigned long)srq->uctx_srq_page);
+	if (rdev->chip_ctx->modes.toggle_bits & BNXT_QPLIB_SRQ_TOGGLE_BIT)
 		hash_del(&srq->hash_entry);
-	}
 	bnxt_qplib_destroy_srq(&rdev->qplib_res, qplib_srq);
+	if (rdev->chip_ctx->modes.toggle_bits & BNXT_QPLIB_SRQ_TOGGLE_BIT)
+		free_page((unsigned long)srq->uctx_srq_page);
 	ib_umem_release(srq->umem);
 	atomic_dec(&rdev->stats.res.srq_count);
 	return ib_respond_empty_udata(udata);
@@ -2060,8 +2181,8 @@ static int bnxt_re_init_user_srq(struct bnxt_re_dev *rdev,
 
 	bytes = (qplib_srq->max_wqe * qplib_srq->wqe_size);
 	bytes = PAGE_ALIGN(bytes);
-	umem = ib_umem_get(&rdev->ibdev, ureq.srqva, bytes,
-			   IB_ACCESS_LOCAL_WRITE);
+	umem = ib_umem_get_va(&rdev->ibdev, ureq.srqva, bytes,
+			      IB_ACCESS_LOCAL_WRITE);
 	if (IS_ERR(umem))
 		return PTR_ERR(umem);
 
@@ -2086,7 +2207,7 @@ int bnxt_re_create_srq(struct ib_srq *ib_srq,
 	struct bnxt_re_pd *pd;
 	struct ib_pd *ib_pd;
 	u32 active_srqs;
-	int rc, entries;
+	int rc;
 
 	ib_pd = ib_srq->pd;
 	pd = container_of(ib_pd, struct bnxt_re_pd, ib_pd);
@@ -2112,10 +2233,9 @@ int bnxt_re_create_srq(struct ib_srq *ib_srq,
 	/* Allocate 1 more than what's provided so posting max doesn't
 	 * mean empty
 	 */
-	entries = bnxt_re_init_depth(srq_init_attr->attr.max_wr + 1, uctx);
-	if (entries > dev_attr->max_srq_wqes + 1)
-		entries = dev_attr->max_srq_wqes + 1;
-	srq->qplib_srq.max_wqe = entries;
+	srq->qplib_srq.max_wqe =
+		bnxt_re_init_depth(srq_init_attr->attr.max_wr + 1,
+				   dev_attr->max_srq_wqes + 1, uctx);
 
 	srq->qplib_srq.max_sge = srq_init_attr->attr.max_sge;
 	 /* 128 byte wqe size for SRQ . So use max sges */
@@ -2289,6 +2409,23 @@ static int bnxt_re_modify_shadow_qp(struct bnxt_re_dev *rdev,
 	return rc;
 }
 
+static bool bnxt_re_is_modify_ok(enum ib_qp_attr_mask ext_mask,
+				 enum ib_qp_type type, enum ib_qp_state cur,
+				 enum ib_qp_state next)
+{
+	if (!ext_mask)
+		return true;
+
+	if (ext_mask & ~IB_QP_RATE_LIMIT)
+		return false;
+
+	/* Rate limit is only supported for RC QPs during specific transitions */
+	return type == IB_QPT_RC &&
+	       ((cur == IB_QPS_INIT && next == IB_QPS_RTR) ||
+		(cur == IB_QPS_RTR && next == IB_QPS_RTS) ||
+		(cur == IB_QPS_RTS && next == IB_QPS_RTS));
+}
+
 int bnxt_re_modify_qp(struct ib_qp *ib_qp, struct ib_qp_attr *qp_attr,
 		      int qp_attr_mask, struct ib_udata *udata)
 {
@@ -2296,7 +2433,7 @@ int bnxt_re_modify_qp(struct ib_qp *ib_qp, struct ib_qp_attr *qp_attr,
 	struct bnxt_re_dev *rdev = qp->rdev;
 	struct bnxt_qplib_dev_attr *dev_attr = rdev->dev_attr;
 	enum ib_qp_state curr_qp_state, new_qp_state;
-	int rc, entries;
+	int rc;
 	unsigned int flags;
 	u8 nw_type;
 
@@ -2313,7 +2450,10 @@ int bnxt_re_modify_qp(struct ib_qp *ib_qp, struct ib_qp_attr *qp_attr,
 		curr_qp_state = __to_ib_qp_state(qp->qplib_qp.cur_qp_state);
 		new_qp_state = qp_attr->qp_state;
 		if (!ib_modify_qp_is_ok(curr_qp_state, new_qp_state,
-					ib_qp->qp_type, qp_attr_mask)) {
+					ib_qp->qp_type, qp_attr_mask) ||
+		    !bnxt_re_is_modify_ok(qp_attr_mask & ~IB_QP_ATTR_STANDARD_BITS,
+					  ib_qp->qp_type, curr_qp_state,
+					  new_qp_state)) {
 			ibdev_err(&rdev->ibdev,
 				  "Invalid attribute mask: %#x specified ",
 				  qp_attr_mask);
@@ -2510,9 +2650,9 @@ int bnxt_re_modify_qp(struct ib_qp *ib_qp, struct ib_qp_attr *qp_attr,
 				  "Create QP failed - max exceeded");
 			return -EINVAL;
 		}
-		entries = bnxt_re_init_depth(qp_attr->cap.max_send_wr, uctx);
-		qp->qplib_qp.sq.max_wqe = min_t(u32, entries,
-						dev_attr->max_qp_wqes + 1);
+		qp->qplib_qp.sq.max_wqe =
+			bnxt_re_init_depth(qp_attr->cap.max_send_wr,
+					   dev_attr->max_qp_wqes + 1, uctx);
 		qp->qplib_qp.sq.q_full_delta = qp->qplib_qp.sq.max_wqe -
 						qp_attr->cap.max_send_wr;
 		/*
@@ -2523,9 +2663,9 @@ int bnxt_re_modify_qp(struct ib_qp *ib_qp, struct ib_qp_attr *qp_attr,
 		qp->qplib_qp.sq.q_full_delta -= 1;
 		qp->qplib_qp.sq.max_sge = qp_attr->cap.max_send_sge;
 		if (qp->qplib_qp.rq.max_wqe) {
-			entries = bnxt_re_init_depth(qp_attr->cap.max_recv_wr, uctx);
-			qp->qplib_qp.rq.max_wqe =
-				min_t(u32, entries, dev_attr->max_qp_wqes + 1);
+			qp->qplib_qp.rq.max_wqe = bnxt_re_init_depth(
+				qp_attr->cap.max_recv_wr,
+				dev_attr->max_qp_wqes + 1, uctx);
 			qp->qplib_qp.rq.max_sw_wqe = qp->qplib_qp.rq.max_wqe;
 			qp->qplib_qp.rq.q_full_delta = qp->qplib_qp.rq.max_wqe -
 						       qp_attr->cap.max_recv_wr;
@@ -3335,37 +3475,18 @@ int bnxt_re_destroy_cq(struct ib_cq *ib_cq, struct ib_udata *udata)
 	if (ret)
 		return ret;
 
-	if (cctx->modes.toggle_bits & BNXT_QPLIB_CQ_TOGGLE_BIT) {
-		free_page((unsigned long)cq->uctx_cq_page);
+	if (cctx->modes.toggle_bits & BNXT_QPLIB_CQ_TOGGLE_BIT)
 		hash_del(&cq->hash_entry);
-	}
 	bnxt_qplib_destroy_cq(&rdev->qplib_res, &cq->qplib_cq);
+	if (cctx->modes.toggle_bits & BNXT_QPLIB_CQ_TOGGLE_BIT)
+		free_page((unsigned long)cq->uctx_cq_page);
 
 	bnxt_re_put_nq(rdev, nq);
 
 	atomic_dec(&rdev->stats.res.cq_count);
 	kfree(cq->cql);
+	ib_umem_release(cq->umem);
 	return ib_respond_empty_udata(udata);
-}
-
-static int bnxt_re_setup_sginfo(struct bnxt_re_dev *rdev,
-				struct ib_umem *umem,
-				struct bnxt_qplib_sg_info *sginfo)
-{
-	unsigned long page_size;
-
-	if (!umem)
-		return -EINVAL;
-
-	page_size = ib_umem_find_best_pgsz(umem, SZ_4K, 0);
-	if (!page_size || page_size != SZ_4K)
-		return -EINVAL;
-
-	sginfo->umem = umem;
-	sginfo->npages = ib_umem_num_dma_blocks(umem, page_size);
-	sginfo->pgsize = page_size;
-	sginfo->pgshft = __builtin_ctz(page_size);
-	return 0;
 }
 
 int bnxt_re_create_user_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
@@ -3380,26 +3501,19 @@ int bnxt_re_create_user_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *att
 	struct bnxt_qplib_chip_ctx *cctx;
 	struct bnxt_re_cq_resp resp = {};
 	struct bnxt_re_cq_req req;
-	int cqe = attr->cqe;
-	int rc, entries;
-	u32 active_cqs;
+	int rc;
+	u32 active_cqs, entries;
 
 	if (attr->flags)
 		return -EOPNOTSUPP;
 
 	/* Validate CQ fields */
-	if (cqe < 1 || cqe > dev_attr->max_cq_wqes) {
-		ibdev_err(&rdev->ibdev, "Failed to create CQ -max exceeded");
+	if (attr->cqe > dev_attr->max_cq_wqes)
 		return -EINVAL;
-	}
 
 	cq->rdev = rdev;
 	cctx = rdev->chip_ctx;
 	cq->qplib_cq.cq_handle = (u64)(unsigned long)(&cq->qplib_cq);
-
-	entries = bnxt_re_init_depth(cqe + 1, uctx);
-	if (entries > dev_attr->max_cq_wqes + 1)
-		entries = dev_attr->max_cq_wqes + 1;
 
 	rc = ib_copy_validate_udata_in_cm(udata, req, cq_handle,
 					  BNXT_RE_CQ_FIXED_NUM_CQE_ENABLE);
@@ -3407,21 +3521,20 @@ int bnxt_re_create_user_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *att
 		return rc;
 
 	if (req.comp_mask & BNXT_RE_CQ_FIXED_NUM_CQE_ENABLE)
-		entries = cqe;
+		entries = attr->cqe;
+	else
+		entries = bnxt_re_init_depth(attr->cqe + 1,
+					     dev_attr->max_cq_wqes + 1, uctx);
 
-	if (!ibcq->umem) {
-		ibcq->umem = ib_umem_get(&rdev->ibdev, req.cq_va,
-					 entries * sizeof(struct cq_base),
-					 IB_ACCESS_LOCAL_WRITE);
-		if (IS_ERR(ibcq->umem)) {
-			rc = PTR_ERR(ibcq->umem);
-			goto fail;
-		}
-	}
+	cq->umem = ib_umem_get_cq_buf_or_va(&rdev->ibdev, attrs, req.cq_va,
+					    entries * sizeof(struct cq_base),
+					    IB_ACCESS_LOCAL_WRITE);
+	if (IS_ERR(cq->umem))
+		return PTR_ERR(cq->umem);
 
-	rc = bnxt_re_setup_sginfo(rdev, ibcq->umem, &cq->qplib_cq.sg_info);
+	rc = bnxt_re_setup_sginfo(rdev, cq->umem, &cq->qplib_cq.sg_info);
 	if (rc)
-		goto fail;
+		goto free_umem;
 
 	cq->qplib_cq.dpi = &uctx->dpi;
 	cq->qplib_cq.max_wqe = entries;
@@ -3430,10 +3543,8 @@ int bnxt_re_create_user_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *att
 	cq->qplib_cq.cnq_hw_ring_id = cq->qplib_cq.nq->ring_id;
 
 	rc = bnxt_qplib_create_cq(&rdev->qplib_res, &cq->qplib_cq);
-	if (rc) {
-		ibdev_err(&rdev->ibdev, "Failed to create HW CQ");
-		goto fail;
-	}
+	if (rc)
+		goto free_umem;
 
 	cq->ib_cq.cqe = entries;
 	cq->cq_period = cq->qplib_cq.period;
@@ -3448,25 +3559,26 @@ int bnxt_re_create_user_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *att
 		cq->uctx_cq_page = (void *)get_zeroed_page(GFP_KERNEL);
 		if (!cq->uctx_cq_page) {
 			rc = -ENOMEM;
-			goto fail;
+			goto destroy_cq;
 		}
+
 		resp.comp_mask |= BNXT_RE_CQ_TOGGLE_PAGE_SUPPORT;
 	}
 	resp.cqid = cq->qplib_cq.id;
 	resp.tail = cq->qplib_cq.hwq.cons;
 	resp.phase = cq->qplib_cq.period;
-	resp.rsvd = 0;
 	rc = ib_respond_udata(udata, resp);
-	if (rc) {
-		bnxt_qplib_destroy_cq(&rdev->qplib_res, &cq->qplib_cq);
+	if (rc)
 		goto free_mem;
-	}
 
 	return 0;
 
 free_mem:
 	free_page((unsigned long)cq->uctx_cq_page);
-fail:
+destroy_cq:
+	bnxt_qplib_destroy_cq(&rdev->qplib_res, &cq->qplib_cq);
+free_umem:
+	ib_umem_release(cq->umem);
 	return rc;
 }
 
@@ -3475,43 +3587,29 @@ int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 {
 	struct bnxt_re_cq *cq = container_of(ibcq, struct bnxt_re_cq, ib_cq);
 	struct bnxt_re_dev *rdev = to_bnxt_re_dev(ibcq->device, ibdev);
-	struct ib_udata *udata = &attrs->driver_udata;
-	struct bnxt_re_ucontext *uctx =
-		rdma_udata_to_drv_context(udata, struct bnxt_re_ucontext, ib_uctx);
 	struct bnxt_qplib_dev_attr *dev_attr = rdev->dev_attr;
-	int cqe = attr->cqe;
-	int rc, entries;
+	int rc;
 	u32 active_cqs;
-
-	if (udata)
-		return bnxt_re_create_user_cq(ibcq, attr, attrs);
 
 	if (attr->flags)
 		return -EOPNOTSUPP;
 
 	/* Validate CQ fields */
-	if (cqe < 1 || cqe > dev_attr->max_cq_wqes) {
-		ibdev_err(&rdev->ibdev, "Failed to create CQ -max exceeded");
+	if (attr->cqe > dev_attr->max_cq_wqes)
 		return -EINVAL;
-	}
 
 	cq->rdev = rdev;
 	cq->qplib_cq.cq_handle = (u64)(unsigned long)(&cq->qplib_cq);
 
-	entries = bnxt_re_init_depth(cqe + 1, uctx);
-	if (entries > dev_attr->max_cq_wqes + 1)
-		entries = dev_attr->max_cq_wqes + 1;
-
-	cq->max_cql = min_t(u32, entries, MAX_CQL_PER_POLL);
-	cq->cql = kcalloc(cq->max_cql, sizeof(struct bnxt_qplib_cqe),
-			  GFP_KERNEL);
+	cq->max_cql = attr->cqe + 1;
+	cq->cql = kzalloc_objs(struct bnxt_qplib_cqe, cq->max_cql);
 	if (!cq->cql)
 		return -ENOMEM;
 
 	cq->qplib_cq.sg_info.pgsize = SZ_4K;
 	cq->qplib_cq.sg_info.pgshft = __builtin_ctz(SZ_4K);
 	cq->qplib_cq.dpi = &rdev->dpi_privileged;
-	cq->qplib_cq.max_wqe = entries;
+	cq->qplib_cq.max_wqe = cq->max_cql;
 	cq->qplib_cq.coalescing = &rdev->cq_coalescing;
 	cq->qplib_cq.nq = bnxt_re_get_nq(rdev);
 	cq->qplib_cq.cnq_hw_ring_id = cq->qplib_cq.nq->ring_id;
@@ -3522,7 +3620,7 @@ int bnxt_re_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 		goto fail;
 	}
 
-	cq->ib_cq.cqe = entries;
+	cq->ib_cq.cqe = cq->max_cql;
 	cq->cq_period = cq->qplib_cq.period;
 	active_cqs = atomic_inc_return(&rdev->stats.res.cq_count);
 	if (active_cqs > rdev->stats.res.cq_watermark)
@@ -3544,14 +3642,15 @@ static void bnxt_re_resize_cq_complete(struct bnxt_re_cq *cq)
 
 	cq->qplib_cq.max_wqe = cq->resize_cqe;
 	if (cq->resize_umem) {
-		ib_umem_release(cq->ib_cq.umem);
-		cq->ib_cq.umem = cq->resize_umem;
+		ib_umem_release(cq->umem);
+		cq->umem = cq->resize_umem;
 		cq->resize_umem = NULL;
 		cq->resize_cqe = 0;
 	}
 }
 
-int bnxt_re_resize_cq(struct ib_cq *ibcq, int cqe, struct ib_udata *udata)
+int bnxt_re_resize_cq(struct ib_cq *ibcq, unsigned int cqe,
+		      struct ib_udata *udata)
 {
 	struct bnxt_qplib_sg_info sg_info = {};
 	struct bnxt_qplib_dpi *orig_dpi = NULL;
@@ -3560,7 +3659,8 @@ int bnxt_re_resize_cq(struct ib_cq *ibcq, int cqe, struct ib_udata *udata)
 	struct bnxt_re_resize_cq_req req;
 	struct bnxt_re_dev *rdev;
 	struct bnxt_re_cq *cq;
-	int rc, entries;
+	int rc;
+	u32 entries;
 
 	cq =  container_of(ibcq, struct bnxt_re_cq, ib_cq);
 	rdev = cq->rdev;
@@ -3577,28 +3677,23 @@ int bnxt_re_resize_cq(struct ib_cq *ibcq, int cqe, struct ib_udata *udata)
 	}
 
 	/* Check the requested cq depth out of supported depth */
-	if (cqe < 1 || cqe > dev_attr->max_cq_wqes) {
-		ibdev_err(&rdev->ibdev, "Resize CQ %#x failed - out of range cqe %d",
-			  cq->qplib_cq.id, cqe);
+	if (cqe > dev_attr->max_cq_wqes)
 		return -EINVAL;
-	}
 
 	uctx = rdma_udata_to_drv_context(udata, struct bnxt_re_ucontext, ib_uctx);
-	entries = bnxt_re_init_depth(cqe + 1, uctx);
-	if (entries > dev_attr->max_cq_wqes + 1)
-		entries = dev_attr->max_cq_wqes + 1;
+	entries = bnxt_re_init_depth(cqe + 1, dev_attr->max_cq_wqes + 1, uctx);
 
 	/* uverbs consumer */
 	rc = ib_copy_validate_udata_in(udata, req, cq_va);
 	if (rc)
 		goto fail;
 
-	cq->resize_umem = ib_umem_get(&rdev->ibdev, req.cq_va,
-				      entries * sizeof(struct cq_base),
-				      IB_ACCESS_LOCAL_WRITE);
+	cq->resize_umem = ib_umem_get_va(&rdev->ibdev, req.cq_va,
+					 entries * sizeof(struct cq_base),
+					 IB_ACCESS_LOCAL_WRITE);
 	if (IS_ERR(cq->resize_umem)) {
 		rc = PTR_ERR(cq->resize_umem);
-		ibdev_err(&rdev->ibdev, "%s: ib_umem_get failed! rc = %pe\n",
+		ibdev_err(&rdev->ibdev, "%s: ib_umem_get_va failed! rc = %pe\n",
 			  __func__, cq->resize_umem);
 		cq->resize_umem = NULL;
 		goto fail;
@@ -4144,7 +4239,7 @@ int bnxt_re_poll_cq(struct ib_cq *ib_cq, int num_entries, struct ib_wc *wc)
 	/* User CQ; the only processing we do is to
 	 * complete any pending CQ resize operation.
 	 */
-	if (cq->ib_cq.umem) {
+	if (cq->umem) {
 		if (cq->resize_umem)
 			bnxt_re_resize_cq_complete(cq);
 		return 0;
@@ -4432,7 +4527,7 @@ struct ib_mr *bnxt_re_alloc_mr(struct ib_pd *ib_pd, enum ib_mr_type type,
 	mr->ib_mr.lkey = mr->qplib_mr.lkey;
 	mr->ib_mr.rkey = mr->ib_mr.lkey;
 
-	mr->pages = kcalloc(max_num_sg, sizeof(u64), GFP_KERNEL);
+	mr->pages = kzalloc_objs(u64, max_num_sg);
 	if (!mr->pages) {
 		rc = -ENOMEM;
 		goto fail;
@@ -4608,7 +4703,7 @@ struct ib_mr *bnxt_re_reg_user_mr(struct ib_pd *ib_pd, u64 start, u64 length,
 	if (dmah)
 		return ERR_PTR(-EOPNOTSUPP);
 
-	umem = ib_umem_get(&rdev->ibdev, start, length, mr_access_flags);
+	umem = ib_umem_get_va(&rdev->ibdev, start, length, mr_access_flags);
 	if (IS_ERR(umem))
 		return ERR_CAST(umem);
 
@@ -4669,12 +4764,13 @@ int bnxt_re_alloc_ucontext(struct ib_ucontext *ctx, struct ib_udata *udata)
 
 	uctx->rdev = rdev;
 
-	uctx->shpg = (void *)__get_free_page(GFP_KERNEL);
+	uctx->shpg = (void *)get_zeroed_page(GFP_KERNEL);
 	if (!uctx->shpg) {
 		rc = -ENOMEM;
 		goto fail;
 	}
 	spin_lock_init(&uctx->sh_lock);
+	mutex_init(&uctx->wcdpi_lock);
 
 	resp.comp_mask = BNXT_RE_UCNTX_CMASK_HAVE_CCTX;
 	chip_met_rev_num = rdev->chip_ctx->chip_num;
@@ -4916,6 +5012,10 @@ void bnxt_re_mmap_free(struct rdma_user_mmap_entry *rdma_entry)
 
 	bnxt_entry = container_of(rdma_entry, struct bnxt_re_user_mmap_entry,
 				  rdma_entry);
+
+	if (bnxt_entry->dpi_valid)
+		bnxt_qplib_free_uc_dpi(&bnxt_entry->uctx->rdev->qplib_res,
+				       &bnxt_entry->dpi);
 
 	kfree(bnxt_entry);
 }

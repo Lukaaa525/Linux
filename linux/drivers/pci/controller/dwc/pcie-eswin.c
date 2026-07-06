@@ -211,8 +211,7 @@ static int eswin_pcie_host_init(struct dw_pcie_rp *pp)
 
 	/* Configure Root Port type */
 	val = readl_relaxed(pci->elbi_base + PCIEELBI_CTRL0_OFFSET);
-	val &= ~PCIEELBI_CTRL0_DEV_TYPE;
-	val |= FIELD_PREP(PCIEELBI_CTRL0_DEV_TYPE, PCI_EXP_TYPE_ROOT_PORT);
+	FIELD_MODIFY(PCIEELBI_CTRL0_DEV_TYPE, &val, PCI_EXP_TYPE_ROOT_PORT);
 	writel_relaxed(val, pci->elbi_base + PCIEELBI_CTRL0_OFFSET);
 
 	list_for_each_entry(port, &pcie->ports, list) {
@@ -378,8 +377,8 @@ static int eswin_pcie_resume_noirq(struct device *dev)
 	return dw_pcie_resume_noirq(&pcie->pci);
 }
 
-DEFINE_NOIRQ_DEV_PM_OPS(eswin_pcie_pm, eswin_pcie_suspend_noirq,
-			eswin_pcie_resume_noirq);
+static DEFINE_NOIRQ_DEV_PM_OPS(eswin_pcie_pm, eswin_pcie_suspend_noirq,
+				eswin_pcie_resume_noirq);
 
 static const struct eswin_pcie_data eswin_eic7700_data = {
 	.skip_l23 = true,

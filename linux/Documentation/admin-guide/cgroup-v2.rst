@@ -220,7 +220,7 @@ cgroup v2 currently supports the following mount options.
   memory_hugetlb_accounting
         Count HugeTLB memory usage towards the cgroup's overall
         memory usage for the memory controller (for the purpose of
-        statistics reporting and memory protetion). This is a new
+        statistics reporting and memory protection). This is a new
         behavior that could regress existing setups, so it must be
         explicitly opted in with this mount option.
 
@@ -1145,7 +1145,7 @@ will be referred to. All time durations are in microseconds.
 	This file exists whether the controller is enabled or not.
 
 	It always reports the following three stats, which account for all the
-	processes in the cgroup:
+	processes in the cgroup (including those in descendant cgroups):
 
 	- usage_usec
 	- user_usec
@@ -1159,6 +1159,27 @@ will be referred to. All time durations are in microseconds.
 	- throttled_usec
 	- nr_bursts
 	- burst_usec
+
+	Note that the above five CFS bandwidth stats are non-hierarchical;
+	they only account for throttling caused by this cgroup's own bandwidth
+	limit, not including throttling inherited from ancestor cgroups.
+
+  cpu.stat.local
+	A read-only flat-keyed file.
+	This file exists whether the controller is enabled or not.
+
+	It reports the following stat when the controller is enabled:
+
+	- throttled_usec
+
+	Unlike the ``throttled_usec`` reported by ``cpu.stat`` which
+	accounts for throttling caused by this cgroup's own CFS
+	bandwidth limit, ``cpu.stat.local`` reports the actual
+	throttling time incurred by this cgroup's own runqueues,
+	which may include throttling inherited from ancestor
+	cgroup bandwidth limits.
+
+	When the controller is not enabled, this stat is not reported.
 
   cpu.weight
 	A read-write single value file which exists on non-root
@@ -1570,7 +1591,7 @@ The following nested keys are defined.
 	  sock (npn)
 		Amount of memory used in network transmission buffers
 
-	  vmalloc (npn)
+	  vmalloc
 		Amount of memory used for vmap backed memory.
 
 	  shmem
@@ -1735,7 +1756,7 @@ The following nested keys are defined.
 		Number of pages written from zswap to swap.
 
 	  zswap_incomp
-		Number of incompressible pages currently stored in zswap
+		Amount of memory used by incompressible pages currently stored in zswap
 		without compression. These pages could not be compressed to
 		a size smaller than PAGE_SIZE, so they are stored as-is.
 
@@ -2527,6 +2548,13 @@ Cpuset Interface Files
 	a need to change "cpuset.mems" with active tasks, it shouldn't
 	be done frequently.
 
+	For a multithreaded process, the threadgroup leader is
+	considered the owner of the group's memory. Memory policy
+	rebinding and migration will only happen with respect to the
+	threadgroup leader. To avoid unexpected results, non-leading
+	threads shouldn't be put into another cgroup whose "cpuset.mems"
+	doesn't fully overlap that of the threadgroup leader.
+
   cpuset.mems.effective
 	A read-only multiple values file which exists on all
 	cpuset-enabled cgroups.
@@ -2785,6 +2813,59 @@ RDMA Interface Files
 	  mlx4_0 hca_handle=1 hca_object=20
 	  ocrdma1 hca_handle=1 hca_object=23
 
+  rdma.peak
+	A read-only nested-keyed file that exists for all the cgroups
+	except root.  It shows the historical high watermark of
+	resource usage per device since the cgroup was created.
+
+	An example for mlx4 and ocrdma device follows::
+
+	  mlx4_0 hca_handle=1 hca_object=20
+	  ocrdma1 hca_handle=0 hca_object=23
+
+  rdma.events
+	A read-only nested-keyed file which exists on non-root
+	cgroups.  The following nested keys are defined.
+
+	  max
+		The number of times a process in this cgroup or its
+		descendants attempted an RDMA resource allocation that
+		was rejected because a rdma.max limit in the subtree
+		was reached.  This is a hierarchical counter: the event
+		is propagated upward to all ancestor cgroups.  A value
+		change in this file generates a file modified event.
+
+	  alloc_fail
+		The number of RDMA resource allocation attempts that
+		originated in this cgroup or its descendants and failed
+		due to a rdma.max limit being reached.  This is a
+		hierarchical counter propagated upward.
+
+	An example for mlx4 device follows::
+
+	  mlx4_0 hca_handle.max=5 hca_handle.alloc_fail=3 hca_object.max=0 hca_object.alloc_fail=0
+
+  rdma.events.local
+	Similar to rdma.events but the fields in the file are local
+	to the cgroup i.e. not hierarchical.  The file modified event
+	generated on this file reflects only the local events.
+
+	The following nested keys are defined.
+
+	  max
+		The number of times a process in this cgroup or its
+		descendants attempted an RDMA resource allocation that
+		was rejected because this cgroup's own rdma.max limit
+		was reached.
+	  alloc_fail
+		The number of RDMA resource allocation attempts
+		originating from this cgroup that failed due to this
+		cgroup's or an ancestor's rdma.max limit.
+
+	An example for mlx4 device follows::
+
+	  mlx4_0 hca_handle.max=5 hca_handle.alloc_fail=0 hca_object.max=0 hca_object.alloc_fail=0
+
 DMEM
 ----
 
@@ -2807,6 +2888,12 @@ DMEM Interface Files
 
 	The semantics are the same as for the memory cgroup controller, and are
 	calculated in the same way.
+
+  dmem.peak
+	A read-only nested-keyed file that exists on non-root cgroups.
+
+	The max device memory usage recorded for the cgroup and its
+	descendants since the creation of the cgroup for each region.
 
   dmem.capacity
 	A read-only file that describes maximum region capacity.

@@ -17,9 +17,9 @@
 
 static const struct nla_policy nft_xfrm_policy[NFTA_XFRM_MAX + 1] = {
 	[NFTA_XFRM_KEY]		= NLA_POLICY_MAX(NLA_BE32, 255),
-	[NFTA_XFRM_DIR]		= { .type = NLA_U8 },
-	[NFTA_XFRM_SPNUM]	= NLA_POLICY_MAX(NLA_BE32, 255),
-	[NFTA_XFRM_DREG]	= { .type = NLA_U32 },
+	[NFTA_XFRM_DIR]		= NLA_POLICY_MAX(NLA_U8, XFRM_POLICY_OUT),
+	[NFTA_XFRM_SPNUM]	= NLA_POLICY_MAX(NLA_BE32, XFRM_MAX_DEPTH - 1),
+	[NFTA_XFRM_DREG]	= NLA_POLICY_MAX(NLA_BE32, NFT_REG32_MAX),
 };
 
 struct nft_xfrm {
@@ -132,7 +132,7 @@ static void nft_xfrm_state_get_key(const struct nft_xfrm *priv,
 	switch (priv->key) {
 	case NFT_XFRM_KEY_UNSPEC:
 	case __NFT_XFRM_KEY_MAX:
-		WARN_ON_ONCE(1);
+		DEBUG_NET_WARN_ON_ONCE(1);
 		break;
 	case NFT_XFRM_KEY_DADDR_IP4:
 		*dest = (__force __u32)state->id.daddr.a4;
@@ -206,7 +206,7 @@ static void nft_xfrm_get_eval(const struct nft_expr *expr,
 		nft_xfrm_get_eval_out(priv, regs, pkt);
 		break;
 	default:
-		WARN_ON_ONCE(1);
+		DEBUG_NET_WARN_ON_ONCE(1);
 		regs->verdict.code = NFT_BREAK;
 		break;
 	}
@@ -252,7 +252,7 @@ static int nft_xfrm_validate(const struct nft_ctx *ctx, const struct nft_expr *e
 			(1 << NF_INET_POST_ROUTING);
 		break;
 	default:
-		WARN_ON_ONCE(1);
+		DEBUG_NET_WARN_ON_ONCE(1);
 		return -EINVAL;
 	}
 

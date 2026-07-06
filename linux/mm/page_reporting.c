@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/mm.h>
 #include <linux/mmzone.h>
-#include <linux/mmzone_lock.h>
 #include <linux/page_reporting.h>
 #include <linux/gfp.h>
 #include <linux/export.h>
@@ -162,7 +161,7 @@ page_reporting_cycle(struct page_reporting_dev_info *prdev, struct zone *zone,
 	if (list_empty(list))
 		return err;
 
-	zone_lock_irq(zone);
+	spin_lock_irq(&zone->lock);
 
 	/*
 	 * Limit how many calls we will be making to the page reporting
@@ -220,7 +219,7 @@ page_reporting_cycle(struct page_reporting_dev_info *prdev, struct zone *zone,
 			list_rotate_to_front(&page->lru, list);
 
 		/* release lock before waiting on report processing */
-		zone_unlock_irq(zone);
+		spin_unlock_irq(&zone->lock);
 
 		/* begin processing pages in local list */
 		err = prdev->report(prdev, sgl, PAGE_REPORTING_CAPACITY);
@@ -232,7 +231,7 @@ page_reporting_cycle(struct page_reporting_dev_info *prdev, struct zone *zone,
 		budget--;
 
 		/* reacquire zone lock and resume processing */
-		zone_lock_irq(zone);
+		spin_lock_irq(&zone->lock);
 
 		/* flush reported pages from the sg list */
 		page_reporting_drain(prdev, sgl, PAGE_REPORTING_CAPACITY, !err);
@@ -252,7 +251,7 @@ page_reporting_cycle(struct page_reporting_dev_info *prdev, struct zone *zone,
 	if (!list_entry_is_head(next, list, lru) && !list_is_first(&next->lru, list))
 		list_rotate_to_front(&next->lru, list);
 
-	zone_unlock_irq(zone);
+	spin_unlock_irq(&zone->lock);
 
 	return err;
 }
@@ -297,9 +296,9 @@ page_reporting_process_zone(struct page_reporting_dev_info *prdev,
 		err = prdev->report(prdev, sgl, leftover);
 
 		/* flush any remaining pages out from the last report */
-		zone_lock_irq(zone);
+		spin_lock_irq(&zone->lock);
 		page_reporting_drain(prdev, sgl, leftover, !err);
-		zone_unlock_irq(zone);
+		spin_unlock_irq(&zone->lock);
 	}
 
 	return err;

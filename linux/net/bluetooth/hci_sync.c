@@ -25,11 +25,11 @@ static void hci_cmd_sync_complete(struct hci_dev *hdev, u8 result, u16 opcode,
 {
 	bt_dev_dbg(hdev, "result 0x%2.2x", result);
 
-	if (hdev->req_status != HCI_REQ_PEND)
+	if (READ_ONCE(hdev->req_status) != HCI_REQ_PEND)
 		return;
 
 	hdev->req_result = result;
-	hdev->req_status = HCI_REQ_DONE;
+	WRITE_ONCE(hdev->req_status, HCI_REQ_DONE);
 
 	/* Free the request command so it is not used as response */
 	kfree_skb(hdev->req_skb);
@@ -167,20 +167,20 @@ struct sk_buff *__hci_cmd_sync_sk(struct hci_dev *hdev, u16 opcode, u32 plen,
 
 	hci_cmd_sync_add(&req, opcode, plen, param, event, sk);
 
-	hdev->req_status = HCI_REQ_PEND;
+	WRITE_ONCE(hdev->req_status, HCI_REQ_PEND);
 
 	err = hci_req_sync_run(&req);
 	if (err < 0)
 		return ERR_PTR(err);
 
 	err = wait_event_interruptible_timeout(hdev->req_wait_q,
-					       hdev->req_status != HCI_REQ_PEND,
+					       READ_ONCE(hdev->req_status) != HCI_REQ_PEND,
 					       timeout);
 
 	if (err == -ERESTARTSYS)
 		return ERR_PTR(-EINTR);
 
-	switch (hdev->req_status) {
+	switch (READ_ONCE(hdev->req_status)) {
 	case HCI_REQ_DONE:
 		err = -bt_to_errno(hdev->req_result);
 		break;
@@ -194,7 +194,7 @@ struct sk_buff *__hci_cmd_sync_sk(struct hci_dev *hdev, u16 opcode, u32 plen,
 		break;
 	}
 
-	hdev->req_status = 0;
+	WRITE_ONCE(hdev->req_status, 0);
 	hdev->req_result = 0;
 	skb = hdev->req_rsp;
 	hdev->req_rsp = NULL;
@@ -665,9 +665,9 @@ void hci_cmd_sync_cancel(struct hci_dev *hdev, int err)
 {
 	bt_dev_dbg(hdev, "err 0x%2.2x", err);
 
-	if (hdev->req_status == HCI_REQ_PEND) {
+	if (READ_ONCE(hdev->req_status) == HCI_REQ_PEND) {
 		hdev->req_result = err;
-		hdev->req_status = HCI_REQ_CANCELED;
+		WRITE_ONCE(hdev->req_status, HCI_REQ_CANCELED);
 
 		queue_work(hdev->workqueue, &hdev->cmd_sync_cancel_work);
 	}
@@ -683,12 +683,12 @@ void hci_cmd_sync_cancel_sync(struct hci_dev *hdev, int err)
 {
 	bt_dev_dbg(hdev, "err 0x%2.2x", err);
 
-	if (hdev->req_status == HCI_REQ_PEND) {
+	if (READ_ONCE(hdev->req_status) == HCI_REQ_PEND) {
 		/* req_result is __u32 so error must be positive to be properly
 		 * propagated.
 		 */
 		hdev->req_result = err < 0 ? -err : err;
-		hdev->req_status = HCI_REQ_CANCELED;
+		WRITE_ONCE(hdev->req_status, HCI_REQ_CANCELED);
 
 		wake_up_interruptible(&hdev->req_wait_q);
 	}
@@ -780,7 +780,7 @@ int hci_cmd_sync_queue_once(struct hci_dev *hdev, hci_cmd_sync_work_func_t func,
 			    void *data, hci_cmd_sync_work_destroy_t destroy)
 {
 	if (hci_cmd_sync_lookup_entry(hdev, func, data, destroy))
-		return 0;
+		return -EEXIST;
 
 	return hci_cmd_sync_queue(hdev, func, data, destroy);
 }
@@ -801,8 +801,15 @@ int hci_cmd_sync_run(struct hci_dev *hdev, hci_cmd_sync_work_func_t func,
 		return -ENETDOWN;
 
 	/* If on cmd_sync_work then run immediately otherwise queue */
-	if (current_work() == &hdev->cmd_sync_work)
-		return func(hdev, data);
+	if (current_work() == &hdev->cmd_sync_work) {
+		int err;
+
+		err = func(hdev, data);
+		if (destroy)
+			destroy(hdev, data, err);
+
+		return 0;
+	}
 
 	return hci_cmd_sync_submit(hdev, func, data, destroy);
 }
@@ -818,7 +825,7 @@ int hci_cmd_sync_run_once(struct hci_dev *hdev, hci_cmd_sync_work_func_t func,
 			  void *data, hci_cmd_sync_work_destroy_t destroy)
 {
 	if (hci_cmd_sync_lookup_entry(hdev, func, data, destroy))
-		return 0;
+		return -EEXIST;
 
 	return hci_cmd_sync_run(hdev, func, data, destroy);
 }
@@ -852,32 +859,6 @@ void hci_cmd_sync_cancel_entry(struct hci_dev *hdev,
 	mutex_unlock(&hdev->cmd_sync_work_lock);
 }
 EXPORT_SYMBOL(hci_cmd_sync_cancel_entry);
-
-/* Dequeue one HCI command entry:
- *
- * - Lookup and cancel first entry that matches.
- */
-bool hci_cmd_sync_dequeue_once(struct hci_dev *hdev,
-			       hci_cmd_sync_work_func_t func,
-			       void *data, hci_cmd_sync_work_destroy_t destroy)
-{
-	struct hci_cmd_sync_work_entry *entry;
-
-	mutex_lock(&hdev->cmd_sync_work_lock);
-
-	entry = _hci_cmd_sync_lookup_entry(hdev, func, data, destroy);
-	if (!entry) {
-		mutex_unlock(&hdev->cmd_sync_work_lock);
-		return false;
-	}
-
-	_hci_cmd_sync_cancel_entry(hdev, entry, -ECANCELED);
-
-	mutex_unlock(&hdev->cmd_sync_work_lock);
-
-	return true;
-}
-EXPORT_SYMBOL(hci_cmd_sync_dequeue_once);
 
 /* Dequeue HCI command entry:
  *
@@ -1718,6 +1699,11 @@ static int hci_adv_bcast_annoucement(struct hci_dev *hdev, struct adv_info *adv)
 	/* Generate Broadcast ID */
 	get_random_bytes(bid, sizeof(bid));
 	len = eir_append_service_data(ad, 0, 0x1852, bid, sizeof(bid));
+	if (adv->adv_data_len > sizeof(ad) - len) {
+		bt_dev_err(hdev, "No room for Broadcast Announcement");
+		return -EINVAL;
+	}
+
 	memcpy(ad + len, adv->adv_data, adv->adv_data_len);
 	hci_set_adv_instance_data(hdev, adv->instance, len + adv->adv_data_len,
 				  ad, 0, NULL);
@@ -3255,6 +3241,8 @@ static int update_passive_scan_sync(struct hci_dev *hdev, void *data)
 
 int hci_update_passive_scan(struct hci_dev *hdev)
 {
+	int err;
+
 	/* Only queue if it would have any effect */
 	if (!test_bit(HCI_UP, &hdev->flags) ||
 	    test_bit(HCI_INIT, &hdev->flags) ||
@@ -3264,8 +3252,9 @@ int hci_update_passive_scan(struct hci_dev *hdev)
 	    hci_dev_test_flag(hdev, HCI_UNREGISTER))
 		return 0;
 
-	return hci_cmd_sync_queue_once(hdev, update_passive_scan_sync, NULL,
-				       NULL);
+	err = hci_cmd_sync_queue_once(hdev, update_passive_scan_sync, NULL,
+				      NULL);
+	return (err == -EEXIST) ? 0 : err;
 }
 
 int hci_write_sc_support_sync(struct hci_dev *hdev, u8 val)
@@ -3657,17 +3646,19 @@ static const struct hci_init_stage hci_init0[] = {
 
 int hci_reset_sync(struct hci_dev *hdev)
 {
-	int err;
-
 	set_bit(HCI_RESET, &hdev->flags);
 
-	err = __hci_cmd_sync_status(hdev, HCI_OP_RESET, 0, NULL,
-				    HCI_CMD_TIMEOUT);
-	if (err)
-		return err;
-
-	return 0;
+	return __hci_cmd_sync_status(hdev, HCI_OP_RESET, 0, NULL,
+				     HCI_CMD_TIMEOUT);
 }
+
+/* Send a raw HCI reset for use by vendor drivers */
+int __hci_reset_sync(struct hci_dev *hdev)
+{
+	return __hci_cmd_sync_status(hdev, HCI_OP_RESET, 0, NULL,
+				     HCI_INIT_TIMEOUT);
+}
+EXPORT_SYMBOL(__hci_reset_sync);
 
 static int hci_init0_sync(struct hci_dev *hdev)
 {
@@ -4428,6 +4419,9 @@ static int hci_le_set_event_mask_sync(struct hci_dev *hdev)
 		events[4] |= 0x02;	/* LE BIG Info Advertising Report */
 	}
 
+	if (ll_ext_feature_capable(hdev))
+		events[5] |= BIT(2);
+
 	if (le_cs_capable(hdev)) {
 		/* Channel Sounding events */
 		events[5] |= 0x08;	/* LE CS Read Remote Supported Cap Complete event */
@@ -4570,10 +4564,32 @@ static int hci_set_le_support_sync(struct hci_dev *hdev)
 				     sizeof(cp), &cp, HCI_CMD_TIMEOUT);
 }
 
+/* LE Set Host Feature V2 */
+static int hci_le_set_host_feature_v2_sync(struct hci_dev *hdev, u16 bit,
+					   u8 value)
+{
+	struct hci_cp_le_set_host_feature_v2 cp;
+
+	memset(&cp, 0, sizeof(cp));
+
+	/* Connected Isochronous Channels (Host Support) */
+	cp.bit_number = cpu_to_le16(bit);
+	cp.bit_value = value;
+
+	return __hci_cmd_sync_status(hdev, HCI_OP_LE_SET_HOST_FEATURE_V2,
+				     sizeof(cp), &cp, HCI_CMD_TIMEOUT);
+}
+
 /* LE Set Host Feature */
-static int hci_le_set_host_feature_sync(struct hci_dev *hdev, u8 bit, u8 value)
+static int hci_le_set_host_feature_sync(struct hci_dev *hdev, u16 bit, u8 value)
 {
 	struct hci_cp_le_set_host_feature cp;
+
+	if (ll_ext_feature_capable(hdev) && hdev->commands[47] & BIT(4))
+		return hci_le_set_host_feature_v2_sync(hdev, bit, value);
+
+	if (bit > 255)
+		return 0;
 
 	memset(&cp, 0, sizeof(cp));
 
@@ -5288,6 +5304,12 @@ int hci_dev_close_sync(struct hci_dev *hdev)
 
 	bt_dev_dbg(hdev, "");
 
+	/* Set HCI_DRAIN_WORKQUEUE flag to prevent queuing work during
+	 * reset/close. See hci_cmd_work() and handle_cmd_cnt_and_timer().
+	 */
+	hci_dev_set_flag(hdev, HCI_CMD_DRAIN_WORKQUEUE);
+	synchronize_rcu();
+
 	if (hci_dev_test_flag(hdev, HCI_UNREGISTER)) {
 		disable_delayed_work(&hdev->power_off);
 		disable_delayed_work(&hdev->ncmd_timer);
@@ -5311,6 +5333,7 @@ int hci_dev_close_sync(struct hci_dev *hdev)
 
 	if (!test_and_clear_bit(HCI_UP, &hdev->flags)) {
 		cancel_delayed_work_sync(&hdev->cmd_timer);
+		hci_dev_clear_flag(hdev, HCI_CMD_DRAIN_WORKQUEUE);
 		return err;
 	}
 
@@ -5373,6 +5396,10 @@ int hci_dev_close_sync(struct hci_dev *hdev)
 	/* Reset device */
 	skb_queue_purge(&hdev->cmd_q);
 	atomic_set(&hdev->cmd_cnt, 1);
+	hdev->acl_cnt = 0;
+	hdev->sco_cnt = 0;
+	hdev->le_cnt = 0;
+	hdev->iso_cnt = 0;
 	if (hci_test_quirk(hdev, HCI_QUIRK_RESET_ON_CLOSE) &&
 	    !auto_off && !hci_dev_test_flag(hdev, HCI_UNCONFIGURED)) {
 		set_bit(HCI_INIT, &hdev->flags);
@@ -5410,6 +5437,7 @@ int hci_dev_close_sync(struct hci_dev *hdev)
 	/* Clear flags */
 	hdev->flags &= BIT(HCI_RAW);
 	hci_dev_clear_volatile_flags(hdev);
+	hci_dev_clear_flag(hdev, HCI_CMD_DRAIN_WORKQUEUE);
 
 	memset(hdev->eir, 0, sizeof(hdev->eir));
 	memset(hdev->dev_class, 0, sizeof(hdev->dev_class));
@@ -6581,6 +6609,11 @@ static int hci_le_create_conn_sync(struct hci_dev *hdev, void *data)
 
 	bt_dev_dbg(hdev, "conn %p", conn);
 
+	/* Hold a reference so conn stays valid for the HCI_CONN_CREATE
+	 * clear_bit() at done.
+	 */
+	hci_conn_get(conn);
+
 	clear_bit(HCI_CONN_SCANNING, &conn->flags);
 	conn->state = BT_CONNECT;
 
@@ -6593,6 +6626,7 @@ static int hci_le_create_conn_sync(struct hci_dev *hdev, void *data)
 		    hdev->le_scan_type == LE_SCAN_ACTIVE &&
 		    !hci_dev_test_flag(hdev, HCI_LE_SIMULTANEOUS_ROLES)) {
 			hci_conn_del(conn);
+			hci_conn_put(conn);
 			return -EBUSY;
 		}
 
@@ -6638,6 +6672,12 @@ static int hci_le_create_conn_sync(struct hci_dev *hdev, void *data)
 					     &own_addr_type);
 	if (err)
 		goto done;
+
+	/* Mark create connection in flight so hci_cancel_connect_sync() can
+	 * cancel it while blocking on the connection complete event.
+	 */
+	set_bit(HCI_CONN_CREATE, &conn->flags);
+
 	/* Send command LE Extended Create Connection if supported */
 	if (use_ext_conn(hdev)) {
 		err = hci_le_ext_create_conn_sync(hdev, conn, own_addr_type);
@@ -6673,11 +6713,14 @@ static int hci_le_create_conn_sync(struct hci_dev *hdev, void *data)
 				       conn->conn_timeout, NULL);
 
 done:
+	clear_bit(HCI_CONN_CREATE, &conn->flags);
+
 	if (err == -ETIMEDOUT)
 		hci_le_connect_cancel_sync(hdev, conn, 0x00);
 
 	/* Re-enable advertising after the connection attempt is finished. */
 	hci_resume_advertising_sync(hdev);
+	hci_conn_put(conn);
 	return err;
 }
 
@@ -6686,6 +6729,7 @@ int hci_le_create_cis_sync(struct hci_dev *hdev)
 	DEFINE_FLEX(struct hci_cp_le_create_cis, cmd, cis, num_cis, 0x1f);
 	size_t aux_num_cis = 0;
 	struct hci_conn *conn;
+	u16 timeout = 0;
 	u8 cig = BT_ISO_QOS_CIG_UNSET;
 
 	/* The spec allows only one pending LE Create CIS command at a time. If
@@ -6756,6 +6800,7 @@ int hci_le_create_cis_sync(struct hci_dev *hdev)
 		set_bit(HCI_CONN_CREATE_CIS, &conn->flags);
 		cis->acl_handle = cpu_to_le16(conn->parent->handle);
 		cis->cis_handle = cpu_to_le16(conn->handle);
+		timeout = conn->conn_timeout;
 		aux_num_cis++;
 
 		if (aux_num_cis >= cmd->num_cis)
@@ -6775,7 +6820,7 @@ done:
 	return __hci_cmd_sync_status_sk(hdev, HCI_OP_LE_CREATE_CIS,
 					struct_size(cmd, cis, cmd->num_cis),
 					cmd, HCI_EVT_LE_CIS_ESTABLISHED,
-					conn->conn_timeout, NULL);
+					timeout, NULL);
 }
 
 int hci_le_remove_cig_sync(struct hci_dev *hdev, u8 handle)
@@ -6950,16 +6995,34 @@ static int hci_acl_create_conn_sync(struct hci_dev *hdev, void *data)
 	else
 		cp.role_switch = 0x00;
 
-	return __hci_cmd_sync_status_sk(hdev, HCI_OP_CREATE_CONN,
-					sizeof(cp), &cp,
-					HCI_EV_CONN_COMPLETE,
-					conn->conn_timeout, NULL);
+	/* Hold a reference so conn stays valid for the HCI_CONN_CREATE
+	 * clear_bit() below.
+	 */
+	hci_conn_get(conn);
+
+	/* Mark create connection in flight so hci_cancel_connect_sync() can
+	 * cancel it while blocking on the connection complete event.
+	 */
+	set_bit(HCI_CONN_CREATE, &conn->flags);
+
+	err = __hci_cmd_sync_status_sk(hdev, HCI_OP_CREATE_CONN,
+				       sizeof(cp), &cp,
+				       HCI_EV_CONN_COMPLETE,
+				       conn->conn_timeout, NULL);
+
+	clear_bit(HCI_CONN_CREATE, &conn->flags);
+	hci_conn_put(conn);
+
+	return err;
 }
 
 int hci_connect_acl_sync(struct hci_dev *hdev, struct hci_conn *conn)
 {
-	return hci_cmd_sync_queue_once(hdev, hci_acl_create_conn_sync, conn,
-				       NULL);
+	int err;
+
+	err = hci_cmd_sync_queue_once(hdev, hci_acl_create_conn_sync, conn,
+				      NULL);
+	return (err == -EEXIST) ? 0 : err;
 }
 
 static void create_le_conn_complete(struct hci_dev *hdev, void *data, int err)
@@ -6995,26 +7058,104 @@ done:
 
 int hci_connect_le_sync(struct hci_dev *hdev, struct hci_conn *conn)
 {
-	return hci_cmd_sync_queue_once(hdev, hci_le_create_conn_sync, conn,
-				       create_le_conn_complete);
+	int err;
+
+	err = hci_cmd_sync_queue_once(hdev, hci_le_create_conn_sync, conn,
+				      create_le_conn_complete);
+	return (err == -EEXIST) ? 0 : err;
+}
+
+static int hci_acl_cancel_create_conn_sync(struct hci_dev *hdev,
+					   struct hci_conn *conn)
+{
+	struct hci_cmd_sync_work_entry *entry;
+	int err = -EBUSY;
+
+	/* cmd_sync_work_lock makes the HCI_CONN_CREATE test and the cancel
+	 * atomic against the worker, which takes this lock to dequeue every
+	 * entry: while it is held no other command can become pending, so
+	 * hci_cmd_sync_cancel() cannot cancel an unrelated command.
+	 */
+	mutex_lock(&hdev->cmd_sync_work_lock);
+
+	/* In flight: this connection owns the pending request, cancel it. */
+	if (test_bit(HCI_CONN_CREATE, &conn->flags)) {
+		hci_cmd_sync_cancel(hdev, ECANCELED);
+		goto unlock;
+	}
+
+	/* Still queued: a successful dequeue means it never started, so there
+	 * is nothing to disconnect.
+	 */
+	entry = _hci_cmd_sync_lookup_entry(hdev, hci_acl_create_conn_sync, conn,
+					   NULL);
+	if (entry) {
+		_hci_cmd_sync_cancel_entry(hdev, entry, -ECANCELED);
+		err = 0;
+	}
+
+unlock:
+	mutex_unlock(&hdev->cmd_sync_work_lock);
+	return err;
+}
+
+static int hci_le_cancel_create_conn_sync(struct hci_dev *hdev,
+					  struct hci_conn *conn)
+{
+	struct hci_cmd_sync_work_entry *entry;
+	int err = -EBUSY;
+
+	/* cmd_sync_work_lock keeps the HCI_CONN_CREATE test and the cancel
+	 * atomic against the cmd_sync worker.
+	 */
+	mutex_lock(&hdev->cmd_sync_work_lock);
+
+	if (test_bit(HCI_CONN_CREATE, &conn->flags)) {
+		hci_cmd_sync_cancel(hdev, ECANCELED);
+		goto unlock;
+	}
+
+	entry = _hci_cmd_sync_lookup_entry(hdev, hci_le_create_conn_sync, conn,
+					   create_le_conn_complete);
+	if (entry) {
+		_hci_cmd_sync_cancel_entry(hdev, entry, -ECANCELED);
+		err = 0;
+	}
+
+unlock:
+	mutex_unlock(&hdev->cmd_sync_work_lock);
+	return err;
+}
+
+static int hci_cis_cancel_create_conn_sync(struct hci_dev *hdev,
+					   struct hci_conn *conn)
+{
+	/* LE Create CIS is shared by the whole CIG and cannot be dequeued
+	 * per-connection, so only an in-flight command can be cancelled.
+	 * cmd_sync_work_lock keeps the test and the cancel atomic against the
+	 * cmd_sync worker.
+	 */
+	mutex_lock(&hdev->cmd_sync_work_lock);
+
+	if (test_bit(HCI_CONN_CREATE_CIS, &conn->flags))
+		hci_cmd_sync_cancel(hdev, ECANCELED);
+
+	mutex_unlock(&hdev->cmd_sync_work_lock);
+	return -EBUSY;
 }
 
 int hci_cancel_connect_sync(struct hci_dev *hdev, struct hci_conn *conn)
 {
-	if (conn->state != BT_OPEN)
-		return -EINVAL;
-
 	switch (conn->type) {
 	case ACL_LINK:
-		return !hci_cmd_sync_dequeue_once(hdev,
-						  hci_acl_create_conn_sync,
-						  conn, NULL);
+		return hci_acl_cancel_create_conn_sync(hdev, conn);
 	case LE_LINK:
-		return !hci_cmd_sync_dequeue_once(hdev, hci_le_create_conn_sync,
-						  conn, create_le_conn_complete);
+		return hci_le_cancel_create_conn_sync(hdev, conn);
+	case CIS_LINK:
+		return hci_cis_cancel_create_conn_sync(hdev, conn);
+	default:
+		return -ENOENT;
 	}
-
-	return -ENOENT;
 }
 
 int hci_le_conn_update_sync(struct hci_dev *hdev, struct hci_conn *conn,
@@ -7203,8 +7344,11 @@ done:
 
 int hci_connect_pa_sync(struct hci_dev *hdev, struct hci_conn *conn)
 {
-	return hci_cmd_sync_queue_once(hdev, hci_le_pa_create_sync, conn,
-				       create_pa_complete);
+	int err;
+
+	err = hci_cmd_sync_queue_once(hdev, hci_le_pa_create_sync, conn,
+				      create_pa_complete);
+	return (err == -EEXIST) ? 0 : err;
 }
 
 static void create_big_complete(struct hci_dev *hdev, void *data, int err)
@@ -7222,7 +7366,8 @@ static void create_big_complete(struct hci_dev *hdev, void *data, int err)
 
 static int hci_le_big_create_sync(struct hci_dev *hdev, void *data)
 {
-	DEFINE_FLEX(struct hci_cp_le_big_create_sync, cp, bis, num_bis, 0x11);
+	DEFINE_FLEX(struct hci_cp_le_big_create_sync, cp, bis, num_bis,
+		    HCI_MAX_ISO_BIS);
 	struct hci_conn *conn = data;
 	struct bt_iso_qos *qos = &conn->iso_qos;
 	int err;
@@ -7266,8 +7411,11 @@ static int hci_le_big_create_sync(struct hci_dev *hdev, void *data)
 
 int hci_connect_big_sync(struct hci_dev *hdev, struct hci_conn *conn)
 {
-	return hci_cmd_sync_queue_once(hdev, hci_le_big_create_sync, conn,
-				       create_big_complete);
+	int err;
+
+	err = hci_cmd_sync_queue_once(hdev, hci_le_big_create_sync, conn,
+				      create_big_complete);
+	return (err == -EEXIST) ? 0 : err;
 }
 
 struct past_data {
@@ -7359,7 +7507,7 @@ int hci_past_sync(struct hci_conn *conn, struct hci_conn *le)
 	if (err)
 		kfree(data);
 
-	return err;
+	return (err == -EEXIST) ? 0 : err;
 }
 
 static void le_read_features_complete(struct hci_dev *hdev, void *data, int err)
@@ -7368,10 +7516,8 @@ static void le_read_features_complete(struct hci_dev *hdev, void *data, int err)
 
 	bt_dev_dbg(hdev, "err %d", err);
 
-	if (err == -ECANCELED)
-		return;
-
 	hci_conn_drop(conn);
+	hci_conn_put(conn);
 }
 
 static int hci_le_read_all_remote_features_sync(struct hci_dev *hdev,
@@ -7392,9 +7538,6 @@ static int hci_le_read_all_remote_features_sync(struct hci_dev *hdev,
 					sizeof(cp), &cp,
 					HCI_EVT_LE_ALL_REMOTE_FEATURES_COMPLETE,
 					HCI_CMD_TIMEOUT, NULL);
-
-	return __hci_cmd_sync_status(hdev, HCI_OP_LE_READ_ALL_REMOTE_FEATURES,
-				     sizeof(cp), &cp, HCI_CMD_TIMEOUT);
 }
 
 static int hci_le_read_remote_features_sync(struct hci_dev *hdev, void *data)
@@ -7438,15 +7581,20 @@ int hci_le_read_remote_features(struct hci_conn *conn)
 	 * role is possible. Otherwise just transition into the
 	 * connected state without requesting the remote features.
 	 */
-	if (conn->out || (hdev->le_features[0] & HCI_LE_PERIPHERAL_FEATURES))
+	if (conn->out || (hdev->le_features[0] & HCI_LE_PERIPHERAL_FEATURES)) {
 		err = hci_cmd_sync_queue_once(hdev,
 					      hci_le_read_remote_features_sync,
-					      hci_conn_hold(conn),
+					      hci_conn_hold(hci_conn_get(conn)),
 					      le_read_features_complete);
-	else
+		if (err) {
+			hci_conn_drop(conn);
+			hci_conn_put(conn);
+		}
+	} else {
 		err = -EOPNOTSUPP;
+	}
 
-	return err;
+	return (err == -EEXIST) ? 0 : err;
 }
 
 static void pkt_type_changed(struct hci_dev *hdev, void *data, int err)
@@ -7472,6 +7620,7 @@ int hci_acl_change_pkt_type(struct hci_conn *conn, u16 pkt_type)
 {
 	struct hci_dev *hdev = conn->hdev;
 	struct hci_cp_change_conn_ptype *cp;
+	int err;
 
 	cp = kmalloc_obj(*cp);
 	if (!cp)
@@ -7480,8 +7629,12 @@ int hci_acl_change_pkt_type(struct hci_conn *conn, u16 pkt_type)
 	cp->handle = cpu_to_le16(conn->handle);
 	cp->pkt_type = cpu_to_le16(pkt_type);
 
-	return hci_cmd_sync_queue_once(hdev, hci_change_conn_ptype_sync, cp,
-				       pkt_type_changed);
+	err = hci_cmd_sync_queue_once(hdev, hci_change_conn_ptype_sync, cp,
+				      pkt_type_changed);
+	if (err)
+		kfree(cp);
+
+	return (err == -EEXIST) ? 0 : err;
 }
 
 static void le_phy_update_complete(struct hci_dev *hdev, void *data, int err)
@@ -7507,6 +7660,7 @@ int hci_le_set_phy(struct hci_conn *conn, u8 tx_phys, u8 rx_phys)
 {
 	struct hci_dev *hdev = conn->hdev;
 	struct hci_cp_le_set_phy *cp;
+	int err;
 
 	cp = kmalloc_obj(*cp);
 	if (!cp)
@@ -7517,6 +7671,10 @@ int hci_le_set_phy(struct hci_conn *conn, u8 tx_phys, u8 rx_phys)
 	cp->tx_phys = tx_phys;
 	cp->rx_phys = rx_phys;
 
-	return hci_cmd_sync_queue_once(hdev, hci_le_set_phy_sync, cp,
-				       le_phy_update_complete);
+	err = hci_cmd_sync_queue_once(hdev, hci_le_set_phy_sync, cp,
+				      le_phy_update_complete);
+	if (err)
+		kfree(cp);
+
+	return (err == -EEXIST) ? 0 : err;
 }

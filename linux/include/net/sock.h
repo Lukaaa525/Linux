@@ -1850,12 +1850,22 @@ static inline struct sock *sk_clone_lock(const struct sock *sk, const gfp_t prio
 
 struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force,
 			     gfp_t priority);
-void __sock_wfree(struct sk_buff *skb);
 void sock_wfree(struct sk_buff *skb);
+void __sock_wfree(struct sk_buff *skb);
+void tcp_wfree(struct sk_buff *skb);
+
+static inline bool is_skb_wmem(const struct sk_buff *skb)
+{
+	return skb->destructor == sock_wfree ||
+	       (IS_ENABLED(CONFIG_INET) && skb->destructor == __sock_wfree) ||
+	       (IS_ENABLED(CONFIG_INET) && skb->destructor == tcp_wfree);
+}
+
 struct sk_buff *sock_omalloc(struct sock *sk, unsigned long size,
 			     gfp_t priority);
 void skb_orphan_partial(struct sk_buff *skb);
 void sock_rfree(struct sk_buff *skb);
+void sock_rmem_free(struct sk_buff *skb);
 void sock_efree(struct sk_buff *skb);
 #ifdef CONFIG_INET
 void sock_edemux(struct sk_buff *skb);
@@ -2256,6 +2266,20 @@ sk_dst_reset(struct sock *sk)
 	sk_dst_set(sk, NULL);
 }
 
+/* Re-roll the socket txhash.  On a rehash, IPv6 also drops the cached route
+ * so the next transmit re-selects an ECMP path; IPv4 keeps its route, since
+ * IPv4 ECMP path selection does not use sk_txhash.
+ */
+static inline bool __sk_rethink_txhash_reset_dst(struct sock *sk)
+{
+	if (sk_rethink_txhash(sk)) {
+		if (sk->sk_family == AF_INET6)
+			__sk_dst_reset(sk);
+		return true;
+	}
+	return false;
+}
+
 struct dst_entry *__sk_dst_check(struct sock *sk, u32 cookie);
 
 struct dst_entry *sk_dst_check(struct sock *sk, u32 cookie);
@@ -2506,12 +2530,23 @@ int __sk_queue_drop_skb(struct sock *sk, struct sk_buff_head *sk_queue,
 					   struct sk_buff *skb));
 int __sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb);
 
-int sock_queue_rcv_skb_reason(struct sock *sk, struct sk_buff *skb,
-			      enum skb_drop_reason *reason);
+enum skb_drop_reason
+sock_queue_rcv_skb_reason(struct sock *sk, struct sk_buff *skb);
 
 static inline int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
-	return sock_queue_rcv_skb_reason(sk, skb, NULL);
+	enum skb_drop_reason drop_reason = sock_queue_rcv_skb_reason(sk, skb);
+
+	switch (drop_reason) {
+	case SKB_DROP_REASON_SOCKET_RCVBUFF:
+		return -ENOMEM;
+	case SKB_DROP_REASON_PROTO_MEM:
+		return -ENOBUFS;
+	case 0:
+		return 0;
+	default:
+		return -EPERM;
+	}
 }
 
 int sock_queue_err_skb(struct sock *sk, struct sk_buff *skb);

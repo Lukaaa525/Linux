@@ -265,8 +265,9 @@ struct stmmac_priv {
 	u32 rx_coal_frames[MTL_MAX_RX_QUEUES];
 
 	int hwts_tx_en;
+	/* skb_shinfo(skb)->gso_type types that we handle */
+	unsigned int gso_enabled_types;
 	bool tx_path_in_lpi_mode;
-	bool tso;
 	bool sph_active;
 	bool sph_capable;
 	u32 sarc_type;
@@ -323,7 +324,10 @@ struct stmmac_priv {
 	bool extend_desc;
 	/* chain_mode: requested descriptor mode */
 	bool chain_mode;
-	unsigned int mode;
+	/* descriptor_mode: actual descriptor mode,
+	 * see STMMAC_CHAIN_MODE or STMMAC_RING_MODE
+	 */
+	u8 descriptor_mode;
 	struct kernel_hwtstamp_config tstamp_config;
 	struct ptp_clock *ptp_clock;
 	struct ptp_clock_info ptp_clock_ops;

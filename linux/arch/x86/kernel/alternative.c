@@ -1775,8 +1775,8 @@ static int cfi_rewrite_callers(s32 *start, s32 *end)
 #define FINEIBT_WARN(_f, _v) \
 	WARN_ONCE((_f) != (_v), "FineIBT: " #_f " %ld != %d\n", _f, _v)
 
-static void __apply_fineibt(s32 *start_retpoline, s32 *end_retpoline,
-			    s32 *start_cfi, s32 *end_cfi, bool builtin)
+static void __init_or_module __apply_fineibt(s32 *start_retpoline, s32 *end_retpoline,
+					     s32 *start_cfi, s32 *end_cfi, bool builtin)
 {
 	int ret;
 
@@ -2088,8 +2088,8 @@ bool decode_fineibt_insn(struct pt_regs *regs, unsigned long *target, u32 *type)
 
 #else /* !CONFIG_FINEIBT: */
 
-static void __apply_fineibt(s32 *start_retpoline, s32 *end_retpoline,
-			    s32 *start_cfi, s32 *end_cfi, bool builtin)
+static void __init_or_module __apply_fineibt(s32 *start_retpoline, s32 *end_retpoline,
+					     s32 *start_cfi, s32 *end_cfi, bool builtin)
 {
 	if (IS_ENABLED(CONFIG_CFI) && builtin)
 		pr_info("CFI: Using standard kCFI\n");
@@ -2101,8 +2101,8 @@ static void poison_cfi(void *addr) { }
 
 #endif /* !CONFIG_FINEIBT */
 
-void apply_fineibt(s32 *start_retpoline, s32 *end_retpoline,
-		   s32 *start_cfi, s32 *end_cfi)
+void __init_or_module apply_fineibt(s32 *start_retpoline, s32 *end_retpoline,
+				    s32 *start_cfi, s32 *end_cfi)
 {
 	return __apply_fineibt(start_retpoline, end_retpoline,
 			       start_cfi, end_cfi,
@@ -2448,12 +2448,6 @@ void __init alternative_instructions(void)
 					    __smp_locks, __smp_locks_end,
 					    _text, _etext);
 	}
-
-	if (!uniproc_patched || num_possible_cpus() == 1) {
-		free_init_pages("SMP alternatives",
-				(unsigned long)__smp_locks,
-				(unsigned long)__smp_locks_end);
-	}
 #endif
 
 	restart_nmi();
@@ -2461,6 +2455,24 @@ void __init alternative_instructions(void)
 
 	alt_reloc_selftest();
 }
+
+#ifdef CONFIG_SMP
+/*
+ * With CONFIG_DEFERRED_STRUCT_PAGE_INIT enabled we can free_init_pages() only
+ * after the deferred initialization of the memory map is complete.
+ */
+static int __init free_smp_locks(void)
+{
+	if (!uniproc_patched || num_possible_cpus() == 1) {
+		free_init_pages("SMP alternatives",
+				(unsigned long)__smp_locks,
+				(unsigned long)__smp_locks_end);
+	}
+
+	return 0;
+}
+arch_initcall(free_smp_locks);
+#endif
 
 /**
  * text_poke_early - Update instructions on a live kernel at boot time

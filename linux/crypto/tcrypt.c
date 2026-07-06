@@ -1563,10 +1563,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		ret = min(ret, tcrypt_test("ecb(arc4)"));
 		break;
 
-	case 17:
-		ret = min(ret, tcrypt_test("michael_mic"));
-		break;
-
 	case 18:
 		ret = min(ret, tcrypt_test("crc32c"));
 		break;
@@ -1602,10 +1598,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 
 	case 30:
 		ret = min(ret, tcrypt_test("ecb(xeta)"));
-		break;
-
-	case 31:
-		ret = min(ret, tcrypt_test("pcbc(fcrypt)"));
 		break;
 
 	case 32:
@@ -1654,10 +1646,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 
 	case 45:
 		ret = min(ret, tcrypt_test("rfc4309(ccm(aes))"));
-		break;
-
-	case 46:
-		ret = min(ret, tcrypt_test("ghash"));
 		break;
 
 	case 48:
@@ -2257,11 +2245,6 @@ static int do_test(const char *alg, u32 type, u32 mask, int m, u32 num_mb)
 		test_hash_speed("blake2b-512", sec, generic_hash_speed_template);
 		if (mode > 300 && mode < 400) break;
 		fallthrough;
-	case 318:
-		klen = 16;
-		test_hash_speed("ghash", sec, generic_hash_speed_template);
-		if (mode > 300 && mode < 400) break;
-		fallthrough;
 	case 319:
 		test_hash_speed("crc32c", sec, generic_hash_speed_template);
 		if (mode > 300 && mode < 400) break;
@@ -2828,7 +2811,7 @@ static int __init tcrypt_mod_init(void)
 		pr_debug("all tests passed\n");
 	}
 
-	/* We intentionaly return -EAGAIN to prevent keeping the module,
+	/* We intentionally return -EAGAIN to prevent keeping the module,
 	 * unless we're running in fips mode. It does all its work from
 	 * init() and doesn't offer any runtime functionality, but in
 	 * the fips case, checking for a successful load is helpful.

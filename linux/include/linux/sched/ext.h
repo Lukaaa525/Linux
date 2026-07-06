@@ -103,21 +103,25 @@ enum scx_ent_flags {
 	SCX_TASK_IMMED		= 1 << 5, /* task is on local DSQ with %SCX_ENQ_IMMED */
 
 	/*
-	 * Bits 8 and 9 are used to carry task state:
+	 * Bits 8 to 10 are used to carry task state:
 	 *
 	 * NONE		ops.init_task() not called yet
+	 * INIT_BEGIN	ops.init_task() in flight; see sched_ext_dead()
 	 * INIT		ops.init_task() succeeded, but task can be cancelled
 	 * READY	fully initialized, but not in sched_ext
 	 * ENABLED	fully initialized and in sched_ext
+	 * DEAD		terminal state set by sched_ext_dead()
 	 */
-	SCX_TASK_STATE_SHIFT	= 8,	  /* bits 8 and 9 are used to carry task state */
-	SCX_TASK_STATE_BITS	= 2,
+	SCX_TASK_STATE_SHIFT	= 8,
+	SCX_TASK_STATE_BITS	= 3,
 	SCX_TASK_STATE_MASK	= ((1 << SCX_TASK_STATE_BITS) - 1) << SCX_TASK_STATE_SHIFT,
 
 	SCX_TASK_NONE		= 0 << SCX_TASK_STATE_SHIFT,
-	SCX_TASK_INIT		= 1 << SCX_TASK_STATE_SHIFT,
-	SCX_TASK_READY		= 2 << SCX_TASK_STATE_SHIFT,
-	SCX_TASK_ENABLED	= 3 << SCX_TASK_STATE_SHIFT,
+	SCX_TASK_INIT_BEGIN	= 1 << SCX_TASK_STATE_SHIFT,
+	SCX_TASK_INIT		= 2 << SCX_TASK_STATE_SHIFT,
+	SCX_TASK_READY		= 3 << SCX_TASK_STATE_SHIFT,
+	SCX_TASK_ENABLED	= 4 << SCX_TASK_STATE_SHIFT,
+	SCX_TASK_DEAD		= 5 << SCX_TASK_STATE_SHIFT,
 
 	/*
 	 * Bits 12 and 13 are used to carry reenqueue reason. In addition to
@@ -145,33 +149,6 @@ enum scx_ent_flags {
 /* scx_entity.dsq_flags */
 enum scx_ent_dsq_flags {
 	SCX_TASK_DSQ_ON_PRIQ	= 1 << 0, /* task is queued on the priority queue of a dsq */
-};
-
-/*
- * Mask bits for scx_entity.kf_mask. Not all kfuncs can be called from
- * everywhere and the following bits track which kfunc sets are currently
- * allowed for %current. This simple per-task tracking works because SCX ops
- * nest in a limited way. BPF will likely implement a way to allow and disallow
- * kfuncs depending on the calling context which will replace this manual
- * mechanism. See scx_kf_allow().
- */
-enum scx_kf_mask {
-	SCX_KF_UNLOCKED		= 0,	  /* sleepable and not rq locked */
-	/* ENQUEUE and DISPATCH may be nested inside CPU_RELEASE */
-	SCX_KF_CPU_RELEASE	= 1 << 0, /* ops.cpu_release() */
-	/*
-	 * ops.dispatch() may release rq lock temporarily and thus ENQUEUE and
-	 * SELECT_CPU may be nested inside. ops.dequeue (in REST) may also be
-	 * nested inside DISPATCH.
-	 */
-	SCX_KF_DISPATCH		= 1 << 1, /* ops.dispatch() */
-	SCX_KF_ENQUEUE		= 1 << 2, /* ops.enqueue() and ops.select_cpu() */
-	SCX_KF_SELECT_CPU	= 1 << 3, /* ops.select_cpu() */
-	SCX_KF_REST		= 1 << 4, /* other rq-locked operations */
-
-	__SCX_KF_RQ_LOCKED	= SCX_KF_CPU_RELEASE | SCX_KF_DISPATCH |
-				  SCX_KF_ENQUEUE | SCX_KF_SELECT_CPU | SCX_KF_REST,
-	__SCX_KF_TERMINAL	= SCX_KF_ENQUEUE | SCX_KF_SELECT_CPU | SCX_KF_REST,
 };
 
 enum scx_dsq_lnode_flags {
@@ -221,7 +198,6 @@ struct sched_ext_entity {
 	s32			sticky_cpu;
 	s32			holding_cpu;
 	s32			selected_cpu;
-	u32			kf_mask;	/* see scx_kf_mask above */
 	struct task_struct	*kf_tasks[2];	/* see SCX_CALL_OP_TASK() */
 
 	struct list_head	runnable_node;	/* rq->scx.runnable_list */
@@ -230,6 +206,15 @@ struct sched_ext_entity {
 #ifdef CONFIG_SCHED_CORE
 	u64			core_sched_at;	/* see scx_prio_less() */
 #endif
+
+	/*
+	 * Unique non-zero task ID assigned at fork. Persists across exec and
+	 * is never reused. Lets BPF schedulers identify tasks without storing
+	 * kernel pointers - arena-backed schedulers being one example. See
+	 * scx_bpf_tid_to_task().
+	 */
+	u64			tid;
+	struct rhash_head	tid_hash_node;	/* see SCX_OPS_TID_TO_TASK */
 
 	/* BPF scheduler modifiable fields */
 
@@ -278,7 +263,7 @@ void sched_ext_dead(struct task_struct *p);
 void print_scx_info(const char *log_lvl, struct task_struct *p);
 void scx_softlockup(u32 dur_s);
 bool scx_hardlockup(int cpu);
-bool scx_rcu_cpu_stall(void);
+bool scx_rcu_cpu_stall(const struct cpumask *stalled_mask);
 
 #else	/* !CONFIG_SCHED_CLASS_EXT */
 
@@ -286,7 +271,7 @@ static inline void sched_ext_dead(struct task_struct *p) {}
 static inline void print_scx_info(const char *log_lvl, struct task_struct *p) {}
 static inline void scx_softlockup(u32 dur_s) {}
 static inline bool scx_hardlockup(int cpu) { return false; }
-static inline bool scx_rcu_cpu_stall(void) { return false; }
+static inline bool scx_rcu_cpu_stall(const struct cpumask *stalled_mask) { return false; }
 
 #endif	/* CONFIG_SCHED_CLASS_EXT */
 

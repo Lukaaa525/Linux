@@ -12,7 +12,6 @@
 #include <linux/hugetlb.h>
 #include <linux/mm.h>
 #include <linux/mmzone.h>
-#include <linux/mmzone_lock.h>
 #include <linux/swap.h>
 #include <linux/vmstat.h>
 
@@ -117,7 +116,8 @@ void si_meminfo_node(struct sysinfo *val, int nid)
  * Determine whether the node should be displayed or not, depending on whether
  * SHOW_MEM_FILTER_NODES was passed to show_free_areas().
  */
-static bool show_mem_node_skip(unsigned int flags, int nid, nodemask_t *nodemask)
+static bool show_mem_node_skip(unsigned int flags, int nid,
+			       const nodemask_t *nodemask)
 {
 	if (!(flags & SHOW_MEM_FILTER_NODES))
 		return false;
@@ -178,7 +178,8 @@ static bool node_has_managed_zones(pg_data_t *pgdat, int max_zone_idx)
  * SHOW_MEM_FILTER_NODES: suppress nodes that are not allowed by current's
  *   cpuset.
  */
-static void show_free_areas(unsigned int filter, nodemask_t *nodemask, int max_zone_idx)
+static void show_free_areas(unsigned int filter, const nodemask_t *nodemask,
+			    int max_zone_idx)
 {
 	unsigned long free_pcp = 0;
 	int cpu, nid;
@@ -255,6 +256,8 @@ static void show_free_areas(unsigned int filter, nodemask_t *nodemask, int max_z
 			" sec_pagetables:%lukB"
 			" all_unreclaimable? %s"
 			" Balloon:%lukB"
+			" gpu_active:%lukB"
+			" gpu_reclaim:%lukB"
 			"\n",
 			pgdat->node_id,
 			K(node_page_state(pgdat, NR_ACTIVE_ANON)),
@@ -280,7 +283,9 @@ static void show_free_areas(unsigned int filter, nodemask_t *nodemask, int max_z
 			K(node_page_state(pgdat, NR_PAGETABLE)),
 			K(node_page_state(pgdat, NR_SECONDARY_PAGETABLE)),
 			str_yes_no(kswapd_test_hopeless(pgdat)),
-			K(node_page_state(pgdat, NR_BALLOON_PAGES)));
+			K(node_page_state(pgdat, NR_BALLOON_PAGES)),
+			K(node_page_state(pgdat, NR_GPU_ACTIVE)),
+			K(node_page_state(pgdat, NR_GPU_RECLAIM)));
 	}
 
 	for_each_populated_zone(zone) {
@@ -364,7 +369,7 @@ static void show_free_areas(unsigned int filter, nodemask_t *nodemask, int max_z
 		show_node(zone);
 		printk(KERN_CONT "%s: ", zone->name);
 
-		zone_lock_irqsave(zone, flags);
+		spin_lock_irqsave(&zone->lock, flags);
 		for (order = 0; order < NR_PAGE_ORDERS; order++) {
 			struct free_area *area = &zone->free_area[order];
 			int type;
@@ -378,7 +383,7 @@ static void show_free_areas(unsigned int filter, nodemask_t *nodemask, int max_z
 					types[order] |= 1 << type;
 			}
 		}
-		zone_unlock_irqrestore(zone, flags);
+		spin_unlock_irqrestore(&zone->lock, flags);
 		for (order = 0; order < NR_PAGE_ORDERS; order++) {
 			printk(KERN_CONT "%lu*%lukB ",
 			       nr[order], K(1UL) << order);
@@ -399,7 +404,8 @@ static void show_free_areas(unsigned int filter, nodemask_t *nodemask, int max_z
 	show_swap_cache_info();
 }
 
-void __show_mem(unsigned int filter, nodemask_t *nodemask, int max_zone_idx)
+void __show_mem(unsigned int filter, const nodemask_t *nodemask,
+		int max_zone_idx)
 {
 	unsigned long total = 0, reserved = 0, highmem = 0;
 	struct zone *zone;

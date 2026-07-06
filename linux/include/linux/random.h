@@ -50,7 +50,6 @@ static inline unsigned long get_random_long(void)
 #endif
 }
 
-u32 __limit_random_u32_below(u32 ceil, u32 rand);
 u32 __get_random_u32_below(u32 ceil);
 
 /*

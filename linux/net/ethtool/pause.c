@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-#include "netlink.h"
 #include "common.h"
+#include "netlink.h"
 
 struct pause_req_info {
 	struct ethnl_req_info		base;
@@ -28,6 +28,7 @@ const struct nla_policy ethnl_pause_get_policy[] = {
 };
 
 static int pause_parse_request(struct ethnl_req_info *req_base,
+			       const struct genl_info *info,
 			       struct nlattr **tb,
 			       struct netlink_ext_ack *extack)
 {

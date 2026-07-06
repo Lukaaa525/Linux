@@ -55,8 +55,8 @@
 #include <rdma/ib_umem.h>
 #include <rdma/ib_addr.h>
 #include <linux/hashtable.h>
+#include <linux/bnxt/ulp.h>
 
-#include "bnxt_ulp.h"
 #include "roce_hsi.h"
 #include "qplib_res.h"
 #include "qplib_sp.h"
@@ -1093,8 +1093,6 @@ static int bnxt_re_fill_res_mr_entry(struct sk_buff *msg, struct ib_mr *ib_mr)
 		goto err;
 	if (rdma_nl_put_driver_u32(msg, "element_size", mr_hwq->element_size))
 		goto err;
-	if (rdma_nl_put_driver_u64_hex(msg, "hwq", (unsigned long)mr_hwq))
-		goto err;
 	if (rdma_nl_put_driver_u64_hex(msg, "va", mr->qplib_mr.va))
 		goto err;
 
@@ -1374,7 +1372,7 @@ static const struct ib_device_ops bnxt_re_dev_ops = {
 	.reg_user_mr = bnxt_re_reg_user_mr,
 	.reg_user_mr_dmabuf = bnxt_re_reg_user_mr_dmabuf,
 	.req_notify_cq = bnxt_re_req_notify_cq,
-	.resize_cq = bnxt_re_resize_cq,
+	.resize_user_cq = bnxt_re_resize_cq,
 	.create_flow = bnxt_re_create_flow,
 	.destroy_flow = bnxt_re_destroy_flow,
 	INIT_RDMA_OBJ_SIZE(ib_ah, bnxt_re_ah, ib_ah),

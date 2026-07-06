@@ -1174,6 +1174,22 @@ struct ieee80211_mgmt {
 					u8 control;
 					u8 variable[];
 				} __packed eml_omn;
+				struct {
+					u8 dialog_token;
+					u8 type;
+					u8 variable[];
+				} __packed uhr_link_reconf_req;
+				struct {
+					u8 dialog_token;
+					u8 type;
+					u8 count;
+					u8 variable[];
+				} __packed uhr_link_reconf_resp;
+				struct {
+					u8 dialog_token;
+					u8 type;
+					u8 variable[];
+				} __packed uhr_link_reconf_notif;
 			};
 		} __packed action;
 		DECLARE_FLEX_ARRAY(u8, body); /* Generic frame body */
@@ -1194,6 +1210,13 @@ struct ieee80211_mgmt {
 
 #define IEEE80211_MIN_ACTION_SIZE(type)	offsetofend(struct ieee80211_mgmt, u.action.type)
 
+/* Link Reconfiguration Status Duple field */
+struct ieee80211_ml_reconf_status {
+	u8 info;
+	__le16 status;
+} __packed;
+
+#define IEEE80211_ML_RECONF_LINK_ID_MASK	0xf
 
 /* Management MIC information element (IEEE 802.11w) for CMAC */
 struct ieee80211_mmie {
@@ -1830,6 +1853,7 @@ enum ieee80211_category {
 	WLAN_CATEGORY_VHT = 21,
 	WLAN_CATEGORY_S1G = 22,
 	WLAN_CATEGORY_PROTECTED_EHT = 37,
+	WLAN_CATEGORY_PROTECTED_UHR = 43,
 	WLAN_CATEGORY_VENDOR_SPECIFIC_PROTECTED = 126,
 	WLAN_CATEGORY_VENDOR_SPECIFIC = 127,
 };
@@ -1913,6 +1937,11 @@ enum ieee80211_radio_measurement_actioncode {
 
 #define PMK_MAX_LEN			64
 #define SAE_PASSWORD_MAX_LEN		128
+
+#define MICHAEL_MIC_LEN			8
+
+void michael_mic(const u8 *key, struct ieee80211_hdr *hdr,
+		 const u8 *data, size_t data_len, u8 *mic);
 
 /* Public action codes (IEEE Std 802.11-2016, 9.6.8.1, Table 9-307) */
 enum ieee80211_pub_actioncode {
@@ -2224,6 +2253,7 @@ struct ieee80211_multiple_bssid_configuration {
 #define WLAN_AKM_SUITE_WFA_DPP			SUITE(WLAN_OUI_WFA, 2)
 
 #define WLAN_MAX_KEY_LEN		32
+#define WLAN_MAX_SECURE_LTF_KEYSEED_LEN	48
 
 #define WLAN_PMK_NAME_LEN		16
 #define WLAN_PMKID_LEN			16
@@ -2233,6 +2263,7 @@ struct ieee80211_multiple_bssid_configuration {
 
 #define WLAN_OUI_WFA			0x506f9a
 #define WLAN_OUI_TYPE_WFA_P2P		9
+#define WLAN_OUI_TYPE_WFA_NAN		0x13
 #define WLAN_OUI_TYPE_WFA_DPP		0x1A
 #define WLAN_OUI_MICROSOFT		0x0050f2
 #define WLAN_OUI_TYPE_MICROSOFT_WPA	1

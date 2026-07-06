@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <linux/string.h>
+#include <linux/zalloc.h>
 #include <subcmd/run-command.h>
 
 #include "annotate.h"
@@ -451,7 +452,7 @@ int jump__scnprintf(const struct ins *ins, char *bf, size_t size,
 			 ops->target.offset);
 }
 
-static void jump__delete(struct ins_operands *ops __maybe_unused)
+void jump__delete(struct ins_operands *ops __maybe_unused)
 {
 	/*
 	 * The ops->jump.raw_comment and ops->jump.raw_func_start belong to the
@@ -1576,8 +1577,11 @@ int symbol__disassemble(struct symbol *sym, struct annotate_args *args)
 		if (dso__decompress_kmodule_path(dso, symfs_filename, tmp, sizeof(tmp)) < 0)
 			return -1;
 
-		decomp = true;
-		strcpy(symfs_filename, tmp);
+		/* empty pathname means file wasn't actually compressed */
+		if (tmp[0] != '\0') {
+			decomp = true;
+			strcpy(symfs_filename, tmp);
+		}
 	}
 
 	/*

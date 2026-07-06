@@ -4,7 +4,6 @@
  *
  * Copyright (C) 2018 Himanshu Jha <himanshujha199640@gmail.com>
  */
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
@@ -131,7 +130,7 @@ static int bme680_spi_probe(struct spi_device *spi)
 }
 
 static const struct spi_device_id bme680_spi_id[] = {
-	{"bme680", 0},
+	{ .name = "bme680" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, bme680_spi_id);

@@ -159,6 +159,30 @@ struct drm_gem_shmem_object *drm_gem_shmem_create(struct drm_device *dev, size_t
 EXPORT_SYMBOL_GPL(drm_gem_shmem_create);
 
 /**
+ * __drm_gem_shmem_release_sgt_locked - Unpin and DMA unmap pages, and release the
+ * cached scatter/gather table for an shmem GEM object.
+ * @shmem: shmem GEM object
+ *
+ * If the passed shmem object has an active scatter/gather table for driver
+ * usage, this function will unmap it and release the memory associated with it.
+ * It is the responsibility of the caller to ensure it holds the dma_resv_lock
+ * for this object.
+ *
+ * Drivers should not need to call this function themselves, it is mainly
+ * intended for usage in the Rust shmem bindings.
+ */
+void __drm_gem_shmem_free_sgt_locked(struct drm_gem_shmem_object *shmem)
+{
+	dma_resv_assert_held(shmem->base.resv);
+
+	dma_unmap_sgtable(shmem->base.dev->dev, shmem->sgt, DMA_BIDIRECTIONAL, 0);
+	sg_free_table(shmem->sgt);
+	kfree(shmem->sgt);
+	shmem->sgt = NULL;
+}
+EXPORT_SYMBOL_GPL(__drm_gem_shmem_free_sgt_locked);
+
+/**
  * drm_gem_shmem_release - Release resources associated with a shmem GEM object.
  * @shmem: shmem GEM object
  *
@@ -176,12 +200,8 @@ void drm_gem_shmem_release(struct drm_gem_shmem_object *shmem)
 
 		drm_WARN_ON(obj->dev, refcount_read(&shmem->vmap_use_count));
 
-		if (shmem->sgt) {
-			dma_unmap_sgtable(obj->dev->dev, shmem->sgt,
-					  DMA_BIDIRECTIONAL, 0);
-			sg_free_table(shmem->sgt);
-			kfree(shmem->sgt);
-		}
+		if (shmem->sgt)
+			__drm_gem_shmem_free_sgt_locked(shmem);
 		if (shmem->pages)
 			drm_gem_shmem_put_pages_locked(shmem);
 
@@ -453,10 +473,23 @@ void drm_gem_shmem_vunmap_locked(struct drm_gem_shmem_object *shmem,
 }
 EXPORT_SYMBOL_GPL(drm_gem_shmem_vunmap_locked);
 
-static int
-drm_gem_shmem_create_with_handle(struct drm_file *file_priv,
-				 struct drm_device *dev, size_t size,
-				 uint32_t *handle)
+/**
+ * drm_gem_shmem_create_with_handle - Allocate an object with the given size and
+ *	returns a GEM handle
+ * @file_priv: DRM file structure to create the dumb buffer for
+ * @dev: DRM device
+ * @size: Size of the object to allocate
+ * @handle: Returns the GEM handle on success
+ *
+ * Allocates an shmem GEM buffer using drm_gem_shmem_create() and returns
+ * a GEM handle to it.
+ *
+ * Returns:
+ * Zero on success, or an error code otherwise.
+ */
+int drm_gem_shmem_create_with_handle(struct drm_file *file_priv,
+				     struct drm_device *dev, size_t size,
+				     uint32_t *handle)
 {
 	struct drm_gem_shmem_object *shmem;
 	int ret;
@@ -475,6 +508,7 @@ drm_gem_shmem_create_with_handle(struct drm_file *file_priv,
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(drm_gem_shmem_create_with_handle);
 
 /* Update madvise status, returns true if not purged, else
  * false or -errno.
@@ -554,23 +588,57 @@ int drm_gem_shmem_dumb_create(struct drm_file *file, struct drm_device *dev,
 }
 EXPORT_SYMBOL_GPL(drm_gem_shmem_dumb_create);
 
-static vm_fault_t drm_gem_shmem_try_insert_pfn_pmd(struct vm_fault *vmf, unsigned long pfn)
+static void drm_gem_shmem_record_mkwrite(struct vm_fault *vmf)
 {
-#ifdef CONFIG_ARCH_SUPPORTS_PMD_PFNMAP
-	unsigned long paddr = pfn << PAGE_SHIFT;
-	bool aligned = (vmf->address & ~PMD_MASK) == (paddr & ~PMD_MASK);
+	struct vm_area_struct *vma = vmf->vma;
+	struct drm_gem_object *obj = vma->vm_private_data;
+	struct drm_gem_shmem_object *shmem = to_drm_gem_shmem_obj(obj);
+	loff_t num_pages = obj->size >> PAGE_SHIFT;
+	pgoff_t page_offset = vmf->pgoff - vma->vm_pgoff; /* page offset within VMA */
 
-	if (aligned && pmd_none(*vmf->pmd)) {
-		/* Read-only mapping; split upon write fault */
-		pfn &= PMD_MASK >> PAGE_SHIFT;
-		return vmf_insert_pfn_pmd(vmf, pfn, false);
-	}
-#endif
+	if (drm_WARN_ON(obj->dev, !shmem->pages || page_offset >= num_pages))
+		return;
 
-	return 0;
+	file_update_time(vma->vm_file);
+	folio_mark_dirty(page_folio(shmem->pages[page_offset]));
 }
 
-static vm_fault_t drm_gem_shmem_fault(struct vm_fault *vmf)
+static vm_fault_t try_insert_pfn(struct vm_fault *vmf, unsigned int order,
+				 unsigned long pfn)
+{
+	if (!order) {
+		return vmf_insert_pfn(vmf->vma, vmf->address, pfn);
+#ifdef CONFIG_ARCH_SUPPORTS_PMD_PFNMAP
+	} else if (order == PMD_ORDER) {
+		unsigned long paddr = pfn << PAGE_SHIFT;
+		bool aligned = (vmf->address & ~PMD_MASK) == (paddr & ~PMD_MASK);
+
+		if (aligned &&
+		    folio_test_pmd_mappable(page_folio(pfn_to_page(pfn)))) {
+			vm_fault_t ret;
+
+			pfn &= PMD_MASK >> PAGE_SHIFT;
+
+			/* Unlike PTEs which are automatically upgraded to
+			 * writeable entries, the PMD upgrades go through
+			 * .huge_fault(). Make sure we pass the "write" info
+			 * along in that case.
+			 * This also means we have to record the write fault
+			 * here, instead of in .pfn_mkwrite().
+			 */
+			ret = vmf_insert_pfn_pmd(vmf, pfn,
+						 vmf->flags & FAULT_FLAG_WRITE);
+			if (ret == VM_FAULT_NOPAGE && (vmf->flags & FAULT_FLAG_WRITE))
+				drm_gem_shmem_record_mkwrite(vmf);
+
+			return ret;
+		}
+#endif
+	}
+	return VM_FAULT_FALLBACK;
+}
+
+static vm_fault_t drm_gem_shmem_any_fault(struct vm_fault *vmf, unsigned int order)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct drm_gem_object *obj = vma->vm_private_data;
@@ -583,6 +651,9 @@ static vm_fault_t drm_gem_shmem_fault(struct vm_fault *vmf)
 	struct page *page;
 	struct folio *folio;
 	unsigned long pfn;
+
+	if (order && order != PMD_ORDER)
+		return VM_FAULT_FALLBACK;
 
 	dma_resv_lock(obj->resv, NULL);
 
@@ -597,11 +668,7 @@ static vm_fault_t drm_gem_shmem_fault(struct vm_fault *vmf)
 
 	pfn = page_to_pfn(page);
 
-	if (folio_test_pmd_mappable(folio))
-		ret = drm_gem_shmem_try_insert_pfn_pmd(vmf, pfn);
-	if (ret != VM_FAULT_NOPAGE)
-		ret = vmf_insert_pfn(vma, vmf->address, pfn);
-
+	ret = try_insert_pfn(vmf, order, pfn);
 	if (ret == VM_FAULT_NOPAGE)
 		folio_mark_accessed(folio);
 
@@ -609,6 +676,11 @@ out:
 	dma_resv_unlock(obj->resv);
 
 	return ret;
+}
+
+static vm_fault_t drm_gem_shmem_fault(struct vm_fault *vmf)
+{
+	return drm_gem_shmem_any_fault(vmf, 0);
 }
 
 static void drm_gem_shmem_vm_open(struct vm_area_struct *vma)
@@ -647,24 +719,15 @@ static void drm_gem_shmem_vm_close(struct vm_area_struct *vma)
 
 static vm_fault_t drm_gem_shmem_pfn_mkwrite(struct vm_fault *vmf)
 {
-	struct vm_area_struct *vma = vmf->vma;
-	struct drm_gem_object *obj = vma->vm_private_data;
-	struct drm_gem_shmem_object *shmem = to_drm_gem_shmem_obj(obj);
-	loff_t num_pages = obj->size >> PAGE_SHIFT;
-	pgoff_t page_offset = vmf->pgoff - vma->vm_pgoff; /* page offset within VMA */
-
-	if (drm_WARN_ON(obj->dev, !shmem->pages || page_offset >= num_pages))
-		return VM_FAULT_SIGBUS;
-
-	file_update_time(vma->vm_file);
-
-	folio_mark_dirty(page_folio(shmem->pages[page_offset]));
-
+	drm_gem_shmem_record_mkwrite(vmf);
 	return 0;
 }
 
 const struct vm_operations_struct drm_gem_shmem_vm_ops = {
 	.fault = drm_gem_shmem_fault,
+#ifdef CONFIG_ARCH_SUPPORTS_PMD_PFNMAP
+	.huge_fault = drm_gem_shmem_any_fault,
+#endif
 	.open = drm_gem_shmem_vm_open,
 	.close = drm_gem_shmem_vm_close,
 	.pfn_mkwrite = drm_gem_shmem_pfn_mkwrite,

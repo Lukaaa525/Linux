@@ -64,10 +64,19 @@ amdgpu_eviction_fence_suspend_worker(struct work_struct *work)
 		container_of(evf_mgr, struct amdgpu_fpriv, evf_mgr);
 	struct amdgpu_userq_mgr *uq_mgr = &fpriv->userq_mgr;
 	struct dma_fence *ev_fence;
+	bool cookie;
 
 	mutex_lock(&uq_mgr->userq_mutex);
+
+	/*
+	 * This is intentionally after taking the userq_mutex since we do
+	 * allocate memory while holding this lock, but only after ensuring that
+	 * the eviction fence is signaled.
+	 */
+	cookie = dma_fence_begin_signalling();
+
 	ev_fence = amdgpu_evf_mgr_get_fence(evf_mgr);
-	amdgpu_userq_evict(uq_mgr, !evf_mgr->shutdown);
+	amdgpu_userq_evict(uq_mgr);
 
 	/*
 	 * Signaling the eviction fence must be done while holding the
@@ -75,7 +84,12 @@ amdgpu_eviction_fence_suspend_worker(struct work_struct *work)
 	 * next fence.
 	 */
 	dma_fence_signal(ev_fence);
+	dma_fence_end_signalling(cookie);
 	dma_fence_put(ev_fence);
+
+	if (!evf_mgr->shutdown)
+		schedule_delayed_work(&uq_mgr->resume_work, 0);
+
 	mutex_unlock(&uq_mgr->userq_mutex);
 }
 
@@ -107,7 +121,6 @@ int amdgpu_evf_mgr_rearm(struct amdgpu_eviction_fence_mgr *evf_mgr,
 {
 	struct amdgpu_eviction_fence *ev_fence;
 	struct drm_gem_object *obj;
-	unsigned long index;
 
 	/* Create and initialize a new eviction fence */
 	ev_fence = kzalloc_obj(*ev_fence);
@@ -126,7 +139,7 @@ int amdgpu_evf_mgr_rearm(struct amdgpu_eviction_fence_mgr *evf_mgr,
 	evf_mgr->ev_fence = &ev_fence->base;
 
 	/* And add it to all existing BOs */
-	drm_exec_for_each_locked_object(exec, index, obj) {
+	drm_exec_for_each_locked_object(exec, obj) {
 		struct amdgpu_bo *bo = gem_to_amdgpu_bo(obj);
 
 		amdgpu_evf_mgr_attach_fence(evf_mgr, bo);

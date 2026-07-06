@@ -133,7 +133,11 @@ int fat_chain_add(struct inode *inode, int new_dclus, int nr_cluster)
 		ret = fat_ent_read(inode, &fatent, last);
 		if (ret >= 0) {
 			int wait = inode_needs_sync(inode);
+			int old = ret;
+
 			ret = fat_ent_write(inode, &fatent, new_dclus, wait);
+			if (ret < 0)
+				fat_ent_write(inode, &fatent, old, wait);
 			fatent_brelse(&fatent);
 		}
 		if (ret < 0)
@@ -297,6 +301,8 @@ struct timespec64 fat_truncate_atime(const struct msdos_sb_info *sbi,
 
 	return (struct timespec64){ seconds, 0 };
 }
+/* Export fat_truncate_atime() for the fat_test KUnit tests. */
+EXPORT_SYMBOL_GPL(fat_truncate_atime);
 
 /*
  * Update the in-inode atime and/or mtime after truncating the timestamp to the

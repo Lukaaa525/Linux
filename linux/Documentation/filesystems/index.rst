@@ -29,6 +29,7 @@ algorithms work.
    fiemap
    files
    locks
+   mmap_prepare
    multigrain-ts
    mount_api
    quota
@@ -42,6 +43,7 @@ algorithms work.
    caching/index
 
    porting
+   adding-new-filesystems
 
 Filesystem support layers
 =========================

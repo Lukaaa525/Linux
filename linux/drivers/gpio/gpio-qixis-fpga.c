@@ -9,7 +9,6 @@
 #include <linux/gpio/driver.h>
 #include <linux/gpio/regmap.h>
 #include <linux/kernel.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
@@ -60,8 +59,8 @@ static int qixis_cpld_gpio_probe(struct platform_device *pdev)
 			return PTR_ERR(reg);
 
 		regmap = devm_regmap_init_mmio(&pdev->dev, reg, &regmap_config_8r_8v);
-		if (!regmap)
-			return -ENODEV;
+		if (IS_ERR(regmap))
+			return PTR_ERR(regmap);
 
 		/* In this case, the offset of our register is 0 inside the
 		 * regmap area that we just created.

@@ -2,7 +2,7 @@
 #ifndef __LINUX_BITMAP_H
 #define __LINUX_BITMAP_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/align.h>
 #include <linux/bitops.h>
@@ -46,6 +46,7 @@ struct device;
  *  bitmap_and(dst, src1, src2, nbits)          *dst = *src1 & *src2
  *  bitmap_or(dst, src1, src2, nbits)           *dst = *src1 | *src2
  *  bitmap_weighted_or(dst, src1, src2, nbits)	*dst = *src1 | *src2. Returns Hamming Weight of dst
+ *  bitmap_weighted_xor(dst, src1, src2, nbits)	*dst = *src1 ^ *src2. Returns Hamming Weight of dst
  *  bitmap_xor(dst, src1, src2, nbits)          *dst = *src1 ^ *src2
  *  bitmap_andnot(dst, src1, src2, nbits)       *dst = *src1 & ~(*src2)
  *  bitmap_complement(dst, src, nbits)          *dst = ~(*src)
@@ -168,6 +169,8 @@ bool __bitmap_and(unsigned long *dst, const unsigned long *bitmap1,
 void __bitmap_or(unsigned long *dst, const unsigned long *bitmap1,
 		 const unsigned long *bitmap2, unsigned int nbits);
 unsigned int __bitmap_weighted_or(unsigned long *dst, const unsigned long *bitmap1,
+				  const unsigned long *bitmap2, unsigned int nbits);
+unsigned int __bitmap_weighted_xor(unsigned long *dst, const unsigned long *bitmap1,
 				  const unsigned long *bitmap2, unsigned int nbits);
 void __bitmap_xor(unsigned long *dst, const unsigned long *bitmap1,
 		  const unsigned long *bitmap2, unsigned int nbits);
@@ -354,6 +357,18 @@ unsigned int bitmap_weighted_or(unsigned long *dst, const unsigned long *src1,
 }
 
 static __always_inline
+unsigned int bitmap_weighted_xor(unsigned long *dst, const unsigned long *src1,
+				const unsigned long *src2, unsigned int nbits)
+{
+	if (small_const_nbits(nbits)) {
+		*dst = *src1 ^ *src2;
+		return hweight_long(*dst & BITMAP_LAST_WORD_MASK(nbits));
+	} else {
+		return __bitmap_weighted_xor(dst, src1, src2, nbits);
+	}
+}
+
+static __always_inline
 void bitmap_xor(unsigned long *dst, const unsigned long *src1,
 		const unsigned long *src2, unsigned int nbits)
 {
@@ -487,7 +502,7 @@ unsigned long bitmap_weight_andnot(const unsigned long *src1,
  * @end: the bitmap size in bits
  *
  * Returns the number of set bits in the region. If @start >= @end,
- * the result is undefined.
+ * return >= end.
  */
 static __always_inline
 unsigned long bitmap_weight_from(const unsigned long *bitmap,
@@ -879,6 +894,6 @@ void bitmap_write(unsigned long *map, unsigned long value,
 #define bitmap_set_value8(map, value, start)		\
 	bitmap_write(map, value, start, BITS_PER_BYTE)
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* __LINUX_BITMAP_H */

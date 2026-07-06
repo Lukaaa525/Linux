@@ -76,6 +76,7 @@
 #define MAX_LINK_ENCODERS (MAX_DIG_LINK_ENCODERS + MAX_DAC_LINK_ENCODERS)
 
 #define MAX_DWB_PIPES	1
+#define MAX_HDMI_FRL_ENCODERS	2
 #define MAX_HPO_DP2_ENCODERS	4
 #define MAX_HPO_DP2_LINK_ENCODERS	4
 
@@ -256,7 +257,7 @@ struct default_adjustment {
 	enum dc_color_space out_color_space;
 	enum dc_color_space in_color_space;
 	enum dc_color_depth color_depth;
-	enum pixel_format surface_pixel_format;
+	enum dc_pixel_format surface_pixel_format;
 	enum graphics_csc_adjust_type csc_adjust_type;
 	bool force_hw_default;
 };

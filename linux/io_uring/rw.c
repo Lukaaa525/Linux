@@ -230,7 +230,7 @@ static inline void io_meta_restore(struct io_async_rw *io, struct kiocb *kiocb)
 }
 
 static int io_prep_rw_pi(struct io_kiocb *req, struct io_rw *rw, int ddir,
-			 u64 attr_ptr, u64 attr_type_mask)
+			 u64 attr_ptr)
 {
 	struct io_uring_attr_pi pi_attr;
 	struct io_async_rw *io;
@@ -305,7 +305,7 @@ static int __io_prep_rw(struct io_kiocb *req, const struct io_uring_sqe *sqe,
 			return -EINVAL;
 
 		attr_ptr = READ_ONCE(sqe->attr_ptr);
-		return io_prep_rw_pi(req, rw, ddir, attr_ptr, attr_type_mask);
+		return io_prep_rw_pi(req, rw, ddir, attr_ptr);
 	}
 	return 0;
 }
@@ -580,7 +580,7 @@ void io_req_rw_complete(struct io_tw_req tw_req, io_tw_token_t tw)
 	io_req_io_end(req);
 
 	if (req->flags & (REQ_F_BUFFER_SELECTED|REQ_F_BUFFER_RING))
-		req->cqe.flags |= io_put_kbuf(req, req->cqe.res, NULL);
+		req->cqe.flags |= io_put_kbuf(req, max(req->cqe.res, 0), NULL);
 
 	io_req_rw_cleanup(req, 0);
 	io_req_task_complete(tw_req, tw);
@@ -601,15 +601,15 @@ static void io_complete_rw_iopoll(struct kiocb *kiocb, long res)
 {
 	struct io_rw *rw = container_of(kiocb, struct io_rw, kiocb);
 	struct io_kiocb *req = cmd_to_io_kiocb(rw);
+	int final_res = io_fixup_rw_res(req, res);
 
 	if (kiocb->ki_flags & IOCB_WRITE)
 		io_req_end_write(req);
-	if (unlikely(res != req->cqe.res)) {
-		if (res == -EAGAIN && io_rw_should_reissue(req))
-			req->flags |= REQ_F_REISSUE | REQ_F_BL_NO_RECYCLE;
-		else
-			req->cqe.res = res;
-	}
+
+	if (res == -EAGAIN && io_rw_should_reissue(req))
+		req->flags |= REQ_F_REISSUE | REQ_F_BL_NO_RECYCLE;
+	else if (unlikely(final_res != req->cqe.res))
+		req->cqe.res = final_res;
 
 	/* order with io_iopoll_complete() checking ->iopoll_completed */
 	smp_store_release(&req->iopoll_completed, 1);
@@ -962,13 +962,13 @@ static int __io_read(struct io_kiocb *req, struct io_br_sel *sel,
 	if (ret == -EAGAIN) {
 		/* If we can poll, just do that. */
 		if (io_file_can_poll(req))
-			return -EAGAIN;
+			return ret;
 		/* IOPOLL retry should happen for io-wq threads */
 		if (!force_nonblock && !(req->flags & REQ_F_IOPOLL))
-			goto done;
+			return ret;
 		/* no retry on NONBLOCK nor RWF_NOWAIT */
 		if (req->flags & REQ_F_NOWAIT)
-			goto done;
+			return ret;
 		ret = 0;
 	} else if (ret == -EIOCBQUEUED) {
 		return IOU_ISSUE_SKIP_COMPLETE;
@@ -976,7 +976,7 @@ static int __io_read(struct io_kiocb *req, struct io_br_sel *sel,
 		   (req->flags & REQ_F_NOWAIT) || !need_complete_io(req) ||
 		   (issue_flags & IO_URING_F_MULTISHOT)) {
 		/* read all, failed, already did sync or don't want to retry */
-		goto done;
+		return ret;
 	}
 
 	/*
@@ -1019,8 +1019,7 @@ static int __io_read(struct io_kiocb *req, struct io_br_sel *sel,
 		kiocb->ki_flags &= ~IOCB_WAITQ;
 		iov_iter_restore(&io->iter, &io->iter_state);
 	} while (ret > 0);
-done:
-	/* it's faster to check here than delegate to kfree */
+
 	return ret;
 }
 
@@ -1380,7 +1379,7 @@ int io_do_iopoll(struct io_ring_ctx *ctx, bool force_nonspin)
 		list_del(&req->iopoll_node);
 		wq_list_add_tail(&req->comp_list, &ctx->submit_state.compl_reqs);
 		nr_events++;
-		req->cqe.flags = io_put_kbuf(req, req->cqe.res, NULL);
+		req->cqe.flags = io_put_kbuf(req, max(req->cqe.res, 0), NULL);
 		if (!io_is_uring_cmd(req))
 			io_req_rw_cleanup(req, 0);
 	}

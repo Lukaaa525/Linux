@@ -724,6 +724,11 @@ properties:
           - const: hardkernel,odroid-m2
           - const: rockchip,rk3588s
 
+      - description: HINLINK H28K
+        items:
+          - const: hinlink,h28k
+          - const: rockchip,rk3528
+
       - description: HINLINK H66K / H68K
         items:
           - enum:
@@ -753,6 +758,11 @@ properties:
         items:
           - const: khadas,edge2
           - const: rockchip,rk3588s
+
+      - description: Khadas Edge-2L series boards
+        items:
+          - const: khadas,edge-2l
+          - const: rockchip,rk3576
 
       - description: Kobol Helios64
         items:
@@ -807,6 +817,12 @@ properties:
         items:
           - const: netxeon,r89
           - const: rockchip,rk3288
+
+      - description: Onion Omega4 Evaluation board
+        items:
+          - const: onion,omega4-evb
+          - const: onion,omega4
+          - const: rockchip,rv1103b
 
       - description: OPEN AI LAB EAIDK-610
         items:
@@ -1295,6 +1311,16 @@ properties:
           - const: turing,rk1
           - const: rockchip,rk3588
 
+      - description: Vicharak Axon
+        items:
+          - const: vicharak,axon
+          - const: rockchip,rk3588
+
+      - description: Vicharak Vaaman2
+        items:
+          - const: vicharak,vaaman2
+          - const: rockchip,rk3588
+
       - description: WolfVision PF5 mainboard
         items:
           - const: wolfvision,rk3568-pf5
@@ -1335,6 +1361,11 @@ properties:
           - const: xunlong,orangepi-cm5-base
           - const: xunlong,orangepi-cm5
           - const: rockchip,rk3588s
+
+      - description: Youyeetoo YY3588
+        items:
+          - const: youyeetoo,yy3588
+          - const: rockchip,rk3588
 
       - description: Zkmagic A95X Z2
         items:

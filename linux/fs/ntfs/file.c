@@ -22,6 +22,7 @@
 #include "ea.h"
 #include "iomap.h"
 #include "bitmap.h"
+#include "volume.h"
 
 #include <linux/filelock.h>
 
@@ -267,15 +268,6 @@ static int ntfs_setattr_size(struct inode *vi, struct iattr *attr)
 		return err;
 
 	inode_dio_wait(vi);
-	/* Serialize against page faults */
-	if (NInoNonResident(NTFS_I(vi)) && attr->ia_size < old_size) {
-		err = iomap_truncate_page(vi, attr->ia_size, NULL,
-				&ntfs_read_iomap_ops,
-				&ntfs_iomap_folio_ops, NULL);
-		if (err)
-			return err;
-	}
-
 	truncate_setsize(vi, attr->ia_size);
 	err = ntfs_truncate_vfs(vi, attr->ia_size, old_size);
 	if (err) {
@@ -534,10 +526,9 @@ static ssize_t ntfs_dio_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			ret = -EIO;
 			goto out;
 		}
-		if (!ret2)
-			invalidate_mapping_pages(iocb->ki_filp->f_mapping,
-						 offset >> PAGE_SHIFT,
-						 end >> PAGE_SHIFT);
+		invalidate_mapping_pages(iocb->ki_filp->f_mapping,
+					 offset >> PAGE_SHIFT,
+					 end >> PAGE_SHIFT);
 	}
 
 out:
@@ -654,7 +645,7 @@ static int ntfs_file_mmap_prepare(struct vm_area_desc *desc)
 	if (NInoCompressed(NTFS_I(inode)))
 		return -EOPNOTSUPP;
 
-	if (vma_desc_test(desc, VMA_WRITE_BIT)) {
+	if (vma_desc_test_all(desc, VMA_SHARED_BIT, VMA_MAYWRITE_BIT)) {
 		struct inode *inode = file_inode(file);
 		loff_t from, to;
 		int err;
@@ -685,10 +676,29 @@ static int ntfs_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 static const char *ntfs_get_link(struct dentry *dentry, struct inode *inode,
 		struct delayed_call *done)
 {
-	if (!NTFS_I(inode)->target)
+	struct ntfs_inode *ni = NTFS_I(inode);
+	char *target;
+	int err;
+
+	if (!dentry)
+		return ERR_PTR(-ECHILD);
+
+	if (!ni->target)
 		return ERR_PTR(-EINVAL);
 
-	return NTFS_I(inode)->target;
+	if (ni->reparse_tag == IO_REPARSE_TAG_MOUNT_POINT ||
+	    (ni->reparse_tag == IO_REPARSE_TAG_SYMLINK &&
+	     !(ni->reparse_flags & cpu_to_le32(SYMLINK_FLAG_RELATIVE)))) {
+		if (NVolNativeSymlinkRel(ni->vol)) {
+			err = ntfs_translate_symlink_path(dentry, ni->target, &target);
+			if (err < 0)
+				return ERR_PTR(err);
+			set_delayed_call(done, kfree_link, target);
+			return target;
+		}
+	}
+
+	return ni->target;
 }
 
 static ssize_t ntfs_file_splice_read(struct file *in, loff_t *ppos,
@@ -717,12 +727,21 @@ static int ntfs_ioctl_get_volume_label(struct file *filp, unsigned long arg)
 {
 	struct ntfs_volume *vol = NTFS_SB(file_inode(filp)->i_sb);
 	char __user *buf = (char __user *)arg;
+	char label[FSLABEL_MAX];
+	ssize_t len;
 
+	mutex_lock(&vol->volume_label_lock);
 	if (!vol->volume_label) {
-		if (copy_to_user(buf, "", 1))
-			return -EFAULT;
-	} else if (copy_to_user(buf, vol->volume_label,
-				MIN(FSLABEL_MAX, strlen(vol->volume_label) + 1)))
+		label[0] = '\0';
+		len = 0;
+	} else {
+		len = strscpy(label, vol->volume_label, sizeof(label));
+		if (len == -E2BIG)
+			len = FSLABEL_MAX - 1;
+	}
+	mutex_unlock(&vol->volume_label_lock);
+
+	if (copy_to_user(buf, label, len + 1))
 		return -EFAULT;
 	return 0;
 }
@@ -885,14 +904,19 @@ static int ntfs_punch_hole(struct ntfs_inode *ni, int mode, loff_t offset,
 	end_vcn = ntfs_bytes_to_cluster(vol, end_offset - 1) + 1;
 
 	if (offset & vol->cluster_size_mask) {
-		loff_t to;
+		if (offset < ni->initialized_size) {
+			loff_t to;
 
-		to = min_t(loff_t, ntfs_cluster_to_bytes(vol, start_vcn + 1),
-				end_offset);
-		err = iomap_zero_range(vi, offset, to - offset, NULL,
-				&ntfs_seek_iomap_ops,
-				&ntfs_iomap_folio_ops, NULL);
-		if (err < 0 || (end_vcn - start_vcn) == 1)
+			to = min_t(loff_t,
+				   ntfs_cluster_to_bytes(vol, start_vcn + 1),
+				   end_offset);
+			err = iomap_zero_range(vi, offset, to - offset,
+					       NULL, &ntfs_seek_iomap_ops,
+					       &ntfs_iomap_folio_ops, NULL);
+			if (err < 0)
+				goto out;
+		}
+		if (end_vcn - start_vcn == 1)
 			goto out;
 		start_vcn++;
 	}
@@ -901,10 +925,14 @@ static int ntfs_punch_hole(struct ntfs_inode *ni, int mode, loff_t offset,
 		loff_t from;
 
 		from = ntfs_cluster_to_bytes(vol, end_vcn - 1);
-		err = iomap_zero_range(vi, from, end_offset - from, NULL,
-				&ntfs_seek_iomap_ops,
-				&ntfs_iomap_folio_ops, NULL);
-		if (err < 0 || (end_vcn - start_vcn) == 1)
+		if (from < ni->initialized_size) {
+			err = iomap_zero_range(vi, from, end_offset - from,
+					       NULL, &ntfs_seek_iomap_ops,
+					       &ntfs_iomap_folio_ops, NULL);
+			if (err < 0)
+				goto out;
+		}
+		if (end_vcn - start_vcn == 1)
 			goto out;
 		end_vcn--;
 	}

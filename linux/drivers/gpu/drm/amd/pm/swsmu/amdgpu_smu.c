@@ -47,6 +47,7 @@
 #include "smu_v14_0_0_ppt.h"
 #include "smu_v14_0_2_ppt.h"
 #include "smu_v15_0_0_ppt.h"
+#include "smu_v15_0_8_ppt.h"
 #include "amd_pcie.h"
 
 /*
@@ -590,17 +591,13 @@ static int smu_get_power_num_states(void *handle,
 	return 0;
 }
 
-bool is_support_sw_smu(struct amdgpu_device *adev)
+void amdgpu_smu_early_init(struct amdgpu_device *adev)
 {
 	/* vega20 is 11.0.2, but it's supported via the powerplay code */
-	if (adev->asic_type == CHIP_VEGA20)
-		return false;
-
-	if ((amdgpu_ip_version(adev, MP1_HWIP, 0) >= IP_VERSION(11, 0, 0)) &&
-	    amdgpu_device_ip_is_valid(adev, AMD_IP_BLOCK_TYPE_SMC))
-		return true;
-
-	return false;
+	adev->is_sw_smu = adev->asic_type != CHIP_VEGA20 &&
+			  (amdgpu_ip_version(adev, MP1_HWIP, 0) >=
+			   IP_VERSION(11, 0, 0) &&
+			   amdgpu_device_ip_is_valid(adev, AMD_IP_BLOCK_TYPE_SMC));
 }
 
 bool is_support_cclk_dpm(struct amdgpu_device *adev)
@@ -666,25 +663,28 @@ static int smu_sys_set_pp_table(void *handle,
 {
 	struct smu_context *smu = handle;
 	struct smu_table_context *smu_table = &smu->smu_table;
-	ATOM_COMMON_TABLE_HEADER *header = (ATOM_COMMON_TABLE_HEADER *)buf;
+	ATOM_COMMON_TABLE_HEADER *header;
+	void *hardcode_pptable;
 	int ret = 0;
 
 	if (!smu->pm_enabled || !smu->adev->pm.dpm_enabled)
 		return -EOPNOTSUPP;
 
+	if (!buf || size < sizeof(*header))
+		return -EINVAL;
+
+	header = (ATOM_COMMON_TABLE_HEADER *)buf;
 	if (header->usStructureSize != size) {
 		dev_err(smu->adev->dev, "pp table size not matched !\n");
 		return -EIO;
 	}
 
-	if (!smu_table->hardcode_pptable || smu_table->power_play_table_size < size) {
-		kfree(smu_table->hardcode_pptable);
-		smu_table->hardcode_pptable = kzalloc(size, GFP_KERNEL);
-		if (!smu_table->hardcode_pptable)
-			return -ENOMEM;
-	}
+	hardcode_pptable = kmemdup(buf, size, GFP_KERNEL);
+	if (!hardcode_pptable)
+		return -ENOMEM;
 
-	memcpy(smu_table->hardcode_pptable, buf, size);
+	kfree(smu_table->hardcode_pptable);
+	smu_table->hardcode_pptable = hardcode_pptable;
 	smu_table->power_play_table = smu_table->hardcode_pptable;
 	smu_table->power_play_table_size = size;
 
@@ -800,7 +800,12 @@ static int smu_set_funcs(struct amdgpu_device *adev)
 		smu_v14_0_2_set_ppt_funcs(smu);
 		break;
 	case IP_VERSION(15, 0, 0):
+	case IP_VERSION(15, 0, 5):
 		smu_v15_0_0_set_ppt_funcs(smu);
+		break;
+	case IP_VERSION(15, 0, 8):
+		smu_v15_0_8_set_ppt_funcs(smu);
+		smu->od_enabled = true;
 		break;
 	default:
 		return -EINVAL;
@@ -2766,7 +2771,6 @@ const struct amd_ip_funcs smu_ip_funcs = {
 	.suspend = smu_suspend,
 	.resume = smu_resume,
 	.is_idle = NULL,
-	.check_soft_reset = NULL,
 	.wait_for_idle = NULL,
 	.soft_reset = NULL,
 	.set_clockgating_state = smu_set_clockgating_state,
@@ -2965,6 +2969,7 @@ int smu_get_power_limit(void *handle,
 			case IP_VERSION(11, 0, 11):
 			case IP_VERSION(11, 0, 12):
 			case IP_VERSION(11, 0, 13):
+			case IP_VERSION(15, 0, 8):
 				ret = smu_get_asic_power_limits(smu,
 								&smu->current_power_limit,
 								NULL, NULL, NULL);
@@ -3056,6 +3061,8 @@ static enum smu_clk_type smu_convert_to_smuclk(enum pp_clock_type type)
 		clk_type = SMU_OD_SCLK; break;
 	case OD_MCLK:
 		clk_type = SMU_OD_MCLK; break;
+	case OD_FCLK:
+		clk_type = SMU_OD_FCLK; break;
 	case OD_VDDC_CURVE:
 		clk_type = SMU_OD_VDDC_CURVE; break;
 	case OD_RANGE:

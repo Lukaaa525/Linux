@@ -4,7 +4,6 @@
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
-#include <crypto/hash.h>
 #include "core.h"
 #include "dp_tx.h"
 #include "hif.h"
@@ -41,7 +40,6 @@ void ath12k_dp_peer_cleanup(struct ath12k *ar, int vdev_id, const u8 *addr)
 	}
 
 	ath12k_dp_rx_peer_tid_cleanup(ar, peer);
-	crypto_free_shash(peer->dp_peer->tfm_mmic);
 	peer->dp_peer->dp_setup_done = false;
 	spin_unlock_bh(&dp->dp_lock);
 }
@@ -945,11 +943,11 @@ void ath12k_dp_vdev_tx_attach(struct ath12k *ar, struct ath12k_link_vif *arvif)
 
 	dp_link_vif = ath12k_dp_vif_to_dp_link_vif(&ahvif->dp_vif, link_id);
 
-	dp_link_vif->tcl_metadata |= u32_encode_bits(1, HTT_TCL_META_DATA_TYPE) |
-				     u32_encode_bits(arvif->vdev_id,
-						     HTT_TCL_META_DATA_VDEV_ID) |
-				     u32_encode_bits(ar->pdev->pdev_id,
-						     HTT_TCL_META_DATA_PDEV_ID);
+	dp_link_vif->tcl_metadata = u32_encode_bits(1, HTT_TCL_META_DATA_TYPE) |
+				    u32_encode_bits(arvif->vdev_id,
+						    HTT_TCL_META_DATA_VDEV_ID) |
+				    u32_encode_bits(ar->pdev->pdev_id,
+						    HTT_TCL_META_DATA_PDEV_ID);
 
 	/* set HTT extension valid bit to 0 by default */
 	dp_link_vif->tcl_metadata &= ~HTT_TCL_META_DATA_VALID_HTT;
@@ -1099,7 +1097,6 @@ static void ath12k_dp_reoq_lut_cleanup(struct ath12k_base *ab)
 		return;
 
 	if (dp->reoq_lut.vaddr_unaligned) {
-		ath12k_hal_write_reoq_lut_addr(ab, 0);
 		dma_free_coherent(ab->dev, dp->reoq_lut.size,
 				  dp->reoq_lut.vaddr_unaligned,
 				  dp->reoq_lut.paddr_unaligned);
@@ -1107,7 +1104,6 @@ static void ath12k_dp_reoq_lut_cleanup(struct ath12k_base *ab)
 	}
 
 	if (dp->ml_reoq_lut.vaddr_unaligned) {
-		ath12k_hal_write_ml_reoq_lut_addr(ab, 0);
 		dma_free_coherent(ab->dev, dp->ml_reoq_lut.size,
 				  dp->ml_reoq_lut.vaddr_unaligned,
 				  dp->ml_reoq_lut.paddr_unaligned);
@@ -1570,6 +1566,7 @@ fail_dp_rx_free:
 	ath12k_dp_rx_free(ab);
 
 fail_cmn_reoq_cleanup:
+	ath12k_dp_reoq_lut_addr_reset(dp);
 	ath12k_dp_reoq_lut_cleanup(ab);
 
 fail_cmn_srng_cleanup:
@@ -1628,4 +1625,15 @@ void ath12k_dp_cmn_hw_group_assign(struct ath12k_dp *dp,
 	dp->ag = ag;
 	dp->device_id = ab->device_id;
 	dp_hw_grp->dp[dp->device_id] = dp;
+}
+
+void ath12k_dp_reoq_lut_addr_reset(struct ath12k_dp *dp)
+{
+	struct ath12k_base *ab = dp->ab;
+
+	if (dp->reoq_lut.vaddr_unaligned)
+		ath12k_hal_write_reoq_lut_addr(ab, 0);
+
+	if (dp->ml_reoq_lut.vaddr_unaligned)
+		ath12k_hal_write_ml_reoq_lut_addr(ab, 0);
 }

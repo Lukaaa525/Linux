@@ -769,7 +769,8 @@ struct dentry *ceph_finish_lookup(struct ceph_mds_request *req,
 				d_drop(dentry);
 				err = -ENOENT;
 			} else {
-				d_add(dentry, NULL);
+				if (d_unhashed(dentry))
+					d_add(dentry, NULL);
 			}
 		}
 	}
@@ -840,7 +841,8 @@ static struct dentry *ceph_lookup(struct inode *dir, struct dentry *dentry,
 			spin_unlock(&ci->i_ceph_lock);
 			doutc(cl, " dir %llx.%llx complete, -ENOENT\n",
 			      ceph_vinop(dir));
-			d_add(dentry, NULL);
+			if (d_unhashed(dentry))
+				d_add(dentry, NULL);
 			di->lease_shared_gen = atomic_read(&ci->i_shared_gen);
 			return NULL;
 		}
@@ -976,7 +978,7 @@ out:
 }
 
 static int ceph_create(struct mnt_idmap *idmap, struct inode *dir,
-		       struct dentry *dentry, umode_t mode, bool excl)
+		       struct dentry *dentry, umode_t mode)
 {
 	return ceph_mknod(idmap, dir, dentry, mode, 0);
 }
@@ -1140,7 +1142,6 @@ static struct dentry *ceph_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 		goto out;
 	}
 
-	mode |= S_IFDIR;
 	req->r_new_inode = ceph_new_inode(dir, dentry, &mode, &as_ctx);
 	if (IS_ERR(req->r_new_inode)) {
 		ret = ERR_CAST(req->r_new_inode);
