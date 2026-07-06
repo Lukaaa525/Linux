@@ -94,7 +94,7 @@ static int dpp401_dscl_get_pixel_depth_val(enum lb_pixel_depth depth)
 	}
 }
 
-static bool dpp401_dscl_is_video_format(enum pixel_format format)
+static bool dpp401_dscl_is_video_format(enum dc_pixel_format format)
 {
 	if (format >= PIXEL_FORMAT_VIDEO_BEGIN
 			&& format <= PIXEL_FORMAT_VIDEO_END)
@@ -103,7 +103,7 @@ static bool dpp401_dscl_is_video_format(enum pixel_format format)
 		return false;
 }
 
-static bool dpp401_dscl_is_420_format(enum pixel_format format)
+static bool dpp401_dscl_is_420_format(enum dc_pixel_format format)
 {
 	if (format == PIXEL_FORMAT_420BPP8 ||
 			format == PIXEL_FORMAT_420BPP10)
@@ -161,6 +161,7 @@ static void dpp401_power_on_dscl(
 				REG_WAIT(DSCL_MEM_PWR_STATUS, LUT_MEM_PWR_STATE, 0, 1, 100);
 			} else
 				REG_WAIT(DSCL_MEM_PWR_STATUS, LUT_MEM_PWR_STATE, 0, 1, 5);
+			dpp->base.deferred_reg_writes.bits.disable_dscl = false;
 		} else {
 			if (dpp->base.ctx->dc->debug.enable_mem_low_power.bits.dscl) {
 				dpp->base.ctx->dc->optimized_required = true;
@@ -253,7 +254,7 @@ static void dpp401_dscl_set_scaler_filter(
 	for (phase = 0; phase < (NUM_PHASES / 2 + 1); phase++) {
 		for (pair = 0; pair < tap_pairs; pair++) {
 			even_coef = filter[phase * taps + 2 * pair];
-			if ((pair * 2 + 1) < taps)
+			if ((uint32_t)(pair * 2 + 1) < taps)
 				odd_coef = filter[phase * taps + 2 * pair + 1];
 			else
 				odd_coef = 0;

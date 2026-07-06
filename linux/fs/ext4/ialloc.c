@@ -66,14 +66,16 @@ void ext4_mark_bitmap_end(int start_bit, int end_bit, char *bitmap)
 		memset(bitmap + (i >> 3), 0xff, (end_bit - i) >> 3);
 }
 
-void ext4_end_bitmap_read(struct buffer_head *bh, int uptodate)
+void ext4_end_bitmap_read(struct bio *bio)
 {
+	struct buffer_head *bh;
+	bool uptodate = bio_endio_bh(bio, &bh);
+
 	if (uptodate) {
 		set_buffer_uptodate(bh);
 		set_bitmap_uptodate(bh);
 	}
 	unlock_buffer(bh);
-	put_bh(bh);
 }
 
 static int ext4_validate_inode_bitmap(struct super_block *sb,
@@ -252,10 +254,10 @@ void ext4_free_inode(handle_t *handle, struct inode *inode)
 		       "nonexistent device\n", __func__, __LINE__);
 		return;
 	}
-	if (icount_read(inode) > 1) {
+	if (icount_read_once(inode) > 1) {
 		ext4_msg(sb, KERN_ERR, "%s:%d: inode #%llu: count=%d",
 			 __func__, __LINE__, inode->i_ino,
-			 icount_read(inode));
+			 icount_read_once(inode));
 		return;
 	}
 	if (inode->i_nlink) {
@@ -684,6 +686,12 @@ static int recently_deleted(struct super_block *sb, ext4_group_t group, int ino)
 
 	gdp = ext4_get_group_desc(sb, group, NULL);
 	if (unlikely(!gdp))
+		return 0;
+
+	/* Inode was never used in this filesystem? */
+	if (ext4_has_group_desc_csum(sb) &&
+	    (gdp->bg_flags & cpu_to_le16(EXT4_BG_INODE_UNINIT) ||
+	     ino >= EXT4_INODES_PER_GROUP(sb) - ext4_itable_unused_count(sb, gdp)))
 		return 0;
 
 	bh = sb_find_get_block(sb, ext4_inode_table(sb, gdp) +

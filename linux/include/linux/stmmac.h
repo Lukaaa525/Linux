@@ -89,7 +89,6 @@ struct stmmac_mdio_bus_data {
 	int *irqs;
 	int probed_phy_irq;
 	bool needs_reset;
-	bool default_an_inband;
 };
 
 struct stmmac_dma_cfg {
@@ -134,10 +133,7 @@ struct stmmac_axi {
 	u32 axi_blen_regval;
 	bool axi_lpi_en;
 	bool axi_xit_frm;
-	bool axi_kbbe;
 	bool axi_fb;
-	bool axi_mb;
-	bool axi_rb;
 };
 
 struct stmmac_rxq_cfg {
@@ -208,11 +204,13 @@ enum dwmac_core_type {
 #define STMMAC_FLAG_MULTI_MSI_EN		BIT(7)
 #define STMMAC_FLAG_EXT_SNAPSHOT_EN		BIT(8)
 #define STMMAC_FLAG_INT_SNAPSHOT_EN		BIT(9)
-#define STMMAC_FLAG_RX_CLK_RUNS_IN_LPI		BIT(10)
-#define STMMAC_FLAG_EN_TX_LPI_CLOCKGATING	BIT(11)
-#define STMMAC_FLAG_EN_TX_LPI_CLK_PHY_CAP	BIT(12)
-#define STMMAC_FLAG_HWTSTAMP_CORRECT_LATENCY	BIT(13)
-#define STMMAC_FLAG_KEEP_PREAMBLE_BEFORE_SFD	BIT(14)
+#define STMMAC_FLAG_EEE_DISABLE			BIT(10)
+#define STMMAC_FLAG_RX_CLK_RUNS_IN_LPI		BIT(11)
+#define STMMAC_FLAG_EN_TX_LPI_CLOCKGATING	BIT(12)
+#define STMMAC_FLAG_EN_TX_LPI_CLK_PHY_CAP	BIT(13)
+#define STMMAC_FLAG_HWTSTAMP_CORRECT_LATENCY	BIT(14)
+#define STMMAC_FLAG_KEEP_PREAMBLE_BEFORE_SFD	BIT(15)
+#define STMMAC_FLAG_SERDES_SUPPORTS_2500M	BIT(16)
 
 struct mac_device_info;
 
@@ -250,6 +248,7 @@ struct plat_stmmacenet_data {
 	struct stmmac_dma_cfg *dma_cfg;
 	struct stmmac_safety_feature_cfg *safety_feat_cfg;
 	int clk_csr;
+	bool default_an_inband;
 	bool enh_desc;
 	bool tx_coe;
 	bool bugged_jumbo;

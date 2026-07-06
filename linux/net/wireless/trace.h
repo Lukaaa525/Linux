@@ -141,7 +141,9 @@
 		       __field(u32, center_freq1)			\
 		       __field(u32, freq1_offset)			\
 		       __field(u32, center_freq2)			\
-		       __field(u16, punctured)
+		       __field(u16, punctured)				\
+		       __field(u32, npca_pri_freq)			\
+		       __field(u16, npca_punctured)
 #define CHAN_DEF_ASSIGN(chandef)					\
 	do {								\
 		if ((chandef) && (chandef)->chan) {			\
@@ -155,6 +157,11 @@
 			__entry->freq1_offset = (chandef)->freq1_offset;\
 			__entry->center_freq2 = (chandef)->center_freq2;\
 			__entry->punctured = (chandef)->punctured;	\
+			__entry->npca_pri_freq =			\
+				(chandef)->npca_chan ?			\
+				(chandef)->npca_chan->center_freq : 0;	\
+			__entry->npca_punctured =			\
+				(chandef)->npca_punctured;		\
 		} else {						\
 			__entry->band = 0;				\
 			__entry->control_freq = 0;			\
@@ -164,14 +171,17 @@
 			__entry->freq1_offset = 0;			\
 			__entry->center_freq2 = 0;			\
 			__entry->punctured = 0;				\
+			__entry->npca_pri_freq = 0;			\
+			__entry->npca_punctured = 0;			\
 		}							\
 	} while (0)
 #define CHAN_DEF_PR_FMT							\
-	"band: %d, control freq: %u.%03u, width: %d, cf1: %u.%03u, cf2: %u, punct: 0x%x"
+	"band: %d, control freq: %u.%03u, width: %d, cf1: %u.%03u, cf2: %u, punct: 0x%x, npca:%u, npca_punct:0x%x"
 #define CHAN_DEF_PR_ARG __entry->band, __entry->control_freq,		\
 			__entry->freq_offset, __entry->width,		\
 			__entry->center_freq1, __entry->freq1_offset,	\
-			__entry->center_freq2, __entry->punctured
+			__entry->center_freq2, __entry->punctured,	\
+			__entry->npca_pri_freq, __entry->npca_punctured
 
 #define FILS_AAD_ASSIGN(fa)						\
 	do {								\
@@ -2155,22 +2165,26 @@ DEFINE_EVENT(rdev_pmksa, rdev_del_pmksa,
 TRACE_EVENT(rdev_remain_on_channel,
 	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev,
 		 struct ieee80211_channel *chan,
-		 unsigned int duration),
-	TP_ARGS(wiphy, wdev, chan, duration),
+		 unsigned int duration, const u8 *rx_addr),
+	TP_ARGS(wiphy, wdev, chan, duration, rx_addr),
 	TP_STRUCT__entry(
 		WIPHY_ENTRY
 		WDEV_ENTRY
 		CHAN_ENTRY
 		__field(unsigned int, duration)
+		MAC_ENTRY(rx_addr)
 	),
 	TP_fast_assign(
 		WIPHY_ASSIGN;
 		WDEV_ASSIGN;
 		CHAN_ASSIGN(chan);
 		__entry->duration = duration;
+		MAC_ASSIGN(rx_addr, rx_addr);
 	),
-	TP_printk(WIPHY_PR_FMT ", " WDEV_PR_FMT ", " CHAN_PR_FMT ", duration: %u",
-		  WIPHY_PR_ARG, WDEV_PR_ARG, CHAN_PR_ARG, __entry->duration)
+	TP_printk(WIPHY_PR_FMT ", " WDEV_PR_FMT ", " CHAN_PR_FMT
+		  ", duration: %u, %pM",
+		  WIPHY_PR_ARG, WDEV_PR_ARG, CHAN_PR_ARG, __entry->duration,
+		  __entry->rx_addr)
 );
 
 TRACE_EVENT(rdev_return_int_cookie,
@@ -2371,6 +2385,16 @@ DEFINE_EVENT(wiphy_wdev_evt, rdev_stop_nan,
 	TP_ARGS(wiphy, wdev)
 );
 
+DEFINE_EVENT(wiphy_wdev_evt, rdev_start_pd,
+	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev),
+	TP_ARGS(wiphy, wdev)
+);
+
+DEFINE_EVENT(wiphy_wdev_evt, rdev_stop_pd,
+	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev),
+	TP_ARGS(wiphy, wdev)
+);
+
 TRACE_EVENT(rdev_add_nan_func,
 	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev,
 		 const struct cfg80211_nan_func *func),
@@ -2408,6 +2432,55 @@ TRACE_EVENT(rdev_del_nan_func,
 	),
 	TP_printk(WIPHY_PR_FMT ", " WDEV_PR_FMT ", cookie=%llu",
 		  WIPHY_PR_ARG, WDEV_PR_ARG, __entry->cookie)
+);
+
+TRACE_EVENT(rdev_nan_set_local_sched,
+	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev,
+		 struct cfg80211_nan_local_sched *sched),
+	TP_ARGS(wiphy, wdev, sched),
+	TP_STRUCT__entry(
+		WIPHY_ENTRY
+		WDEV_ENTRY
+		__array(u8, schedule, CFG80211_NAN_SCHED_NUM_TIME_SLOTS)
+	),
+	TP_fast_assign(
+		WIPHY_ASSIGN;
+		WDEV_ASSIGN;
+		memcpy(__entry->schedule, sched->schedule,
+		       CFG80211_NAN_SCHED_NUM_TIME_SLOTS);
+	),
+	TP_printk(WIPHY_PR_FMT ", " WDEV_PR_FMT ", schedule: %s",
+		  WIPHY_PR_ARG, WDEV_PR_ARG,
+		  __print_array(__entry->schedule,
+				CFG80211_NAN_SCHED_NUM_TIME_SLOTS, 1))
+);
+
+TRACE_EVENT(rdev_nan_set_peer_sched,
+	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev,
+		 struct cfg80211_nan_peer_sched *sched),
+	TP_ARGS(wiphy, wdev, sched),
+	TP_STRUCT__entry(
+		WIPHY_ENTRY
+		WDEV_ENTRY
+		__array(u8, peer_addr, ETH_ALEN)
+		__field(u8, seq_id)
+		__field(u16, committed_dw)
+		__field(u16, max_chan_switch)
+	),
+	TP_fast_assign(
+		WIPHY_ASSIGN;
+		WDEV_ASSIGN;
+		memcpy(__entry->peer_addr, sched->peer_addr, ETH_ALEN);
+		__entry->seq_id = sched->seq_id;
+		__entry->committed_dw = sched->committed_dw;
+		__entry->max_chan_switch = sched->max_chan_switch;
+	),
+	TP_printk(WIPHY_PR_FMT ", " WDEV_PR_FMT
+		  ", peer: %pM, seq_id: %u, committed_dw: 0x%x, max_chan_switch: %u",
+		  WIPHY_PR_ARG, WDEV_PR_ARG, __entry->peer_addr,
+		  __entry->seq_id, __entry->committed_dw,
+		  __entry->max_chan_switch
+	)
 );
 
 TRACE_EVENT(rdev_set_mac_acl,
@@ -4275,6 +4348,62 @@ TRACE_EVENT(cfg80211_incumbent_signal_notify,
 	),
 	TP_printk(WIPHY_PR_FMT ", " CHAN_DEF_PR_FMT ", signal_interference_bitmap=0x%x",
 		  WIPHY_PR_ARG, CHAN_DEF_PR_ARG, __entry->signal_interference_bitmap)
+);
+
+TRACE_EVENT(cfg80211_nan_sched_update_done,
+	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev, bool success),
+	TP_ARGS(wiphy, wdev, success),
+	TP_STRUCT__entry(
+		WIPHY_ENTRY
+		WDEV_ENTRY
+		__field(bool, success)
+	),
+	TP_fast_assign(
+		WIPHY_ASSIGN;
+		WDEV_ASSIGN;
+		__entry->success = success;
+	),
+	TP_printk(WIPHY_PR_FMT ", " WDEV_PR_FMT " success=%d",
+		  WIPHY_PR_ARG, WDEV_PR_ARG, __entry->success)
+);
+
+TRACE_EVENT(cfg80211_nan_ulw_update,
+	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev,
+		 const u8 *ulw, size_t ulw_len),
+	TP_ARGS(wiphy, wdev, ulw, ulw_len),
+	TP_STRUCT__entry(
+		WIPHY_ENTRY
+		WDEV_ENTRY
+		__dynamic_array(u8, ulw, ulw_len)
+	),
+	TP_fast_assign(
+		WIPHY_ASSIGN;
+		WDEV_ASSIGN;
+		if (ulw && ulw_len)
+			memcpy(__get_dynamic_array(ulw), ulw, ulw_len);
+	),
+	TP_printk(WIPHY_PR_FMT ", " WDEV_PR_FMT " ulw: %s",
+		  WIPHY_PR_ARG, WDEV_PR_ARG,
+		  __print_array(__get_dynamic_array(ulw),
+				__get_dynamic_array_len(ulw), 1))
+);
+
+TRACE_EVENT(cfg80211_nan_channel_evac,
+	TP_PROTO(struct wiphy *wiphy, struct wireless_dev *wdev,
+		 const struct cfg80211_chan_def *chandef),
+	TP_ARGS(wiphy, wdev, chandef),
+	TP_STRUCT__entry(
+		WDEV_ENTRY
+		WIPHY_ENTRY
+		CHAN_DEF_ENTRY
+	),
+	TP_fast_assign(
+		WDEV_ASSIGN;
+		WIPHY_ASSIGN;
+		CHAN_DEF_ASSIGN(chandef);
+	),
+	TP_printk(WDEV_PR_FMT ", " WIPHY_PR_FMT ", " CHAN_DEF_PR_FMT,
+		  WDEV_PR_ARG, WIPHY_PR_ARG, CHAN_DEF_PR_ARG)
 );
 #endif /* !__RDEV_OPS_TRACE || TRACE_HEADER_MULTI_READ */
 

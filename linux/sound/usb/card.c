@@ -769,7 +769,6 @@ static int snd_usb_audio_create(struct usb_interface *intf,
 
 	chip = card->private_data;
 	mutex_init(&chip->mutex);
-	init_waitqueue_head(&chip->shutdown_wait);
 	chip->index = idx;
 	chip->dev = dev;
 	chip->card = card;
@@ -778,7 +777,7 @@ static int snd_usb_audio_create(struct usb_interface *intf,
 	chip->autoclock = autoclock;
 	chip->lowlatency = lowlatency;
 	atomic_set(&chip->active, 1); /* avoid autopm during probing */
-	atomic_set(&chip->usage_count, 0);
+	snd_refcount_init(&chip->usage_count);
 	atomic_set(&chip->shutdown, 0);
 
 	chip->usb_id = usb_id;
@@ -866,19 +865,25 @@ static void find_last_interface(struct snd_usb_audio *chip)
 
 /* look for the corresponding quirk */
 static const struct snd_usb_audio_quirk *
-get_alias_quirk(struct usb_device *dev, unsigned int id)
+get_alias_quirk(struct usb_interface *intf, unsigned int id)
 {
 	const struct usb_device_id *p;
+	struct usb_device_id match_id;
 
 	for (p = usb_audio_ids; p->match_flags; p++) {
-		/* FIXME: this checks only vendor:product pair in the list */
-		if ((p->match_flags & USB_DEVICE_ID_MATCH_DEVICE) ==
-		    USB_DEVICE_ID_MATCH_DEVICE &&
-		    p->idVendor == USB_ID_VENDOR(id) &&
-		    p->idProduct == USB_ID_PRODUCT(id))
-			return (const struct snd_usb_audio_quirk *)p->driver_info;
-	}
+		if ((p->match_flags & USB_DEVICE_ID_MATCH_DEVICE) !=
+		     USB_DEVICE_ID_MATCH_DEVICE)
+			continue;
+		if (p->idVendor != USB_ID_VENDOR(id) ||
+		    p->idProduct != USB_ID_PRODUCT(id))
+			continue;
 
+		match_id = *p;
+		match_id.match_flags &= ~USB_DEVICE_ID_MATCH_DEVICE;
+		if (!match_id.match_flags || usb_match_one_id(intf, &match_id))
+			return (const struct snd_usb_audio_quirk *)
+				p->driver_info;
+	}
 	return NULL;
 }
 
@@ -898,6 +903,40 @@ static int try_to_register_card(struct snd_usb_audio *chip, int ifnum)
 		return snd_card_register(chip->card);
 
 	return 0;
+}
+
+static void usb_audio_disconnect_components(struct snd_usb_audio *chip)
+{
+	struct snd_usb_stream *as;
+	struct snd_usb_endpoint *ep;
+	struct usb_mixer_interface *mixer;
+	struct list_head *p;
+
+	/* release the pcm resources */
+	list_for_each_entry(as, &chip->pcm_list, list) {
+		snd_usb_stream_disconnect(as);
+	}
+	/* release the endpoint resources */
+	list_for_each_entry(ep, &chip->ep_list, list) {
+		snd_usb_endpoint_release(ep);
+	}
+	/* release the midi resources */
+	list_for_each(p, &chip->midi_list) {
+		snd_usbmidi_disconnect(p);
+	}
+	snd_usb_midi_v2_disconnect_all(chip);
+	/*
+	 * Nice to check quirk && quirk->shares_media_device and
+	 * then call the snd_media_device_delete(). Don't have
+	 * access to the quirk here. snd_media_device_delete()
+	 * accesses mixer_list
+	 */
+	snd_media_device_delete(chip);
+
+	/* release mixer resources */
+	list_for_each_entry(mixer, &chip->mixer_list, list) {
+		snd_usb_mixer_disconnect(mixer);
+	}
 }
 
 /*
@@ -927,7 +966,7 @@ static int usb_audio_probe(struct usb_interface *intf,
 	id = USB_ID(le16_to_cpu(dev->descriptor.idVendor),
 		    le16_to_cpu(dev->descriptor.idProduct));
 	if (get_alias_id(dev, &id))
-		quirk = get_alias_quirk(dev, id);
+		quirk = get_alias_quirk(intf, id);
 	if (quirk && quirk->ifnum >= 0 && ifnum != quirk->ifnum)
 		return -ENXIO;
 	if (quirk && quirk->ifnum == QUIRK_NODEV_INTERFACE)
@@ -1072,8 +1111,10 @@ static int usb_audio_probe(struct usb_interface *intf,
 		 * decrement before memory is possibly returned.
 		 */
 		atomic_dec(&chip->active);
-		if (!chip->num_interfaces)
+		if (!chip->num_interfaces) {
+			usb_audio_disconnect_components(chip);
 			snd_card_free(chip->card);
+		}
 	}
 	return err;
 }
@@ -1086,49 +1127,18 @@ static bool __usb_audio_disconnect(struct usb_interface *intf,
 				   struct snd_usb_audio *chip,
 				   struct snd_card *card)
 {
-	struct list_head *p;
-
 	guard(mutex)(&register_mutex);
 
 	if (platform_ops && platform_ops->disconnect_cb)
 		platform_ops->disconnect_cb(chip);
 
 	if (atomic_inc_return(&chip->shutdown) == 1) {
-		struct snd_usb_stream *as;
-		struct snd_usb_endpoint *ep;
-		struct usb_mixer_interface *mixer;
-
 		/* wait until all pending tasks done;
 		 * they are protected by snd_usb_lock_shutdown()
 		 */
-		wait_event(chip->shutdown_wait,
-			   !atomic_read(&chip->usage_count));
+		snd_refcount_sync(&chip->usage_count);
 		snd_card_disconnect(card);
-		/* release the pcm resources */
-		list_for_each_entry(as, &chip->pcm_list, list) {
-			snd_usb_stream_disconnect(as);
-		}
-		/* release the endpoint resources */
-		list_for_each_entry(ep, &chip->ep_list, list) {
-			snd_usb_endpoint_release(ep);
-		}
-		/* release the midi resources */
-		list_for_each(p, &chip->midi_list) {
-			snd_usbmidi_disconnect(p);
-		}
-		snd_usb_midi_v2_disconnect_all(chip);
-		/*
-		 * Nice to check quirk && quirk->shares_media_device and
-		 * then call the snd_media_device_delete(). Don't have
-		 * access to the quirk here. snd_media_device_delete()
-		 * accesses mixer_list
-		 */
-		snd_media_device_delete(chip);
-
-		/* release mixer resources */
-		list_for_each_entry(mixer, &chip->mixer_list, list) {
-			snd_usb_mixer_disconnect(mixer);
-		}
+		usb_audio_disconnect_components(chip);
 	}
 
 	if (chip->quirk_flags & QUIRK_FLAG_DISABLE_AUTOSUSPEND)
@@ -1160,7 +1170,7 @@ int snd_usb_lock_shutdown(struct snd_usb_audio *chip)
 {
 	int err;
 
-	atomic_inc(&chip->usage_count);
+	snd_refcount_get(&chip->usage_count);
 	if (atomic_read(&chip->shutdown)) {
 		err = -EIO;
 		goto error;
@@ -1171,8 +1181,7 @@ int snd_usb_lock_shutdown(struct snd_usb_audio *chip)
 	return 0;
 
  error:
-	if (atomic_dec_and_test(&chip->usage_count))
-		wake_up(&chip->shutdown_wait);
+	snd_refcount_put(&chip->usage_count);
 	return err;
 }
 EXPORT_SYMBOL_GPL(snd_usb_lock_shutdown);
@@ -1181,8 +1190,7 @@ EXPORT_SYMBOL_GPL(snd_usb_lock_shutdown);
 void snd_usb_unlock_shutdown(struct snd_usb_audio *chip)
 {
 	snd_usb_autosuspend(chip);
-	if (atomic_dec_and_test(&chip->usage_count))
-		wake_up(&chip->shutdown_wait);
+	snd_refcount_put(&chip->usage_count);
 }
 EXPORT_SYMBOL_GPL(snd_usb_unlock_shutdown);
 

@@ -49,7 +49,20 @@ static void x86_virt_invoke_kvm_emergency_callback(void)
 {
 	cpu_emergency_virt_cb *kvm_callback;
 
-	kvm_callback = rcu_dereference(kvm_emergency_callback);
+	/*
+	 * RCU may not be watching the crashing CPU here, so rcu_dereference()
+	 * triggers a suspicious-RCU-usage splat. In principle, a concurrent
+	 * KVM module unload could race with this read; see commit 2baa33a8ddd6
+	 * ("KVM: x86: Leave user-return notifier registered on reboot/shutdown")
+	 * which notes that nothing prevents module unload during panic/reboot.
+	 *
+	 * However, taking a lock here would be riskier than the current race:
+	 * the system is going down via NMI shootdown, and any lock could be
+	 * held by an already-stopped CPU. Use rcu_dereference_raw() to silence
+	 * the lockdep splat and accept the comically small remaining race;
+	 * panic context inherently cannot guarantee complete correctness.
+	 */
+	kvm_callback = rcu_dereference_raw(kvm_emergency_callback);
 	if (kvm_callback)
 		kvm_callback();
 }
@@ -269,7 +282,8 @@ static __init int x86_svm_init(void)
 		.emergency_disable_virtualization_cpu = x86_svm_emergency_disable_virtualization_cpu,
 	};
 
-	if (!cpu_feature_enabled(X86_FEATURE_SVM))
+	if (!cpu_feature_enabled(X86_FEATURE_SVM) ||
+	    cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
 		return -EOPNOTSUPP;
 
 	memcpy(&virt_ops, &svm_ops, sizeof(virt_ops));

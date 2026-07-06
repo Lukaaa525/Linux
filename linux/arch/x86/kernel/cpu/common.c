@@ -339,16 +339,16 @@ bool cpuid_feature(void)
 
 static void squash_the_stupid_serial_number(struct cpuinfo_x86 *c)
 {
-	unsigned long lo, hi;
+	struct msr val;
 
 	if (!cpu_has(c, X86_FEATURE_PN) || !disable_x86_serial_nr)
 		return;
 
 	/* Disable processor serial number: */
 
-	rdmsr(MSR_IA32_BBL_CR_CTL, lo, hi);
-	lo |= 0x200000;
-	wrmsr(MSR_IA32_BBL_CR_CTL, lo, hi);
+	rdmsrq(MSR_IA32_BBL_CR_CTL, val.q);
+	val.l |= 0x200000;
+	wrmsrq(MSR_IA32_BBL_CR_CTL, val.q);
 
 	pr_notice("CPU serial number disabled.\n");
 	clear_cpu_cap(c, X86_FEATURE_PN);
@@ -410,20 +410,6 @@ out:
 	cr4_clear_bits(X86_CR4_UMIP);
 }
 
-static __always_inline void setup_lass(struct cpuinfo_x86 *c)
-{
-	if (!cpu_feature_enabled(X86_FEATURE_LASS))
-		return;
-
-	/*
-	 * Legacy vsyscall page access causes a #GP when LASS is active.
-	 * Disable LASS because the #GP handler doesn't support vsyscall
-	 * emulation.
-	 */
-	if (IS_ENABLED(CONFIG_X86_VSYSCALL_EMULATION))
-		setup_clear_cpu_cap(X86_FEATURE_LASS);
-}
-
 static int enable_lass(unsigned int cpu)
 {
 	cr4_set_bits(X86_CR4_LASS);
@@ -450,7 +436,20 @@ late_initcall(cpu_finalize_pre_userspace);
 
 /* These bits should not change their value after CPU init is finished. */
 static const unsigned long cr4_pinned_mask = X86_CR4_SMEP | X86_CR4_SMAP | X86_CR4_UMIP |
-					     X86_CR4_FSGSBASE | X86_CR4_CET | X86_CR4_FRED;
+					     X86_CR4_FSGSBASE | X86_CR4_CET;
+
+/*
+ * The CR pinning protects against ROP on the 'mov %reg, %CRn' instruction(s).
+ * Since you can ROP directly to these instructions (barring shadow stack),
+ * any protection must follow immediately and unconditionally after that.
+ *
+ * Specifically, the CR[04] write functions below will have the value
+ * validation controlled by the @cr_pinning static_branch which is
+ * __ro_after_init, just like the cr4_pinned_bits value.
+ *
+ * Once set, an attacker will have to defeat page-tables to get around these
+ * restrictions. Which is a much bigger ask than 'simple' ROP.
+ */
 static DEFINE_STATIC_KEY_FALSE_RO(cr_pinning);
 static unsigned long cr4_pinned_bits __ro_after_init;
 
@@ -1738,13 +1737,6 @@ static void __init cpu_parse_early_param(void)
 	int arglen;
 
 #ifdef CONFIG_X86_32
-	if (cmdline_find_option_bool(boot_command_line, "no387"))
-#ifdef CONFIG_MATH_EMULATION
-		setup_clear_cpu_cap(X86_FEATURE_FPU);
-#else
-		pr_err("Option 'no387' required CONFIG_MATH_EMULATION enabled.\n");
-#endif
-
 	if (cmdline_find_option_bool(boot_command_line, "nofxsr"))
 		setup_clear_cpu_cap(X86_FEATURE_FXSR);
 #endif
@@ -1763,7 +1755,7 @@ static void __init cpu_parse_early_param(void)
 
 	/* Minimize the gap between FRED is available and available but disabled. */
 	arglen = cmdline_find_option(boot_command_line, "fred", arg, sizeof(arg));
-	if (arglen != 2 || strncmp(arg, "on", 2))
+	if (arglen == 3 && !strncmp(arg, "off", 3))
 		setup_clear_cpu_cap(X86_FEATURE_FRED);
 
 	arglen = cmdline_find_option(boot_command_line, "clearcpuid", arg, sizeof(arg));
@@ -1792,6 +1784,7 @@ static void __init cpu_parse_early_param(void)
 static void __init early_identify_cpu(struct cpuinfo_x86 *c)
 {
 	memset(&c->x86_capability, 0, sizeof(c->x86_capability));
+	memset(&c->cpuid, 0, sizeof(c->cpuid));
 	c->extended_cpuid_level = 0;
 
 	if (!cpuid_feature())
@@ -1799,6 +1792,7 @@ static void __init early_identify_cpu(struct cpuinfo_x86 *c)
 
 	/* cyrix could have cpuid enabled via c_identify()*/
 	if (cpuid_feature()) {
+		cpuid_scan_cpu(c);
 		cpu_detect(c);
 		get_cpu_vendor(c);
 		intel_unlock_cpuid_leafs(c);
@@ -1971,8 +1965,8 @@ static void generic_identify(struct cpuinfo_x86 *c)
 	if (!cpuid_feature())
 		return;
 
+	cpuid_scan_cpu(c);
 	cpu_detect(c);
-
 	get_cpu_vendor(c);
 	intel_unlock_cpuid_leafs(c);
 	get_cpu_cap(c);
@@ -2024,6 +2018,7 @@ static void identify_cpu(struct cpuinfo_x86 *c)
 #endif
 	c->x86_cache_alignment = c->x86_clflush_size;
 	memset(&c->x86_capability, 0, sizeof(c->x86_capability));
+	memset(&c->cpuid, 0, sizeof(c->cpuid));
 #ifdef CONFIG_X86_VMX_FEATURE_NAMES
 	memset(&c->vmx_capability, 0, sizeof(c->vmx_capability));
 #endif
@@ -2065,13 +2060,6 @@ static void identify_cpu(struct cpuinfo_x86 *c)
 	setup_smep(c);
 	setup_smap(c);
 	setup_umip(c);
-	setup_lass(c);
-
-	/* Enable FSGSBASE instructions if available. */
-	if (cpu_has(c, X86_FEATURE_FSGSBASE)) {
-		cr4_set_bits(X86_CR4_FSGSBASE);
-		elf_hwcap2 |= HWCAP2_FSGSBASE;
-	}
 
 	/*
 	 * The vendor-specific functions might have changed features.
@@ -2311,8 +2299,10 @@ static inline void idt_syscall_init(void)
 /* May not be marked __init: used by software suspend */
 void syscall_init(void)
 {
+	struct msr val = { .h = (__USER32_CS << 16) | __KERNEL_CS };
+
 	/* The default user and kernel segments */
-	wrmsr(MSR_STAR, 0, (__USER32_CS << 16) | __KERNEL_CS);
+	wrmsrq(MSR_STAR, val.q);
 
 	/*
 	 * Except the IA32_STAR MSR, there is NO need to setup SYSCALL and
@@ -2433,6 +2423,18 @@ void cpu_init_exception_handling(bool boot_cpu)
 
 	/* GHCB needs to be setup to handle #VC. */
 	setup_ghcb();
+
+	/*
+	 * On CPUs with FSGSBASE support, paranoid_entry() uses
+	 * ALTERNATIVE-patched RDGSBASE/WRGSBASE instructions. Secondary CPUs
+	 * boot after alternatives are patched globally, so early exceptions
+	 * execute patched code that depends on FSGSBASE. Enable the feature
+	 * before any exceptions occur.
+	 */
+	if (cpu_feature_enabled(X86_FEATURE_FSGSBASE)) {
+		cr4_set_bits(X86_CR4_FSGSBASE);
+		elf_hwcap2 |= HWCAP2_FSGSBASE;
+	}
 
 	if (cpu_feature_enabled(X86_FEATURE_FRED)) {
 		/* The boot CPU has enabled FRED during early boot */

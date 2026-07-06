@@ -656,7 +656,7 @@ static bool mshv_handle_gpa_intercept(struct mshv_vp *vp)
 {
 	struct mshv_partition *p = vp->vp_partition;
 	struct mshv_mem_region *region;
-	bool ret;
+	bool ret = false;
 	u64 gfn;
 #if defined(CONFIG_X86_64)
 	struct hv_x64_memory_intercept_message *msg =
@@ -667,21 +667,32 @@ static bool mshv_handle_gpa_intercept(struct mshv_vp *vp)
 		(struct hv_arm64_memory_intercept_message *)
 		vp->vp_intercept_msg_page->u.payload;
 #endif
+	enum hv_intercept_access_type access_type =
+		msg->header.intercept_access_type;
 
 	gfn = HVPFN_DOWN(msg->guest_physical_address);
 
 	region = mshv_partition_region_by_gfn_get(p, gfn);
 	if (!region)
-		return false;
+		goto out;
+
+	if (access_type == HV_INTERCEPT_ACCESS_WRITE &&
+	    !(region->hv_map_flags & HV_MAP_GPA_WRITABLE))
+		goto put_region;
+
+	if (access_type == HV_INTERCEPT_ACCESS_EXECUTE &&
+	    !(region->hv_map_flags & HV_MAP_GPA_EXECUTABLE))
+		goto put_region;
 
 	/* Only movable memory ranges are supported for GPA intercepts */
 	if (region->mreg_type == MSHV_REGION_TYPE_MEM_MOVABLE)
 		ret = mshv_region_handle_gfn_fault(region, gfn);
-	else
-		ret = false;
 
+put_region:
 	mshv_region_put(region);
-
+out:
+	trace_mshv_handle_gpa_intercept(p->pt_id, vp->vp_index, gfn,
+					access_type, ret);
 	return ret;
 }
 
@@ -2230,7 +2241,7 @@ static int mshv_root_scheduler_init(unsigned int cpu)
 	outputarg = (void **)this_cpu_ptr(root_scheduler_output);
 
 	/* Allocate two consecutive pages. One for input, one for output. */
-	p = kmalloc(2 * HV_HYP_PAGE_SIZE, GFP_KERNEL);
+	p = kmalloc_array(2, HV_HYP_PAGE_SIZE, GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
 

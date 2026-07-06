@@ -8,17 +8,14 @@
 
 #include <linux/module.h>
 #include <linux/gfp.h>
+#include <linux/slab.h>
 #include <linux/raid/xor.h>
 #include <linux/jiffies.h>
 #include <linux/preempt.h>
 #include <linux/static_call.h>
 #include "xor_impl.h"
 
-/*
- * Provide a temporary default until the fastest or forced implementation is
- * picked.
- */
-DEFINE_STATIC_CALL(xor_gen_impl, xor_gen_32regs);
+DEFINE_STATIC_CALL_NULL(xor_gen_impl, *xor_block_8regs.xor_gen);
 
 /**
  * xor_gen - generate RAID-style XOR information
@@ -28,8 +25,8 @@ DEFINE_STATIC_CALL(xor_gen_impl, xor_gen_32regs);
  * @bytes:	length in bytes of each vector
  *
  * Performs bit-wise XOR operation into @dest for each of the @src_cnt vectors
- * in @srcs for a length of @bytes bytes.  @src_count must be non-zero, and the
- * memory pointed to by @dest and each member of @srcs must be at least 32-byte
+ * in @srcs for a length of @bytes bytes.  @src_cnt must be non-zero, and the
+ * memory pointed to by @dest and each member of @srcs must be at least 64-byte
  * aligned.  @bytes must be non-zero and a multiple of 512.
  *
  * Note: for typical RAID uses, @dest either needs to be zeroed, or filled with
@@ -37,7 +34,8 @@ DEFINE_STATIC_CALL(xor_gen_impl, xor_gen_32regs);
  */
 void xor_gen(void *dest, void **srcs, unsigned int src_cnt, unsigned int bytes)
 {
-	lockdep_assert_preemption_enabled();
+	WARN_ON_ONCE(!in_task() || irqs_disabled() || softirq_count());
+	WARN_ON_ONCE(bytes == 0);
 	WARN_ON_ONCE(bytes & 511);
 
 	static_call(xor_gen_impl)(dest, srcs, src_cnt, bytes);
@@ -117,7 +115,7 @@ static int __init calibrate_xor_blocks(void)
 	if (forced_template)
 		return 0;
 
-	b1 = (void *) __get_free_pages(GFP_KERNEL, 2);
+	b1 = kmalloc(PAGE_SIZE * 4, GFP_KERNEL);
 	if (!b1) {
 		pr_warn("xor: Yikes!  No memory available.\n");
 		return -ENOMEM;
@@ -135,7 +133,7 @@ static int __init calibrate_xor_blocks(void)
 	pr_info("xor: using function: %s (%d MB/sec)\n",
 	       fastest->name, fastest->speed);
 
-	free_pages((unsigned long)b1, 2);
+	kfree(b1);
 	return 0;
 }
 
@@ -169,6 +167,11 @@ static int __init xor_init(void)
 #ifdef MODULE
 	return calibrate_xor_blocks();
 #else
+	/*
+	 * Pick the first template as the temporary default until calibration
+	 * happens.
+	 */
+	static_call_update(xor_gen_impl, template_list->xor_gen);
 	return 0;
 #endif
 }

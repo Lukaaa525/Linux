@@ -11,21 +11,21 @@
 static u8 vdso_initdata[VDSO_NR_PAGES * PAGE_SIZE] __aligned(PAGE_SIZE) __initdata = {};
 
 #ifdef CONFIG_GENERIC_GETTIMEOFDAY
-struct vdso_time_data *vdso_k_time_data __refdata =
+struct vdso_time_data *vdso_k_time_data __ro_after_init =
 	(void *)&vdso_initdata[VDSO_TIME_PAGE_OFFSET * PAGE_SIZE];
 
 static_assert(sizeof(struct vdso_time_data) <= PAGE_SIZE);
 #endif /* CONFIG_GENERIC_GETTIMEOFDAY */
 
 #ifdef CONFIG_VDSO_GETRANDOM
-struct vdso_rng_data *vdso_k_rng_data __refdata =
+struct vdso_rng_data *vdso_k_rng_data __ro_after_init =
 	(void *)&vdso_initdata[VDSO_RNG_PAGE_OFFSET * PAGE_SIZE];
 
 static_assert(sizeof(struct vdso_rng_data) <= PAGE_SIZE);
 #endif /* CONFIG_VDSO_GETRANDOM */
 
 #ifdef CONFIG_ARCH_HAS_VDSO_ARCH_DATA
-struct vdso_arch_data *vdso_k_arch_data __refdata =
+struct vdso_arch_data *vdso_k_arch_data __ro_after_init =
 	(void *)&vdso_initdata[VDSO_ARCH_PAGES_START * PAGE_SIZE];
 #endif /* CONFIG_ARCH_HAS_VDSO_ARCH_DATA */
 
@@ -132,28 +132,3 @@ struct vm_area_struct *vdso_install_vvar_mapping(struct mm_struct *mm, unsigned 
 					VM_MIXEDMAP | VM_SEALED_SYSMAP,
 					&vdso_vvar_mapping);
 }
-
-#ifdef CONFIG_TIME_NS
-/*
- * The vvar page layout depends on whether a task belongs to the root or
- * non-root time namespace. Whenever a task changes its namespace, the VVAR
- * page tables are cleared and then they will be re-faulted with a
- * corresponding layout.
- * See also the comment near timens_setup_vdso_clock_data() for details.
- */
-int vdso_join_timens(struct task_struct *task, struct time_namespace *ns)
-{
-	struct mm_struct *mm = task->mm;
-	struct vm_area_struct *vma;
-	VMA_ITERATOR(vmi, mm, 0);
-
-	mmap_read_lock(mm);
-	for_each_vma(vmi, vma) {
-		if (vma_is_special_mapping(vma, &vdso_vvar_mapping))
-			zap_vma(vma);
-	}
-	mmap_read_unlock(mm);
-
-	return 0;
-}
-#endif

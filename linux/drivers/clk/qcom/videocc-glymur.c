@@ -4,9 +4,7 @@
  */
 
 #include <linux/clk-provider.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
-#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 
@@ -468,7 +466,7 @@ static struct clk_alpha_pll *video_cc_glymur_plls[] = {
 	&video_cc_pll0,
 };
 
-static u32 video_cc_glymur_critical_cbcrs[] = {
+static const u32 video_cc_glymur_critical_cbcrs[] = {
 	0x80e0, /* VIDEO_CC_AHB_CLK */
 	0x8138, /* VIDEO_CC_SLEEP_CLK */
 	0x8110, /* VIDEO_CC_XO_CLK */
@@ -488,7 +486,7 @@ static void clk_glymur_regs_configure(struct device *dev, struct regmap *regmap)
 	regmap_update_bits(regmap, 0x9f24, BIT(0), BIT(0));
 }
 
-static struct qcom_cc_driver_data video_cc_glymur_driver_data = {
+static const struct qcom_cc_driver_data video_cc_glymur_driver_data = {
 	.alpha_plls = video_cc_glymur_plls,
 	.num_alpha_plls = ARRAY_SIZE(video_cc_glymur_plls),
 	.clk_cbcrs = video_cc_glymur_critical_cbcrs,
@@ -496,7 +494,7 @@ static struct qcom_cc_driver_data video_cc_glymur_driver_data = {
 	.clk_regs_configure = clk_glymur_regs_configure,
 };
 
-static struct qcom_cc_desc video_cc_glymur_desc = {
+static const struct qcom_cc_desc video_cc_glymur_desc = {
 	.config = &video_cc_glymur_regmap_config,
 	.clks = video_cc_glymur_clocks,
 	.num_clks = ARRAY_SIZE(video_cc_glymur_clocks),

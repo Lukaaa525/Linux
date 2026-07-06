@@ -174,19 +174,21 @@ xfs_open_zone_mark_full(
 	WRITE_ONCE(rtg->rtg_open_zone, NULL);
 
 	spin_lock(&zi->zi_open_zones_lock);
-	if (oz->oz_is_gc) {
-		ASSERT(current == zi->zi_gc_thread);
-		zi->zi_open_gc_zone = NULL;
-	} else {
+	if (oz->oz_is_gc)
+		zi->zi_nr_open_gc_zones--;
+	else
 		zi->zi_nr_open_zones--;
-		list_del_init(&oz->oz_entry);
-	}
+	list_del_init(&oz->oz_entry);
 	spin_unlock(&zi->zi_open_zones_lock);
-	xfs_open_zone_put(oz);
 
-	wake_up_all(&zi->zi_zone_wait);
+	if (oz->oz_is_gc)
+		wake_up_process(zi->zi_gc_thread);
+	else
+		wake_up_all(&zi->zi_zone_wait);
+
 	if (used < rtg_blocks(rtg))
 		xfs_zone_account_reclaimable(rtg, rtg_blocks(rtg) - used);
+	xfs_open_zone_put(oz);
 }
 
 static inline void
@@ -557,6 +559,9 @@ xfs_try_use_zone(
 	struct xfs_open_zone	*oz,
 	unsigned int		goodness)
 {
+	if (oz->oz_is_gc)
+		return false;
+
 	if (oz->oz_allocated == rtg_blocks(oz->oz_rtg))
 		return false;
 
@@ -939,6 +944,14 @@ xfs_zone_rgbno_is_valid(
 			rtg_rgno(rtg), XFS_RTG_FREE);
 }
 
+void
+xfs_zone_mark_free(
+	struct xfs_rtgroup	*rtg)
+{
+	xfs_group_set_mark(rtg_group(rtg), XFS_RTG_FREE);
+	atomic_inc(&rtg_mount(rtg)->m_zone_info->zi_nr_free_zones);
+}
+
 static void
 xfs_free_open_zones(
 	struct xfs_zone_info	*zi)
@@ -1077,8 +1090,7 @@ xfs_init_zone(
 
 	if (write_pointer == 0) {
 		/* zone is empty */
-		atomic_inc(&zi->zi_nr_free_zones);
-		xfs_group_set_mark(rtg_group(rtg), XFS_RTG_FREE);
+		xfs_zone_mark_free(rtg);
 		iz->available += rtg_blocks(rtg);
 	} else if (write_pointer < rtg_blocks(rtg)) {
 		/* zone is open */
@@ -1165,7 +1177,7 @@ xfs_calc_open_zones(
 
 	if (bdev_open_zones && bdev_open_zones < mp->m_max_open_zones) {
 		mp->m_max_open_zones = bdev_open_zones;
-		xfs_info(mp, "limiting open zones to %u due to hardware limit.\n",
+		xfs_info(mp, "limiting open zones to %u due to hardware limit.",
 			bdev_open_zones);
 	}
 
@@ -1212,7 +1224,7 @@ xfs_alloc_zone_info(
 	return zi;
 
 out_free_bitmaps:
-	while (--i > 0)
+	while (--i >= 0)
 		kvfree(zi->zi_used_bucket_bitmap[i]);
 	kfree(zi);
 	return NULL;
@@ -1230,6 +1242,100 @@ xfs_free_zone_info(
 	kfree(zi);
 }
 
+static int
+xfs_report_zones(
+	struct xfs_mount	*mp,
+	struct xfs_init_zones	*iz)
+{
+	struct xfs_rtgroup	*rtg = NULL;
+
+	while ((rtg = xfs_rtgroup_next(mp, rtg))) {
+		xfs_rgblock_t		write_pointer;
+		int			error;
+
+		error = xfs_query_write_pointer(iz, rtg, &write_pointer);
+		if (!error)
+			error = xfs_init_zone(iz, rtg, write_pointer);
+		if (error) {
+			xfs_rtgroup_rele(rtg);
+			return error;
+		}
+	}
+
+	return 0;
+}
+
+static inline bool
+xfs_zone_is_conv(
+	struct xfs_rtgroup	*rtg)
+{
+	return !bdev_zone_is_seq(rtg_mount(rtg)->m_rtdev_targp->bt_bdev,
+			xfs_gbno_to_daddr(rtg_group(rtg), 0));
+}
+
+static struct xfs_open_zone *
+xfs_find_fullest_conventional_open_zone(
+	struct xfs_mount	*mp)
+{
+	struct xfs_zone_info	*zi = mp->m_zone_info;
+	struct xfs_open_zone	*found = NULL, *oz;
+
+	spin_lock(&zi->zi_open_zones_lock);
+	list_for_each_entry(oz, &zi->zi_open_zones, oz_entry) {
+		if (!xfs_zone_is_conv(oz->oz_rtg))
+			continue;
+		if (!found || oz->oz_allocated > found->oz_allocated)
+			found = oz;
+	}
+	spin_unlock(&zi->zi_open_zones_lock);
+
+	return found;
+}
+
+/*
+ * Find the fullest conventional zones and remove them from the open zone pool
+ * until we are at the open zone limit.
+ *
+ * We can end up with spurious "open" zones when the last blocks in a fully
+ * written zone were invalidate as there is no write pointer for conventional
+ * zones.
+ *
+ * If we are still over the limit when there is no conventional open zone left,
+ * the user overrode the max open zones limit using the max_open_zones mount
+ * option we should fail.
+ */
+static int
+xfs_finish_spurious_open_zones(
+	struct xfs_mount	*mp,
+	struct xfs_init_zones	*iz)
+{
+	struct xfs_zone_info	*zi = mp->m_zone_info;
+
+	while (zi->zi_nr_open_zones > mp->m_max_open_zones) {
+		struct xfs_open_zone	*oz;
+		xfs_filblks_t		adjust;
+
+		oz = xfs_find_fullest_conventional_open_zone(mp);
+		if (!oz) {
+			xfs_err(mp,
+"too many open zones for max_open_zones limit (%u/%u)",
+			zi->zi_nr_open_zones, mp->m_max_open_zones);
+			return -EINVAL;
+		}
+
+		xfs_rtgroup_lock(oz->oz_rtg, XFS_RTGLOCK_RMAP);
+		adjust = rtg_blocks(oz->oz_rtg) - oz->oz_written;
+		trace_xfs_zone_spurious_open(oz, oz->oz_written, adjust);
+		oz->oz_written = rtg_blocks(oz->oz_rtg);
+		xfs_open_zone_mark_full(oz);
+		xfs_rtgroup_unlock(oz->oz_rtg, XFS_RTGLOCK_RMAP);
+		iz->available -= adjust;
+		iz->reclaimable += adjust;
+	}
+
+	return 0;
+}
+
 int
 xfs_mount_zones(
 	struct xfs_mount	*mp)
@@ -1238,7 +1344,6 @@ xfs_mount_zones(
 		.zone_capacity	= mp->m_groups[XG_TYPE_RTG].blocks,
 		.zone_size	= xfs_rtgroup_raw_size(mp),
 	};
-	struct xfs_rtgroup	*rtg = NULL;
 	int			error;
 
 	if (!mp->m_rtdev_targp) {
@@ -1268,9 +1373,17 @@ xfs_mount_zones(
 	if (!mp->m_zone_info)
 		return -ENOMEM;
 
-	xfs_info(mp, "%u zones of %u blocks (%u max open zones)",
-		 mp->m_sb.sb_rgcount, iz.zone_capacity, mp->m_max_open_zones);
-	trace_xfs_zones_mount(mp);
+	error = xfs_report_zones(mp, &iz);
+	if (error)
+		goto out_free_zone_info;
+
+	error = xfs_finish_spurious_open_zones(mp, &iz);
+	if (error)
+		goto out_free_zone_info;
+
+	xfs_set_freecounter(mp, XC_FREE_RTAVAILABLE, iz.available);
+	xfs_set_freecounter(mp, XC_FREE_RTEXTENTS,
+			iz.available + iz.reclaimable);
 
 	/*
 	 * The writeback code switches between inodes regularly to provide
@@ -1296,22 +1409,6 @@ xfs_mount_zones(
 		XFS_FSB_TO_B(mp, min(iz.zone_capacity, XFS_MAX_BMBT_EXTLEN)) >>
 			PAGE_SHIFT;
 
-	while ((rtg = xfs_rtgroup_next(mp, rtg))) {
-		xfs_rgblock_t		write_pointer;
-
-		error = xfs_query_write_pointer(&iz, rtg, &write_pointer);
-		if (!error)
-			error = xfs_init_zone(&iz, rtg, write_pointer);
-		if (error) {
-			xfs_rtgroup_rele(rtg);
-			goto out_free_zone_info;
-		}
-	}
-
-	xfs_set_freecounter(mp, XC_FREE_RTAVAILABLE, iz.available);
-	xfs_set_freecounter(mp, XC_FREE_RTEXTENTS,
-			iz.available + iz.reclaimable);
-
 	/*
 	 * The user may configure GC to free up a percentage of unused blocks.
 	 * By default this is 0. GC will always trigger at the minimum level
@@ -1322,6 +1419,10 @@ xfs_mount_zones(
 	error = xfs_zone_gc_mount(mp);
 	if (error)
 		goto out_free_zone_info;
+
+	xfs_info(mp, "%u zones of %u blocks (%u max open zones)",
+		 mp->m_sb.sb_rgcount, iz.zone_capacity, mp->m_max_open_zones);
+	trace_xfs_zones_mount(mp);
 	return 0;
 
 out_free_zone_info:

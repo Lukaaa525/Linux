@@ -448,6 +448,7 @@ static int fbnic_fw_xmit_simple_msg(struct fbnic_dev *fbd, u32 msg_type)
 
 static int fbnic_mbx_init_desc_ring(struct fbnic_dev *fbd, int mbx_idx)
 {
+	u8 tlp_attr = fbd->relaxed_ord ? FBNIC_TLP_ATTR_RO : 0;
 	struct fbnic_fw_mbx *mbx = &fbd->mbx[mbx_idx];
 
 	mbx->ready = true;
@@ -456,14 +457,24 @@ static int fbnic_mbx_init_desc_ring(struct fbnic_dev *fbd, int mbx_idx)
 	case FBNIC_IPC_MBX_RX_IDX:
 		/* Enable DMA writes from the device */
 		wr32(fbd, FBNIC_PUL_OB_TLP_HDR_AW_CFG,
-		     FBNIC_PUL_OB_TLP_HDR_AW_CFG_BME);
+		     FBNIC_PUL_OB_TLP_HDR_AW_CFG_BME |
+		     FIELD_PREP(FBNIC_PUL_OB_TLP_HDR_AW_CFG_RDE_ATTR,
+				tlp_attr) |
+		     FIELD_PREP(FBNIC_PUL_OB_TLP_HDR_AW_CFG_TQM_ATTR,
+				tlp_attr));
 
 		/* Make sure we have a page for the FW to write to */
 		return fbnic_mbx_alloc_rx_msgs(fbd);
 	case FBNIC_IPC_MBX_TX_IDX:
 		/* Enable DMA reads from the device */
 		wr32(fbd, FBNIC_PUL_OB_TLP_HDR_AR_CFG,
-		     FBNIC_PUL_OB_TLP_HDR_AR_CFG_BME);
+		     FBNIC_PUL_OB_TLP_HDR_AR_CFG_BME |
+		     FIELD_PREP(FBNIC_PUL_OB_TLP_HDR_AR_CFG_TDE_ATTR,
+				tlp_attr) |
+		     FIELD_PREP(FBNIC_PUL_OB_TLP_HDR_AR_CFG_RQM_ATTR,
+				tlp_attr) |
+		     FIELD_PREP(FBNIC_PUL_OB_TLP_HDR_AR_CFG_TQM_ATTR,
+				tlp_attr));
 		break;
 	}
 
@@ -515,21 +526,20 @@ int fbnic_fw_xmit_ownership_msg(struct fbnic_dev *fbd, bool take_ownership)
 			goto free_message;
 	}
 
-	err = fbnic_mbx_map_tlv_msg(fbd, msg);
-	if (err)
-		goto free_message;
-
 	/* Initialize heartbeat, set last response to 1 second in the past
 	 * so that we will trigger a timeout if the firmware doesn't respond
 	 */
 	fbd->last_heartbeat_response = req_time - HZ;
-
 	fbd->last_heartbeat_request = req_time;
 
 	/* Set prev_firmware_time to 0 to avoid triggering firmware crash
 	 * detection until we receive the second uptime in a heartbeat resp.
 	 */
 	fbd->prev_firmware_time = 0;
+
+	err = fbnic_mbx_map_tlv_msg(fbd, msg);
+	if (err)
+		goto free_message;
 
 	/* Set heartbeat detection based on if we are taking ownership */
 	fbd->fw_heartbeat_enabled = take_ownership;

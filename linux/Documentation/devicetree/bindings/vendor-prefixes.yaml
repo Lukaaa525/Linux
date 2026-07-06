@@ -172,6 +172,8 @@ patternProperties:
     description: ARM Ltd.
   "^armadeus,.*":
     description: ARMadeus Systems SARL
+  "^armchina,.*":
+    description: Arm Technology (China) Co., Ltd.
   "^armsom,.*":
     description: ArmSoM Technology Co., Ltd.
   "^arrow,.*":
@@ -221,10 +223,16 @@ patternProperties:
     description: Axiado Corporation
   "^axis,.*":
     description: Axis Communications AB
+  "^ayaneo,.*":
+    description: Anyun Intelligent Technology (Hong Kong) Co., Ltd
+  "^ayntec,.*":
+    description: AYN Technologies Co., Ltd.
   "^azoteq,.*":
     description: Azoteq (Pty) Ltd
   "^azw,.*":
     description: Shenzhen AZW Technology Co., Ltd.
+  "^baijie,.*":
+    description: Shenzhen Baijie Technology Co., Ltd.
   "^baikal,.*":
     description: BAIKAL ELECTRONICS, JSC
   "^bananapi,.*":
@@ -361,6 +369,8 @@ patternProperties:
     description: CORERIVER Semiconductor Co.,Ltd.
   "^corpro,.*":
     description: Chengdu Corpro Technology Co., Ltd.
+  "^corechips,.*":
+    description: Shenzhen Corechips Microelectronics Co., Ltd.
   "^cortina,.*":
     description: Cortina Systems, Inc.
   "^cosmic,.*":
@@ -431,6 +441,8 @@ patternProperties:
     description: Diodes, Inc.
   "^dioo,.*":
     description: Dioo Microcircuit Co., Ltd
+  "^displaytech,.*":
+    description: Displaytech Ltd.
   "^djn,.*":
     description: Shenzhen DJN Optronics Technology Co., Ltd
   "^dlc,.*":
@@ -483,6 +495,8 @@ patternProperties:
     description: Emtop Embedded Solutions
   "^eeti,.*":
     description: eGalax_eMPIA Technology Inc
+  "^efinix,.*":
+    description: Efinix, Inc.
   "^egnite,.*":
     description: egnite GmbH
   "^einfochips,.*":
@@ -594,6 +608,8 @@ patternProperties:
     description: Flipkart Inc.
   "^focaltech,.*":
     description: FocalTech Systems Co.,Ltd
+  "^focuslcds,.*":
+    description: Focus Display Solutions, Inc.
   "^forlinx,.*":
     description: Baoding Forlinx Embedded Technology Co., Ltd.
   "^foursemi,.*":
@@ -650,6 +666,8 @@ patternProperties:
     description: Giantec Semiconductor, Inc.
   "^giantplus,.*":
     description: Giantplus Technology Co., Ltd.
+  "^gira,.*":
+    description: Gira Giersiepen GmbH & Co. KG
   "^glinet,.*":
     description: GL Intelligence, Inc.
   "^globalscale,.*":
@@ -713,6 +731,8 @@ patternProperties:
     description: Hitex Development Tools
   "^hitron,.*":
     description: HiTRON Electronics Corporation
+  "^holitech,.*":
+    description: Jiangxi Holitech Technology Co., Ltd.
   "^holt,.*":
     description: Holt Integrated Circuits, Inc.
   "^holtek,.*":
@@ -747,6 +767,8 @@ patternProperties:
     description: Hycon Technology Corp.
   "^hydis,.*":
     description: Hydis Technologies
+  "^hynetek,.*":
+    description: Hynetek Semiconductor Co., Ltd.
   "^hynitron,.*":
     description: Shanghai Hynitron Microelectronics Co. Ltd.
   "^hynix,.*":
@@ -971,6 +993,8 @@ patternProperties:
     description: Shenzhen Luckfox Technology Co., Ltd.
   "^lunzn,.*":
     description: Shenzhen Lunzn Technology Co., Ltd.
+  "^luxshare,.*":
+    description: Luxshare-ICT Co., Ltd.
   "^luxul,.*":
     description: Lagrand | AV
   "^lwn,.*":
@@ -1345,6 +1369,8 @@ patternProperties:
     description: Shenzhen QiShenglong Industrialist Co., Ltd.
   "^qnap,.*":
     description: QNAP Systems, Inc.
+  "^qstcorp,.*":
+    description: QST Corporation Limited
   "^quanta,.*":
     description: Quanta Computer Inc.
   "^radxa,.*":
@@ -1393,6 +1419,8 @@ patternProperties:
     description: Embest RIoT
   "^riscv,.*":
     description: RISC-V Foundation
+  "^riverdi,.*":
+    description: Riverdi Sp. z o.o
   "^rockchip,.*":
     description: Rockchip Electronics Co., Ltd.
   "^rocktech,.*":
@@ -1773,6 +1801,8 @@ patternProperties:
     description: Variscite Ltd.
   "^vdl,.*":
     description: Van der Laan b.v.
+  "^verbatim,.*":
+    description: Verbatim Corporation
   "^verisilicon,.*":
     description: VeriSilicon Microelectronics (Shanghai) Co., Ltd.
   "^vertexcom,.*":
@@ -1835,6 +1865,8 @@ patternProperties:
     description: Wi2Wi, Inc.
   "^widora,.*":
     description: Beijing Widora Technology Co., Ltd.
+  "^wiko,.*":
+    description: Wiko SAS
   "^wiligear,.*":
     description: Wiligear, Ltd.
   "^willsemi,.*":
@@ -1903,6 +1935,8 @@ patternProperties:
     description: YSH & ATIL
   "^yones-toptech,.*":
     description: Yones Toptech Co., Ltd.
+  "^youyeetoo,.*":
+    description: Hong Kong Cybodev Tech Limited (youyeetoo)
   "^ys,.*":
     description: Shenzhen Yashi Changhua Intelligent Technology Co., Ltd.
   "^ysoft,.*":

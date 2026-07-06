@@ -29,11 +29,6 @@ static u32 rand32(void)
 	return prandom_u32_state(&rng);
 }
 
-static u32 rand32_below(u32 ceil)
-{
-	return __limit_random_u32_below(ceil, prandom_u32_state(&rng));
-}
-
 /* Reference implementation using dumb byte-wise XOR */
 static void xor_ref(void *dest, void **srcs, unsigned int src_cnt,
 		unsigned int bytes)
@@ -51,15 +46,15 @@ static void xor_ref(void *dest, void **srcs, unsigned int src_cnt,
 }
 
 /* Generate a random length that is a multiple of 512. */
-static unsigned int generate_random_length(unsigned int max_length)
+static unsigned int random_length(unsigned int max_length)
 {
-	return (rand32_below(max_length / 512) + 1) * 512;
+	return round_up((rand32() % max_length) + 1, 512);
 }
 
-/* Generate a random alignment that is a multiple of 32. */
-static unsigned int generate_random_alignment(unsigned int max_alignment)
+/* Generate a random alignment that is a multiple of 64. */
+static unsigned int random_alignment(unsigned int max_alignment)
 {
-	return (rand32_below((max_alignment + 1) / 32)) * 32;
+	return ((rand32() % max_alignment) + 1) & ~63;
 }
 
 static void xor_generate_random_data(void)
@@ -80,8 +75,8 @@ static void xor_test(struct kunit *test)
 
 	for (i = 0; i < XOR_KUNIT_NUM_TEST_ITERS; i++) {
 		unsigned int nr_buffers =
-			rand32_below(XOR_KUNIT_MAX_BUFFERS) + 1;
-		unsigned int len = generate_random_length(XOR_KUNIT_MAX_BYTES);
+			(rand32() % XOR_KUNIT_MAX_BUFFERS) + 1;
+		unsigned int len = random_length(XOR_KUNIT_MAX_BYTES);
 		unsigned int max_alignment, align = 0;
 		void *buffers;
 
@@ -94,16 +89,25 @@ static void xor_test(struct kunit *test)
 		 * alignment into the buffer.
 		 */
 		max_alignment = XOR_KUNIT_MAX_BYTES - len;
-		if (max_alignment) {
+		if (max_alignment == 0) {
+			buffers = test_buffers;
+		} else if (rand32() % 2 == 0) {
+			/* Use random alignments mod 64 */
 			int j;
 
-			align = generate_random_alignment(max_alignment);
 			for (j = 0; j < nr_buffers; j++)
 				aligned_buffers[j] = test_buffers[j] +
-					generate_random_alignment(max_alignment);
+					random_alignment(max_alignment);
 			buffers = aligned_buffers;
+			align = random_alignment(max_alignment);
 		} else {
-			buffers = test_buffers;
+			/* Go up to the guard page, to catch buffer overreads */
+			int j;
+
+			align = test_buflen - len;
+			for (j = 0; j < nr_buffers; j++)
+				aligned_buffers[j] = test_buffers[j] + align;
+			buffers = aligned_buffers;
 		}
 
 		/*
@@ -112,9 +116,12 @@ static void xor_test(struct kunit *test)
 		 */
 		xor_ref(test_ref + align, buffers, nr_buffers, len);
 		xor_gen(test_dest + align, buffers, nr_buffers, len);
-		KUNIT_EXPECT_MEMEQ_MSG(test, test_ref, test_dest, len,
-				"Wrong result with buffers=%u, len=%u, align=%s",
-				nr_buffers, len, str_yes_no(max_alignment));
+		KUNIT_EXPECT_MEMEQ_MSG(test, test_ref + align,
+				test_dest + align, len,
+				"Wrong result with buffers=%u, len=%u, unaligned=%s, at_end=%s",
+				nr_buffers, len,
+				str_yes_no(max_alignment),
+				str_yes_no(align + len == test_buflen));
 	}
 }
 
@@ -176,5 +183,5 @@ static struct kunit_suite xor_test_suite = {
 };
 kunit_test_suite(xor_test_suite);
 
-MODULE_DESCRIPTION("Unit tests and benchmarks for the XOR library functions");
+MODULE_DESCRIPTION("Unit test for the XOR library functions");
 MODULE_LICENSE("GPL");

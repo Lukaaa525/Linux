@@ -18,8 +18,9 @@
 #include <linux/page-flags-layout.h>
 #include <linux/workqueue.h>
 #include <linux/seqlock.h>
-#include <linux/percpu_counter_tree.h>
+#include <linux/percpu_counter.h>
 #include <linux/types.h>
+#include <linux/futex_types.h>
 #include <linux/rseq_types.h>
 #include <linux/bitmap.h>
 
@@ -426,6 +427,7 @@ struct folio {
 			union {
 				void *private;
 				swp_entry_t swap;
+				unsigned long migrate_info;
 			};
 			atomic_t _mapcount;
 			atomic_t _refcount;
@@ -814,6 +816,8 @@ enum mmap_action_type {
 	MMAP_NOTHING,		/* Mapping is complete, no further action. */
 	MMAP_REMAP_PFN,		/* Remap PFN range. */
 	MMAP_IO_REMAP_PFN,	/* I/O remap PFN range. */
+	MMAP_SIMPLE_IO_REMAP,	/* I/O remap with guardrails. */
+	MMAP_MAP_KERNEL_PAGES,	/* Map kernel page range from array. */
 };
 
 /*
@@ -822,34 +826,30 @@ enum mmap_action_type {
  */
 struct mmap_action {
 	union {
-		/* Remap range. */
 		struct {
 			unsigned long start;
 			unsigned long start_pfn;
 			unsigned long size;
 			pgprot_t pgprot;
 		} remap;
+		struct {
+			phys_addr_t start_phys_addr;
+			unsigned long size;
+		} simple_ioremap;
+		struct {
+			unsigned long start;
+			struct page **pages;
+			unsigned long nr_pages;
+			pgoff_t pgoff;
+		} map_kernel;
 	};
 	enum mmap_action_type type;
 
 	/*
-	 * If specified, this hook is invoked after the selected action has been
-	 * successfully completed. Note that the VMA write lock still held.
-	 *
-	 * The absolute minimum ought to be done here.
-	 *
-	 * Returns 0 on success, or an error code.
+	 * If non-zero, replace errors that arise from mmap actions with this
+	 * value instead. Only valid error codes may be specified.
 	 */
-	int (*success_hook)(const struct vm_area_struct *vma);
-
-	/*
-	 * If specified, this hook is invoked when an error occurred when
-	 * attempting the selected action.
-	 *
-	 * The hook can return an error code in order to filter the error, but
-	 * it is not valid to clear the error here.
-	 */
-	int (*error_hook)(int err);
+	int error_override;
 
 	/*
 	 * This should be set in rare instances where the operation required
@@ -870,6 +870,14 @@ typedef struct {
 
 #define EMPTY_VMA_FLAGS ((vma_flags_t){ })
 
+/* Are no flags set in the specified VMA flags? */
+static __always_inline bool vma_flags_empty(const vma_flags_t *flags)
+{
+	const unsigned long *bitmap = flags->__vma_flags;
+
+	return bitmap_empty(bitmap, NUM_VMA_FLAG_BITS);
+}
+
 /*
  * Describes a VMA that is about to be mmap()'ed. Drivers may choose to
  * manipulate mutable fields which will cause those fields to be updated in the
@@ -879,8 +887,8 @@ typedef struct {
  */
 struct vm_area_desc {
 	/* Immutable state. */
-	const struct mm_struct *const mm;
-	struct file *const file; /* May vary from vm_file in stacked callers. */
+	struct mm_struct *mm;
+	struct file *file; /* May vary from vm_file in stacked callers. */
 	unsigned long start;
 	unsigned long end;
 
@@ -1062,16 +1070,43 @@ static __always_inline void vma_flags_clear_all(vma_flags_t *flags)
 }
 
 /*
+ * Helper function which converts a vma_flags_t value to a legacy vm_flags_t
+ * value. This is only valid if the input flags value can be expressed in a
+ * system word.
+ *
+ * Will be removed once the conversion to VMA flags is complete.
+ */
+static __always_inline vm_flags_t vma_flags_to_legacy(vma_flags_t flags)
+{
+	return (vm_flags_t)flags.__vma_flags[0];
+}
+
+/*
  * Copy value to the first system word of VMA flags, non-atomically.
  *
  * IMPORTANT: This does not overwrite bytes past the first system word. The
  * caller must account for this.
  */
-static inline void vma_flags_overwrite_word(vma_flags_t *flags, unsigned long value)
+static __always_inline void vma_flags_overwrite_word(vma_flags_t *flags,
+		unsigned long value)
 {
 	unsigned long *bitmap = flags->__vma_flags;
 
 	bitmap[0] = value;
+}
+
+/*
+ * Helper function which converts a legacy vm_flags_t value to a vma_flags_t
+ * value.
+ *
+ * Will be removed once the conversion to VMA flags is complete.
+ */
+static __always_inline vma_flags_t legacy_to_vma_flags(vm_flags_t flags)
+{
+	vma_flags_t ret = EMPTY_VMA_FLAGS;
+
+	vma_flags_overwrite_word(&ret, flags);
+	return ret;
 }
 
 /*
@@ -1080,7 +1115,8 @@ static inline void vma_flags_overwrite_word(vma_flags_t *flags, unsigned long va
  * IMPORTANT: This does not overwrite bytes past the first system word. The
  * caller must account for this.
  */
-static inline void vma_flags_overwrite_word_once(vma_flags_t *flags, unsigned long value)
+static __always_inline void vma_flags_overwrite_word_once(vma_flags_t *flags,
+		unsigned long value)
 {
 	unsigned long *bitmap = flags->__vma_flags;
 
@@ -1088,7 +1124,8 @@ static inline void vma_flags_overwrite_word_once(vma_flags_t *flags, unsigned lo
 }
 
 /* Update the first system word of VMA flags setting bits, non-atomically. */
-static inline void vma_flags_set_word(vma_flags_t *flags, unsigned long value)
+static __always_inline void vma_flags_set_word(vma_flags_t *flags,
+		unsigned long value)
 {
 	unsigned long *bitmap = flags->__vma_flags;
 
@@ -1096,7 +1133,8 @@ static inline void vma_flags_set_word(vma_flags_t *flags, unsigned long value)
 }
 
 /* Update the first system word of VMA flags clearing bits, non-atomically. */
-static inline void vma_flags_clear_word(vma_flags_t *flags, unsigned long value)
+static __always_inline void vma_flags_clear_word(vma_flags_t *flags,
+		unsigned long value)
 {
 	unsigned long *bitmap = flags->__vma_flags;
 
@@ -1117,19 +1155,6 @@ static inline void vma_flags_clear_word(vma_flags_t *flags, unsigned long value)
 typedef struct {
 	DECLARE_BITMAP(__mm_flags, NUM_MM_FLAG_BITS);
 } __private mm_flags_t;
-
-/*
- * The alignment of the mm_struct flexible array is based on the largest
- * alignment of its content:
- * __alignof__(struct percpu_counter_tree_level_item) provides a
- * cacheline aligned alignment on SMP systems, else alignment on
- * unsigned long on UP systems.
- */
-#ifdef CONFIG_SMP
-# define __mm_struct_flexible_array_aligned	__aligned(__alignof__(struct percpu_counter_tree_level_item))
-#else
-# define __mm_struct_flexible_array_aligned	__aligned(__alignof__(unsigned long))
-#endif
 
 struct kioctx_table;
 struct iommu_mm_data;
@@ -1186,6 +1211,8 @@ struct mm_struct {
 		/* MM CID related storage */
 		struct mm_mm_cid mm_cid;
 
+		/* sched_cache related statistics */
+		struct sched_cache_stat sc_stat;
 #ifdef CONFIG_MMU
 		atomic_long_t pgtables_bytes;	/* size of all page tables */
 #endif
@@ -1234,16 +1261,7 @@ struct mm_struct {
 		 */
 		seqcount_t mm_lock_seq;
 #endif
-#ifdef CONFIG_FUTEX_PRIVATE_HASH
-		struct mutex			futex_hash_lock;
-		struct futex_private_hash	__rcu *futex_phash;
-		struct futex_private_hash	*futex_phash_new;
-		/* futex-ref */
-		unsigned long			futex_batches;
-		struct rcu_head			futex_rcu;
-		atomic_long_t			futex_atomic;
-		unsigned int			__percpu *futex_ref;
-#endif
+		struct futex_mm_data	futex;
 
 		unsigned long hiwater_rss; /* High-watermark of RSS usage */
 		unsigned long hiwater_vm;  /* High-water virtual memory usage */
@@ -1254,7 +1272,11 @@ struct mm_struct {
 		unsigned long data_vm;	   /* VM_WRITE & ~VM_SHARED & ~VM_STACK */
 		unsigned long exec_vm;	   /* VM_EXEC & ~VM_WRITE & ~VM_STACK */
 		unsigned long stack_vm;	   /* VM_STACK */
-		vm_flags_t def_flags;
+		union {
+			/* Temporary while VMA flags are being converted. */
+			vm_flags_t def_flags;
+			vma_flags_t def_vma_flags;
+		};
 
 		/**
 		 * @write_protect_seq: Locked when any thread is write
@@ -1276,7 +1298,7 @@ struct mm_struct {
 		unsigned long saved_e_flags;
 #endif
 
-		struct percpu_counter_tree rss_stat[NR_MM_COUNTERS];
+		struct percpu_counter rss_stat[NR_MM_COUNTERS];
 
 		struct linux_binfmt *binfmt;
 
@@ -1302,7 +1324,6 @@ struct mm_struct {
 		 */
 		struct task_struct __rcu *owner;
 #endif
-		struct user_namespace *user_ns;
 
 		/* store ref to file /proc/<pid>/exe symlink points to */
 		struct file __rcu *exe_file;
@@ -1387,13 +1408,10 @@ struct mm_struct {
 	} __randomize_layout;
 
 	/*
-	 * The rss hierarchical counter items, mm_cpumask, and mm_cid
-	 * masks need to be at the end of mm_struct, because they are
-	 * dynamically sized based on nr_cpu_ids.
-	 * The content of the flexible array needs to be placed in
-	 * decreasing alignment requirement order.
+	 * The mm_cpumask needs to be at the end of mm_struct, because it
+	 * is dynamically sized based on nr_cpu_ids.
 	 */
-	char flexible_array[] __mm_struct_flexible_array_aligned;
+	char flexible_array[] __aligned(__alignof__(unsigned long));
 };
 
 /* Copy value to the first system word of mm flags, non-atomically. */
@@ -1430,30 +1448,24 @@ static inline void __mm_flags_set_mask_bits_word(struct mm_struct *mm,
 			 MT_FLAGS_USE_RCU)
 extern struct mm_struct init_mm;
 
-#define MM_STRUCT_FLEXIBLE_ARRAY_INIT									\
-{													\
-	[0 ... (PERCPU_COUNTER_TREE_ITEMS_STATIC_SIZE * NR_MM_COUNTERS) + sizeof(cpumask_t) + MM_CID_STATIC_SIZE - 1] = 0	\
+#define MM_STRUCT_FLEXIBLE_ARRAY_INIT				\
+{								\
+	[0 ... sizeof(cpumask_t) + MM_CID_STATIC_SIZE - 1] = 0	\
 }
 
-static inline size_t get_rss_stat_items_size(void)
+/* Pointer magic because the dynamic array size confuses some compilers. */
+static inline void mm_init_cpumask(struct mm_struct *mm)
 {
-	return percpu_counter_tree_items_size() * NR_MM_COUNTERS;
+	unsigned long cpu_bitmap = (unsigned long)mm;
+
+	cpu_bitmap += offsetof(struct mm_struct, flexible_array);
+	cpumask_clear((struct cpumask *)cpu_bitmap);
 }
 
 /* Future-safe accessor for struct mm_struct's cpu_vm_mask. */
 static inline cpumask_t *mm_cpumask(struct mm_struct *mm)
 {
-	unsigned long ptr = (unsigned long)mm;
-
-	ptr += offsetof(struct mm_struct, flexible_array);
-	/* Skip RSS stats counters. */
-	ptr += get_rss_stat_items_size();
-	return (struct cpumask *)ptr;
-}
-
-static inline void mm_init_cpumask(struct mm_struct *mm)
-{
-	cpumask_clear((struct cpumask *)mm_cpumask(mm));
+	return (struct cpumask *)&mm->flexible_array;
 }
 
 #ifdef CONFIG_LRU_GEN
@@ -1545,8 +1557,6 @@ static inline cpumask_t *mm_cpus_allowed(struct mm_struct *mm)
 	unsigned long bitmap = (unsigned long)mm;
 
 	bitmap += offsetof(struct mm_struct, flexible_array);
-	/* Skip RSS stats counters. */
-	bitmap += get_rss_stat_items_size();
 	/* Skip cpu_bitmap */
 	bitmap += cpumask_size();
 	return (struct cpumask *)bitmap;
@@ -1598,6 +1608,36 @@ static inline unsigned int mm_cid_size(void)
 }
 # define MM_CID_STATIC_SIZE	0
 #endif /* CONFIG_SCHED_MM_CID */
+
+#ifdef CONFIG_SCHED_CACHE
+void mm_init_sched(struct mm_struct *mm,
+		   struct sched_cache_time __percpu *pcpu_sched);
+
+static inline int mm_alloc_sched_noprof(struct mm_struct *mm)
+{
+	struct sched_cache_time __percpu *pcpu_sched =
+		alloc_percpu_noprof(struct sched_cache_time);
+
+	if (!pcpu_sched)
+		return -ENOMEM;
+
+	mm_init_sched(mm, pcpu_sched);
+	return 0;
+}
+
+#define mm_alloc_sched(...)	alloc_hooks(mm_alloc_sched_noprof(__VA_ARGS__))
+
+static inline void mm_destroy_sched(struct mm_struct *mm)
+{
+	free_percpu(mm->sc_stat.pcpu_sched);
+	mm->sc_stat.pcpu_sched = NULL;
+}
+#else /* !CONFIG_SCHED_CACHE */
+
+static inline int mm_alloc_sched(struct mm_struct *mm) { return 0; }
+static inline void mm_destroy_sched(struct mm_struct *mm) { }
+
+#endif /* CONFIG_SCHED_CACHE */
 
 struct mmu_gather;
 extern void tlb_gather_mmu(struct mmu_gather *tlb, struct mm_struct *mm);
@@ -1878,11 +1918,11 @@ enum {
 /* mm flags */
 
 /*
- * The first two bits represent core dump modes for set-user-ID,
- * the modes are SUID_DUMP_* defined in linux/sched/coredump.h
+ * Bits 0 and 1 were dumpability; that moved to task->exec_state.  Reserve
+ * the bits so MMF_DUMP_FILTER_* positions stay stable for the
+ * /proc/<pid>/coredump_filter ABI.
  */
 #define MMF_DUMPABLE_BITS 2
-#define MMF_DUMPABLE_MASK (BIT(MMF_DUMPABLE_BITS) - 1)
 /* coredump filter bits */
 #define MMF_DUMP_ANON_PRIVATE	2
 #define MMF_DUMP_ANON_SHARED	3
@@ -1943,7 +1983,7 @@ enum {
 #define MMF_TOPDOWN		31	/* mm searches top down by default */
 #define MMF_TOPDOWN_MASK	BIT(MMF_TOPDOWN)
 
-#define MMF_INIT_LEGACY_MASK	(MMF_DUMPABLE_MASK | MMF_DUMP_FILTER_MASK |\
+#define MMF_INIT_LEGACY_MASK	(MMF_DUMP_FILTER_MASK |\
 				 MMF_DISABLE_THP_MASK | MMF_HAS_MDWE_MASK |\
 				 MMF_VM_MERGE_ANY_MASK | MMF_TOPDOWN_MASK)
 

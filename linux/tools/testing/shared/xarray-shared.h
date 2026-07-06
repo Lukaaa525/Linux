@@ -2,7 +2,7 @@
 #ifndef __XARRAY_SHARED_H__
 #define __XARRAY_SHARED_H__
 
-#define CONFIG_DEBUG_XARRAY
+#define XA_DEBUG
 #include "shared.h"
 
 #endif /* __XARRAY_SHARED_H__ */

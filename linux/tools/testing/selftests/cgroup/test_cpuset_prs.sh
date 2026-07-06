@@ -492,6 +492,23 @@ REMOTE_TEST_MATRIX=(
 	"  C1-5:P1   .  C1-4:P1   C2-3     .       .  \
 	      .      .     .       P1      .       .     p1:5|c11:1-4|c12:5 \
 							 p1:P1|c11:P1|c12:P-1"
+	# Narrowing cpuset.cpus to previously sibling-excluded CPUs should
+	# not return CPUs that were never actually owned.
+	"  C1-4:P1   .   C1-2:P1  C1-3:P2  .       .  \
+	      .      .     .       C3      .       .     p1:4|c11:1-2|c12:3 \
+							 p1:P1|c11:P1|c12:P2 3"
+	# Expanding cpuset.cpus to include a previously sibling-excluded CPU
+	# after the sibling has become a member should correctly request it.
+	"  C1-4:P1   .   C1-2:P1  C1-3:P2  .       .  \
+	      .      .     P0      C2-3    .       .     p1:1,4|c11:1|c12:2-3 \
+							 p1:P1|c11:P0|c12:P2 2-3"
+	# Cpusets with empty cpuset.cpus should inherit parent's effective_cpus
+	"  C1-4:P1 C5-6   C1-2     .       C5      .  \
+	      .      P1    P1      .       .       .     p1:3-4|p2:5-6|c11:1-2|c12:3-4|c21:5|c22:5-6 \
+							 p1:P1|p2:P1|c11:P1"
+	"  C1-4:P1 C5-6   C1-2     .       C5      .  \
+	      .      P1    P1      .      O5=0     .     p1:3-4|p2:6|c11:1-2|c12:3-4|c21:6|c22:6 \
+							 p1:P1|p2:P1|c11:P1"
 )
 
 #
@@ -617,7 +634,7 @@ set_ctrl_state_noerr()
 
 online_cpus()
 {
-	[[ -n "OFFLINE_CPUS" ]] && {
+	[[ -n "$OFFLINE_CPUS" ]] && {
 		for C in $OFFLINE_CPUS
 		do
 			write_cpu_online ${C}=1

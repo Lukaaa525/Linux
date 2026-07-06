@@ -43,6 +43,7 @@
 static void optc31_set_odm_combine(struct timing_generator *optc, int *opp_id, int opp_cnt,
 		int segment_width, int last_segment_width)
 {
+	(void)last_segment_width;
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 	uint32_t memory_mask = 0;
 	int mem_count_per_opp = (segment_width + 2559) / 2560;
@@ -104,15 +105,10 @@ static bool optc31_enable_crtc(struct timing_generator *optc)
 	REG_UPDATE(CONTROL,
 			VTG0_ENABLE, 1);
 
-	REG_SEQ_START();
-
 	/* Enable CRTC */
 	REG_UPDATE_2(OTG_CONTROL,
 			OTG_DISABLE_POINT_CNTL, 2,
 			OTG_MASTER_EN, 1);
-
-	REG_SEQ_SUBMIT();
-	REG_SEQ_WAIT_DONE();
 
 	return true;
 }
@@ -318,6 +314,8 @@ void optc31_read_otg_state(struct timing_generator *optc,
 void optc31_read_reg_state(struct timing_generator *optc, struct dcn_optc_reg_state *optc_reg_state)
 {
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
+
+	optc_reg_state->otg_drr_v_total_reach_range = REG_READ(OTG_DRR_V_TOTAL_REACH_RANGE);
 
 	optc_reg_state->optc_bytes_per_pixel = REG_READ(OPTC_BYTES_PER_PIXEL);
 	optc_reg_state->optc_data_format_control = REG_READ(OPTC_DATA_FORMAT_CONTROL);

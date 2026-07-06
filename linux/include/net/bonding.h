@@ -69,9 +69,6 @@
 #define bond_first_slave_rcu(bond) \
 	netdev_lower_get_first_private_rcu(bond->dev)
 
-#define bond_is_first_slave(bond, pos) (pos == bond_first_slave(bond))
-#define bond_is_last_slave(bond, pos) (pos == bond_last_slave(bond))
-
 /**
  * bond_for_each_slave - iterate over all slaves
  * @bond:	the bond holding this list
@@ -132,6 +129,7 @@ struct bond_params {
 	int peer_notif_delay;
 	int lacp_active;
 	int lacp_fast;
+	int lacp_strict;
 	unsigned int min_links;
 	int ad_select;
 	char primary[IFNAMSIZ];
@@ -347,14 +345,14 @@ static inline bool bond_mode_uses_primary(int mode)
 	       mode == BOND_MODE_ALB;
 }
 
-static inline bool bond_uses_primary(struct bonding *bond)
+static inline bool bond_uses_primary(const struct bonding *bond)
 {
 	return bond_mode_uses_primary(BOND_MODE(bond));
 }
 
-static inline struct net_device *bond_option_active_slave_get_rcu(struct bonding *bond)
+static inline struct net_device *bond_option_active_slave_get_rcu(const struct bonding *bond)
 {
-	struct slave *slave = rcu_dereference_rtnl(bond->curr_active_slave);
+	const struct slave *slave = rcu_dereference_rtnl(bond->curr_active_slave);
 
 	return bond_uses_primary(bond) && slave ? slave->dev : NULL;
 }
@@ -705,7 +703,7 @@ void bond_setup(struct net_device *bond_dev);
 unsigned int bond_get_num_tx_queues(void);
 int bond_netlink_init(void);
 void bond_netlink_fini(void);
-struct net_device *bond_option_active_slave_get_rcu(struct bonding *bond);
+struct net_device *bond_option_active_slave_get_rcu(const struct bonding *bond);
 const char *bond_slave_link_status(s8 link);
 struct bond_vlan_tag *bond_verify_device_path(struct net_device *start_dev,
 					      struct net_device *end_dev,

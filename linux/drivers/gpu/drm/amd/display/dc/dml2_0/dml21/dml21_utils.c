@@ -88,6 +88,7 @@ int dml21_find_dc_pipes_for_plane(const struct dc *in_dc,
 		struct pipe_ctx *dc_phantom_pipes[__DML2_WRAPPER_MAX_STREAMS_PLANES__],
 		int dml_plane_idx)
 {
+	(void)in_dc;
 	unsigned int dml_stream_index;
 	unsigned int main_stream_id;
 	unsigned int dc_plane_index;
@@ -266,7 +267,7 @@ static struct dc_stream_state *dml21_add_phantom_stream(struct dml2_context *dml
 	phantom_stream->dst.height = stream_programming->phantom_stream.descriptor.timing.v_active;
 
 	phantom_stream->src.y = 0;
-	phantom_stream->src.height = (double)phantom_stream_descriptor->timing.v_active * (double)main_stream->src.height / (double)main_stream->dst.height;
+	phantom_stream->src.height = (int)((double)phantom_stream_descriptor->timing.v_active * (double)main_stream->src.height / (double)main_stream->dst.height);
 
 	phantom_stream->use_dynamic_meta = false;
 
@@ -282,6 +283,7 @@ static struct dc_plane_state *dml21_add_phantom_plane(struct dml2_context *dml_c
 	struct dc_plane_state *main_plane,
 	struct dml2_per_plane_programming *plane_programming)
 {
+	(void)plane_programming;
 	struct dc_plane_state *phantom_plane;
 
 	phantom_plane = dml_ctx->config.svp_pstate.callbacks.create_phantom_plane(dc, context, main_plane);
@@ -420,8 +422,12 @@ static unsigned int dml21_build_fams2_stream_programming_v2(const struct dc *dc,
 			type = static_base_state->stream_v1.base.type;
 
 			/* get information from context */
-			static_base_state->stream_v1.base.num_planes = context->stream_status[dc_stream_idx].plane_count;
-			static_base_state->stream_v1.base.otg_inst = context->stream_status[dc_stream_idx].primary_otg_inst;
+			ASSERT(context->stream_status[dc_stream_idx].plane_count >= 0 &&
+					context->stream_status[dc_stream_idx].plane_count <= 0xFF);
+			ASSERT(context->stream_status[dc_stream_idx].primary_otg_inst >= 0 &&
+					context->stream_status[dc_stream_idx].primary_otg_inst <= 0xFF);
+			static_base_state->stream_v1.base.num_planes = (uint8_t)context->stream_status[dc_stream_idx].plane_count;
+			static_base_state->stream_v1.base.otg_inst = (uint8_t)context->stream_status[dc_stream_idx].primary_otg_inst;
 
 			/* populate pipe masks for planes */
 			for (dc_plane_idx = 0; dc_plane_idx < context->stream_status[dc_stream_idx].plane_count; dc_plane_idx++) {
@@ -458,7 +464,9 @@ static unsigned int dml21_build_fams2_stream_programming_v2(const struct dc *dc,
 			switch (dc->debug.fams_version.minor) {
 			case 1:
 			default:
-				static_sub_state->stream_v1.sub_state.subvp.phantom_otg_inst = phantom_status->primary_otg_inst;
+				ASSERT(phantom_status->primary_otg_inst >= 0 &&
+						phantom_status->primary_otg_inst <= 0xFF);
+				static_sub_state->stream_v1.sub_state.subvp.phantom_otg_inst = (uint8_t)phantom_status->primary_otg_inst;
 
 				/* populate pipe masks for phantom planes */
 				for (dc_plane_idx = 0; dc_plane_idx < phantom_status->plane_count; dc_plane_idx++) {
@@ -516,7 +524,8 @@ void dml21_build_fams2_programming(const struct dc *dc,
 		context->bw_ctx.bw.dcn.fams2_global_config.num_streams = num_fams2_streams;
 	}
 
-	context->bw_ctx.bw.dcn.clk.fw_based_mclk_switching = context->bw_ctx.bw.dcn.fams2_global_config.features.bits.enable;
+	context->bw_ctx.bw.dcn.clk.fw_based_mclk_switching =
+			(context->bw_ctx.bw.dcn.fams2_global_config.features.bits.enable != 0);
 }
 
 bool dml21_is_plane1_enabled(enum dml2_source_format_class source_format)

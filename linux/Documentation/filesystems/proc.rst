@@ -23,13 +23,13 @@ fixes/update part 1.1  Stefani Seibold <stefani@seibold.net>    June 9 2009
   1	Collecting System Information
   1.1	Process-Specific Subdirectories
   1.2	Kernel data
-  1.3	IDE devices in /proc/ide
-  1.4	Networking info in /proc/net
-  1.5	SCSI info
-  1.6	Parallel port info in /proc/parport
-  1.7	TTY info in /proc/tty
-  1.8	Miscellaneous kernel statistics in /proc/stat
-  1.9	Ext4 file system parameters
+  1.3	Networking info in /proc/net
+  1.4	SCSI info
+  1.5	Parallel port info in /proc/parport
+  1.6	TTY info in /proc/tty
+  1.7	Miscellaneous kernel statistics in /proc/stat
+  1.8	Ext4 file system parameters
+  1.9	/proc/consoles - Shows registered system consoles
 
   2	Modifying System Parameters
 
@@ -52,6 +52,7 @@ fixes/update part 1.1  Stefani Seibold <stefani@seibold.net>    June 9 2009
 
   4	Configuring procfs
   4.1	Mount options
+  4.2	Mount restrictions
 
   5	Filesystem behavior
 
@@ -118,7 +119,7 @@ PTRACE_MODE_ATTACH permissions; CAP_PERFMON capability does not grant access
 to /proc/PID/mem for other processes.
 
 Note that an open file descriptor to /proc/<pid> or to any of its
-contained files or subdirectories does not prevent <pid> being reused
+contained files or subdirectories does not prevent <pid> from being reused
 for some other process in the event that <pid> exits. Operations on
 open /proc/<pid> file descriptors corresponding to dead processes
 never act on any new process that the kernel may, through chance, have
@@ -565,6 +566,10 @@ does not take into account swapped out page of underlying shmem objects.
 naturally aligned THP pages of any currently enabled size. 1 if true, 0
 otherwise.
 
+If both the kernel and the CPU support protection keys (pkeys),
+"ProtectionKey" indicates the memory protection key associated with the
+virtual memory area.
+
 "VmFlags" field deserves a separate description. This member represents the
 kernel flags associated with the particular virtual memory area in two letter
 encoded manner. The codes are the following:
@@ -743,7 +748,7 @@ files are there, and which are missing.
               in the kernel image
  cpuinfo      Info about the CPU
  devices      Available devices (block and character)
- dma          Used DMS channels
+ dma          Used DMA channels
  filesystems  Supported filesystems
  driver       Various drivers grouped here, currently rtc	(2.4)
  execdomains  Execdomains, related to security			(2.4)
@@ -877,14 +882,13 @@ i386 and x86_64 platforms support the new IRQ vector displays.
 Of some interest is the introduction of the /proc/irq directory to 2.4.
 It could be used to set IRQ to CPU affinity. This means that you can "hook" an
 IRQ to only one CPU, or to exclude a CPU of handling IRQs. The contents of the
-irq subdir is one subdir for each IRQ, and two files; default_smp_affinity and
-prof_cpu_mask.
+irq subdir is one subdir for each IRQ, and default_smp_affinity.
 
 For example::
 
   > ls /proc/irq/
-  0  10  12  14  16  18  2  4  6  8  prof_cpu_mask
-  1  11  13  15  17  19  3  5  7  9  default_smp_affinity
+  0  10  12  14  16  18  2  4  6  8  default_smp_affinity
+  1  11  13  15  17  19  3  5  7  9
   > ls /proc/irq/0/
   smp_affinity
 
@@ -914,9 +918,6 @@ IRQs which have not yet been allocated/activated, and hence which lack a
 The node file on an SMP system shows the node to which the device using the IRQ
 reports itself as being attached. This hardware locality information does not
 include information about any possible driver locality preference.
-
-prof_cpu_mask specifies which CPUs are to be profiled by the system wide
-profiler. Default value is ffffffff (all CPUs if there are only 32 of them).
 
 The way IRQs are routed is handled by the IO-APIC, and it's Round Robin
 between all the CPUs which are allowed to handle it. As usual the kernel has
@@ -1105,6 +1106,8 @@ Example output. You may not have all of these fields.
     CmaFree:               0 kB
     Unaccepted:            0 kB
     Balloon:               0 kB
+    GPUActive:             0 kB
+    GPUReclaim:            0 kB
     HugePages_Total:       0
     HugePages_Free:        0
     HugePages_Rsvd:        0
@@ -1285,6 +1288,12 @@ Unaccepted
               Memory that has not been accepted by the guest
 Balloon
               Memory returned to Host by VM Balloon Drivers
+GPUActive
+              System memory allocated to active GPU objects
+GPUReclaim
+              System memory stored in GPU pools for reuse. This memory is not
+              counted in GPUActive. It is shrinker reclaimable memory kept in a reuse
+              pool because it has non-standard page table attributes, like WC or UC.
 HugePages_Total, HugePages_Free, HugePages_Rsvd, HugePages_Surp, Hugepagesize, Hugetlb
               See Documentation/admin-guide/mm/hugetlbpage.rst.
 DirectMap4k, DirectMap2M, DirectMap1G
@@ -2203,7 +2212,7 @@ the process is maintaining.  Example output::
      | lr-------- 1 root root 64 Jan 27 11:24 400000-41a000 -> /usr/bin/ls
 
 The name of a link represents the virtual memory bounds of a mapping, i.e.
-vm_area_struct::vm_start-vm_area_struct::vm_end.
+vm_area_struct::vm_start - vm_area_struct::vm_end.
 
 The main purpose of the map_files is to retrieve a set of memory mapped
 files in a fast way instead of parsing /proc/<pid>/maps or
@@ -2417,7 +2426,9 @@ prohibited by hidepid=.  If you use some daemon like identd which needs to learn
 information about processes information, just add identd to this group.
 
 subset=pid hides all top level files and directories in the procfs that
-are not related to tasks.
+are not related to tasks. This option cannot be changed on an existing
+procfs instance because overmounts that existed before the change could
+otherwise remain reachable after the top level procfs entries are hidden.
 
 pidns= specifies a pid namespace (either as a string path to something like
 `/proc/$pid/ns/pid`, or a file descriptor when using `FSCONFIG_SET_FD`) that
@@ -2425,6 +2436,20 @@ will be used by the procfs instance when translating pids. By default, procfs
 will use the calling process's active pid namespace. Note that the pid
 namespace of an existing procfs instance cannot be modified (attempting to do
 so will give an `-EBUSY` error).
+
+4.2	Mount restrictions
+--------------------------
+
+If user namespaces are in use, the kernel additionally checks the instances of
+procfs available to the mounter and will not allow procfs to be mounted if:
+
+  1. This mount is not fully visible unless the new procfs is going to be
+     mounted with subset=pid option.
+
+     a. Its root directory is not the root directory of the filesystem.
+     b. If any file or non-empty procfs directory is hidden by another mount.
+
+  2. A new mount overrides the readonly option or any option from atime family.
 
 Chapter 5: Filesystem behavior
 ==============================

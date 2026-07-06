@@ -15,6 +15,7 @@
 #include <linux/sched/clock.h>
 
 #include <asm/apic.h>
+#include <asm/cpuid/api.h>
 #include <asm/msr.h>
 
 #include "../perf_event.h"
@@ -1600,7 +1601,7 @@ perf_ibs_nmi_handler(unsigned int cmd, struct pt_regs *regs)
 	handled += perf_ibs_handle_irq(&perf_ibs_op, regs);
 
 	if (handled)
-		inc_irq_stat(apic_perf_irqs);
+		inc_perf_irq_stat();
 
 	perf_sample_event_took(sched_clock() - stamp);
 
@@ -1748,7 +1749,7 @@ EXPORT_SYMBOL(get_ibs_caps);
 
 static inline int get_eilvt(int offset)
 {
-	return !setup_APIC_eilvt(offset, 0, APIC_EILVT_MSG_NMI, 1);
+	return !setup_APIC_eilvt(offset, 0, APIC_DELIVERY_MODE_NMI, 1);
 }
 
 static inline int put_eilvt(int offset)
@@ -1897,7 +1898,7 @@ static void setup_APIC_ibs(void)
 	if (offset < 0)
 		goto failed;
 
-	if (!setup_APIC_eilvt(offset, 0, APIC_EILVT_MSG_NMI, 0))
+	if (!setup_APIC_eilvt(offset, 0, APIC_DELIVERY_MODE_NMI, 0))
 		return;
 failed:
 	pr_warn("perf: IBS APIC setup failed on cpu #%d\n",
@@ -1910,7 +1911,7 @@ static void clear_APIC_ibs(void)
 
 	offset = get_ibs_lvt_offset();
 	if (offset >= 0)
-		setup_APIC_eilvt(offset, 0, APIC_EILVT_MSG_FIX, 1);
+		setup_APIC_eilvt(offset, 0, APIC_DELIVERY_MODE_FIXED, 1);
 }
 
 static int x86_pmu_amd_ibs_starting_cpu(unsigned int cpu)

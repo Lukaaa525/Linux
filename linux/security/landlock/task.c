@@ -191,10 +191,13 @@ static bool domain_is_scoped(const struct landlock_ruleset *const client,
 	client_layer = client->num_layers - 1;
 	client_walker = client->hierarchy;
 	/*
-	 * client_layer must be a signed integer with greater capacity
-	 * than client->num_layers to ensure the following loop stops.
+	 * client_layer must be able to represent all numbers from
+	 * LANDLOCK_MAX_NUM_LAYERS - 1 to -1 for the loop below to terminate.
+	 * (It must be large enough, and it must be signed.)
 	 */
-	BUILD_BUG_ON(sizeof(client_layer) > sizeof(client->num_layers));
+	BUILD_BUG_ON(!is_signed_type(typeof(client_layer)));
+	BUILD_BUG_ON(LANDLOCK_MAX_NUM_LAYERS - 1 >
+		     type_max(typeof(client_layer)));
 
 	server_layer = server ? (server->num_layers - 1) : -1;
 	server_walker = server ? server->hierarchy : NULL;
@@ -406,6 +409,17 @@ static int hook_file_send_sigiotask(struct task_struct *tsk,
 	 * landlock_get_applicable_subject() here.
 	 */
 	if (!subject->domain)
+		return 0;
+
+	/*
+	 * Always allow delivery to the file owner's own process, including a
+	 * thread-group leader reached through a process-group owner.  This
+	 * mirrors hook_task_kill()'s same-process exemption and preserves the
+	 * guarantee of commit 18eb75f3af40 ("landlock: Always allow signals
+	 * between threads of the same process"), which the registration-time
+	 * check cannot honor for a process-group target.
+	 */
+	if (task_tgid(tsk) == landlock_file(fown->file)->fown_tg)
 		return 0;
 
 	scoped_guard(rcu)

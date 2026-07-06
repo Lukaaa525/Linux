@@ -42,6 +42,7 @@ class Netlink:
     SOL_NETLINK = 270
 
     NETLINK_ADD_MEMBERSHIP = 1
+    NETLINK_LISTEN_ALL_NSID = 8
     NETLINK_CAP_ACK = 10
     NETLINK_EXT_ACK = 11
     NETLINK_GET_STRICT_CHK = 12
@@ -143,32 +144,117 @@ class ConfigError(Exception):
     pass
 
 
-# pylint: disable=too-few-public-methods
 class NlPolicy:
     """Kernel policy for one mode (do or dump) of one operation.
 
-    Returned by YnlFamily.get_policy(). Contains a dict of attributes
-    the kernel accepts, with their validation constraints.
+    Returned by YnlFamily.get_policy(). Attributes of the policy
+    are accessible as attributes of the object. Nested policies
+    can be accessed indexing the object like a dictionary::
 
-    Attributes:
-        attrs: dict mapping attribute names to policy dicts, e.g.
-        page-pool-stats-get do policy::
+        pol = ynl.get_policy('page-pool-stats-get', 'do')
+        pol['info'].type            # 'nested'
+        pol['info']['id'].type      # 'uint'
+        pol['info']['id'].min_value # 1
 
-            {
-                'info': {'type': 'nested', 'policy': {
-                    'id':      {'type': 'uint', 'min-value': 1,
-                                'max-value': 4294967295},
-                    'ifindex': {'type': 'u32', 'min-value': 1,
-                                'max-value': 2147483647},
-                }},
-            }
+    Each policy entry always has a 'type' attribute (e.g. u32, string,
+    nested). Optional attributes depending on the 'type': min-value,
+    max-value, min-length, max-length, mask.
 
-        Each policy dict always contains 'type' (e.g. u32, string,
-        nested). Optional keys: min-value, max-value, min-length,
-        max-length, mask, policy.
+    Policies can form infinite nesting loops. These loops are trimmed
+    when policy is converted to a dict with pol.to_dict().
     """
-    def __init__(self, attrs):
-        self.attrs = attrs
+    def __init__(self, ynl, policy_idx, policy_table, attr_set, props=None):
+        self._policy_idx = policy_idx
+        self._policy_table = policy_table
+        self._ynl = ynl
+        self._props = props or {}
+        self._entries = {}
+        self._cache = {}
+        if policy_idx is not None and policy_idx in policy_table:
+            for attr_id, decoded in policy_table[policy_idx].items():
+                if attr_set and attr_id in attr_set.attrs_by_val:
+                    spec = attr_set.attrs_by_val[attr_id]
+                    name = spec['name']
+                else:
+                    spec = None
+                    name = f'attr-{attr_id}'
+                self._entries[name] = (spec, decoded)
+
+    def __getitem__(self, name):
+        """Descend into a nested policy by attribute name."""
+        if name not in self._cache:
+            spec, decoded = self._entries[name]
+            props = dict(decoded)
+            child_idx = None
+            child_set = None
+            if 'policy-idx' in props:
+                child_idx = props.pop('policy-idx')
+                if spec and 'nested-attributes' in spec.yaml:
+                    child_set = self._ynl.attr_sets[spec.yaml['nested-attributes']]
+            self._cache[name] = NlPolicy(self._ynl, child_idx,
+                                         self._policy_table,
+                                         child_set, props)
+        return self._cache[name]
+
+    def __getattr__(self, name):
+        """Access this policy entry's own properties (type, min-value, etc.).
+
+        Underscores in the name are converted to dashes, so that
+        pol.min_value looks up "min-value".
+        """
+        key = name.replace('_', '-')
+        try:
+            # Hack for level-0 which we still want to have .type but we don't
+            # want type to pointlessly show up in the dict / JSON form.
+            if not self._props and name == "type":
+                return "nested"
+            return self._props[key]
+        except KeyError:
+            raise AttributeError(name)
+
+    def get(self, name, default=None):
+        """Look up a child policy entry by attribute name, with a default."""
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+    def __contains__(self, name):
+        return name in self._entries
+
+    def __len__(self):
+        return len(self._entries)
+
+    def __iter__(self):
+        return iter(self._entries)
+
+    def keys(self):
+        """Return attribute names accepted by this policy."""
+        return self._entries.keys()
+
+    def to_dict(self, seen=None):
+        """Convert to a plain dict, suitable for JSON serialization.
+
+        Nested NlPolicy objects are expanded recursively. Cyclic
+        references are trimmed (resolved to just {"type": "nested"}).
+        """
+        if seen is None:
+            seen = set()
+        result = dict(self._props)
+        if self._policy_idx is not None:
+            if self._policy_idx not in seen:
+                seen = seen | {self._policy_idx}
+                children = {}
+                for name in self:
+                    children[name] = self[name].to_dict(seen)
+                if self._props:
+                    result['policy'] = children
+                else:
+                    result = children
+        return result
+
+    def __repr__(self):
+        return repr(self.to_dict())
 
 
 class NlAttr:
@@ -575,6 +661,14 @@ class YnlFamily(SpecFamily):
     """
     YNL family -- a Netlink interface built from a YAML spec.
 
+    The spec can be selected either by file path (def_path=) or, when it
+    ships in a well-known location, by family name (family="xyz"); exactly
+    one of the two must be given. For example:
+
+      from pyynl import YnlFamily
+
+      ynl = YnlFamily(family="netdev")
+
     Primary use of the class is to execute Netlink commands:
 
       ynl.<op_name>(attrs, ...)
@@ -595,6 +689,8 @@ class YnlFamily(SpecFamily):
     Notification API:
 
       ynl.ntf_subscribe(mcast_name)      -- join a multicast group
+      ynl.ntf_listen_all_nsid()          -- listen on all netns
+      ynl.ntf_bind(addr=(0, 0))          -- bind socket for unicast notifications
       ynl.check_ntf()                    -- drain pending notifications
       ynl.poll_ntf(duration=None)        -- yield notifications
 
@@ -603,11 +699,16 @@ class YnlFamily(SpecFamily):
 
       ynl.get_policy(op_name, mode)      -- query kernel policy for an op
     """
-    def __init__(self, def_path, schema=None, process_unknown=False,
-                 recv_size=0):
-        super().__init__(def_path, schema)
+    def __init__(self, def_path=None, schema=None, process_unknown=None,
+                 recv_size=0, family=None):
+        super().__init__(def_path, schema, family=family)
 
         self.include_raw = False
+        # Specs from /usr (selected by family=) have a higher chance of being
+        # stale, default to ignoring unknown attrs. In-tree users, and users
+        # who bundle the spec need to make a conscious decision.
+        if process_unknown is None:
+            process_unknown = family is not None
         self.process_unknown = process_unknown
 
         try:
@@ -646,12 +747,43 @@ class YnlFamily(SpecFamily):
             bound_f = functools.partial(self._op, op_name)
             setattr(self, op.ident_name, bound_f)
 
+    def close(self):
+        if self.sock is not None:
+            self.sock.close()
+            self.sock = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
 
     def ntf_subscribe(self, mcast_name):
         mcast_id = self.nlproto.get_mcast_id(mcast_name, self.mcast_groups)
         self.sock.bind((0, 0))
         self.sock.setsockopt(Netlink.SOL_NETLINK, Netlink.NETLINK_ADD_MEMBERSHIP,
                              mcast_id)
+
+    def ntf_listen_all_nsid(self):
+        """Enable NETLINK_LISTEN_ALL_NSID to receive notifications from all
+        namespaces that have an nsid mapped in the current one."""
+        self.sock.setsockopt(Netlink.SOL_NETLINK,
+                             Netlink.NETLINK_LISTEN_ALL_NSID, 1)
+
+    @staticmethod
+    def _decode_nsid(ancdata):
+        for cmsg_level, cmsg_type, cmsg_data in ancdata:
+            if (cmsg_level == Netlink.SOL_NETLINK and
+                    cmsg_type == Netlink.NETLINK_LISTEN_ALL_NSID):
+                nsid = struct.unpack('i', cmsg_data)[0]
+                if nsid >= 0:
+                    return nsid
+                return None
+        return None
+
+    def ntf_bind(self, addr=(0, 0)):
+        """Bind socket for receiving unicast notifications."""
+        self.sock.bind(addr)
 
     def set_recv_dbg(self, enabled):
         self._recv_dbg = enabled
@@ -1140,7 +1272,7 @@ class YnlFamily(SpecFamily):
                             f" when parsing '{attr_spec['name']}'")
         return raw
 
-    def handle_ntf(self, decoded):
+    def handle_ntf(self, decoded, nsid=None):
         msg = {}
         if self.include_raw:
             msg['raw'] = decoded
@@ -1151,15 +1283,22 @@ class YnlFamily(SpecFamily):
 
         msg['name'] = op['name']
         msg['msg'] = attrs
+        if nsid is not None:
+            msg['nsid'] = nsid
         self.async_msg_queue.put(msg)
+
+    def _recvmsg(self, flags=0):
+        reply, ancdata, _, _ = self.sock.recvmsg(self._recv_size, 4096, flags)
+        return reply, ancdata
 
     def check_ntf(self):
         while True:
             try:
-                reply = self.sock.recv(self._recv_size, socket.MSG_DONTWAIT)
+                reply, ancdata = self._recvmsg(socket.MSG_DONTWAIT)
             except BlockingIOError:
                 return
 
+            nsid = self._decode_nsid(ancdata)
             nms = NlMsgs(reply)
             self._recv_dbg_print(reply, nms)
             for nl_msg in nms:
@@ -1176,7 +1315,7 @@ class YnlFamily(SpecFamily):
                     print("Unexpected msg id while checking for ntf", decoded)
                     continue
 
-                self.handle_ntf(decoded)
+                self.handle_ntf(decoded, nsid)
 
     def poll_ntf(self, duration=None):
         start_time = time.time()
@@ -1240,7 +1379,8 @@ class YnlFamily(SpecFamily):
         rsp = []
         op_rsp = []
         while not done:
-            reply = self.sock.recv(self._recv_size)
+            reply, ancdata = self._recvmsg()
+            nsid = self._decode_nsid(ancdata)
             nms = NlMsgs(reply)
             self._recv_dbg_print(reply, nms)
             for nl_msg in nms:
@@ -1279,7 +1419,7 @@ class YnlFamily(SpecFamily):
                 # Check if this is a reply to our request
                 if nl_msg.nl_seq not in reqs_by_seq or decoded.cmd() != op.rsp_value:
                     if decoded.cmd() in self.async_msg_ids:
-                        self.handle_ntf(decoded)
+                        self.handle_ntf(decoded, nsid)
                         continue
                     print('Unexpected message: ' + repr(decoded))
                     continue
@@ -1308,28 +1448,6 @@ class YnlFamily(SpecFamily):
     def do_multi(self, ops):
         return self._ops(ops)
 
-    def _resolve_policy(self, policy_idx, policy_table, attr_set):
-        attrs = {}
-        if policy_idx not in policy_table:
-            return attrs
-        for attr_id, decoded in policy_table[policy_idx].items():
-            if attr_set and attr_id in attr_set.attrs_by_val:
-                spec = attr_set.attrs_by_val[attr_id]
-                name = spec['name']
-            else:
-                spec = None
-                name = f'attr-{attr_id}'
-            if 'policy-idx' in decoded:
-                sub_set = None
-                if spec and 'nested-attributes' in spec.yaml:
-                    sub_set = self.attr_sets[spec.yaml['nested-attributes']]
-                nested = self._resolve_policy(decoded['policy-idx'],
-                                              policy_table, sub_set)
-                del decoded['policy-idx']
-                decoded['policy'] = nested
-            attrs[name] = decoded
-        return attrs
-
     def get_policy(self, op_name, mode):
         """Query running kernel for the Netlink policy of an operation.
 
@@ -1341,8 +1459,8 @@ class YnlFamily(SpecFamily):
             mode: 'do' or 'dump'
 
         Returns:
-            NlPolicy with an attrs dict mapping attribute names to
-            their policy properties (type, min/max, nested, etc.),
+            NlPolicy acting as a read-only dict mapping attribute names
+            to their policy properties (type, min/max, nested, etc.),
             or None if the operation has no policy for the given mode.
             Empty policy usually implies that the operation rejects
             all attributes.
@@ -1353,5 +1471,4 @@ class YnlFamily(SpecFamily):
         if mode not in op_policy:
             return None
         policy_idx = op_policy[mode]
-        attrs = self._resolve_policy(policy_idx, policy_table, op.attr_set)
-        return NlPolicy(attrs)
+        return NlPolicy(self, policy_idx, policy_table, op.attr_set)

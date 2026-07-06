@@ -41,6 +41,7 @@
 #include "dmub_dcn36.h"
 #include "dmub_dcn401.h"
 #include "dmub_dcn42.h"
+#include "dmub_dcn42b.h"
 #include "os_types.h"
 /*
  * Note: the DMUB service is standalone. No additional headers should be
@@ -413,6 +414,7 @@ static bool dmub_srv_hw_setup(struct dmub_srv *dmub, enum dmub_asic asic)
 			funcs->should_detect = dmub_dcn35_should_detect;
 			break;
 	case DMUB_ASIC_DCN42:
+	case DMUB_ASIC_DCN42B:
 			dmub->regs_dcn42 = &dmub_srv_dcn42_regs;
 			funcs->configure_dmub_in_system_memory = dmub_dcn42_configure_dmub_in_system_memory;
 			funcs->send_inbox0_cmd = dmub_dcn42_send_inbox0_cmd;
@@ -466,6 +468,8 @@ static bool dmub_srv_hw_setup(struct dmub_srv *dmub, enum dmub_asic asic)
 			funcs->enable_reg_inbox0_rsp_int = dmub_dcn42_enable_reg_inbox0_rsp_int;
 			funcs->enable_reg_outbox0_rdy_int = dmub_dcn42_enable_reg_outbox0_rdy_int;
 			funcs->init_reg_offsets = dmub_srv_dcn42_regs_init;
+			if (asic == DMUB_ASIC_DCN42B)
+				funcs->init_reg_offsets = dmub_srv_dcn42b_regs_init;
 
 			funcs->is_hw_powered_up = dmub_dcn42_is_hw_powered_up;
 			funcs->should_detect = dmub_dcn42_should_detect;
@@ -1034,8 +1038,8 @@ enum dmub_status dmub_srv_wait_for_auto_load(struct dmub_srv *dmub,
 static void dmub_srv_update_reg_inbox0_status(struct dmub_srv *dmub)
 {
 	if (dmub->reg_inbox0.is_pending) {
-		dmub->reg_inbox0.is_pending = dmub->hw_funcs.read_reg_inbox0_rsp_int_status &&
-				!dmub->hw_funcs.read_reg_inbox0_rsp_int_status(dmub);
+		dmub->reg_inbox0.is_pending = (dmub->hw_funcs.read_reg_inbox0_rsp_int_status &&
+				!dmub->hw_funcs.read_reg_inbox0_rsp_int_status(dmub)) != 0;
 
 		if (!dmub->reg_inbox0.is_pending) {
 			/* ack the rsp interrupt */
@@ -1320,7 +1324,7 @@ void dmub_srv_set_power_state(struct dmub_srv *dmub, enum dmub_srv_power_state_t
 
 enum dmub_status dmub_srv_reg_cmd_execute(struct dmub_srv *dmub, union dmub_rb_cmd *cmd)
 {
-	uint32_t num_pending = 0;
+	uint64_t num_pending = 0;
 
 	if (!dmub->hw_init)
 		return DMUB_STATUS_INVALID;
@@ -1348,7 +1352,7 @@ enum dmub_status dmub_srv_reg_cmd_execute(struct dmub_srv *dmub, union dmub_rb_c
 
 	dmub->reg_inbox0.num_submitted++;
 	dmub->reg_inbox0.is_pending = true;
-	dmub->reg_inbox0.is_multi_pending = cmd->cmd_common.header.multi_cmd_pending;
+	dmub->reg_inbox0.is_multi_pending = cmd->cmd_common.header.multi_cmd_pending != 0;
 
 	return DMUB_STATUS_OK;
 }

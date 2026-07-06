@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2020-2025 Intel Corporation
+ * Copyright (C) 2020-2026 Intel Corporation
  */
 
 #include <drm/drm_file.h>
@@ -208,9 +208,9 @@ static int ivpu_hws_cmdq_init(struct ivpu_file_priv *file_priv, struct ivpu_cmdq
 	ret = ivpu_jsm_hws_set_context_sched_properties(vdev, file_priv->ctx.id, cmdq->id,
 							priority);
 	if (ret)
-		return ret;
+		ivpu_jsm_hws_destroy_cmdq(vdev, file_priv->ctx.id, cmdq->id);
 
-	return 0;
+	return ret;
 }
 
 static int ivpu_register_db(struct ivpu_file_priv *file_priv, struct ivpu_cmdq *cmdq)
@@ -281,10 +281,10 @@ static int ivpu_cmdq_register(struct ivpu_file_priv *file_priv, struct ivpu_cmdq
 	}
 
 	ret = ivpu_register_db(file_priv, cmdq);
-	if (ret)
-		return ret;
+	if (ret && vdev->fw->sched_mode == VPU_SCHEDULING_MODE_HW)
+		ivpu_jsm_hws_destroy_cmdq(vdev, file_priv->ctx.id, cmdq->id);
 
-	return 0;
+	return ret;
 }
 
 static int ivpu_cmdq_unregister(struct ivpu_file_priv *file_priv, struct ivpu_cmdq *cmdq)
@@ -535,6 +535,20 @@ static void ivpu_job_destroy(struct ivpu_job *job)
 	kfree(job);
 }
 
+void ivpu_job_destroy_work_fn(struct work_struct *work)
+{
+	struct ivpu_device *vdev = container_of(work, struct ivpu_device, job_destroy_work);
+	struct ivpu_job *job, *tmp;
+	struct llist_node *list;
+
+	list = llist_del_all(&vdev->job_destroy_list);
+
+	llist_for_each_entry_safe(job, tmp, list, destroy_node) {
+		ivpu_job_destroy(job);
+		ivpu_rpm_put(vdev);
+	}
+}
+
 static struct ivpu_job *
 ivpu_job_create(struct ivpu_file_priv *file_priv, u32 engine_idx, u32 bo_count)
 {
@@ -607,6 +621,7 @@ bool ivpu_job_handle_engine_error(struct ivpu_device *vdev, u32 job_id, u32 job_
 		 * status and ensure both are handled in the same way
 		 */
 		job->file_priv->has_mmu_faults = true;
+		atomic_set(&vdev->faults_detected, 1);
 		queue_work(system_percpu_wq, &vdev->context_abort_work);
 		return true;
 	}
@@ -618,7 +633,7 @@ bool ivpu_job_handle_engine_error(struct ivpu_device *vdev, u32 job_id, u32 job_
 	return false;
 }
 
-static int ivpu_job_signal_and_destroy(struct ivpu_device *vdev, u32 job_id, u32 job_status)
+static struct ivpu_job *ivpu_job_signal(struct ivpu_device *vdev, u32 job_id, u32 job_status)
 {
 	struct ivpu_job *job;
 
@@ -626,7 +641,7 @@ static int ivpu_job_signal_and_destroy(struct ivpu_device *vdev, u32 job_id, u32
 
 	job = xa_load(&vdev->submitted_jobs_xa, job_id);
 	if (!job)
-		return -ENOENT;
+		return NULL;
 
 	ivpu_job_remove_from_submitted_jobs(vdev, job_id);
 
@@ -645,13 +660,36 @@ static int ivpu_job_signal_and_destroy(struct ivpu_device *vdev, u32 job_id, u32
 		 job->job_id, job->file_priv->ctx.id, job->cmdq_id, job->engine_idx,
 		 job->job_status);
 
-	ivpu_job_destroy(job);
 	ivpu_stop_job_timeout_detection(vdev);
-
-	ivpu_rpm_put(vdev);
 
 	if (!xa_empty(&vdev->submitted_jobs_xa))
 		ivpu_start_job_timeout_detection(vdev);
+
+	return job;
+}
+
+static int ivpu_job_signal_and_destroy(struct ivpu_device *vdev, u32 job_id, u32 job_status)
+{
+	struct ivpu_job *job = ivpu_job_signal(vdev, job_id, job_status);
+
+	if (!job)
+		return -ENOENT;
+
+	ivpu_job_destroy(job);
+	ivpu_rpm_put(vdev);
+
+	return 0;
+}
+
+static int ivpu_job_signal_and_defer_destroy(struct ivpu_device *vdev, u32 job_id, u32 job_status)
+{
+	struct ivpu_job *job = ivpu_job_signal(vdev, job_id, job_status);
+
+	if (!job)
+		return -ENOENT;
+
+	llist_add(&job->destroy_node, &vdev->job_destroy_list);
+	queue_work(vdev->job_destroy_wq, &vdev->job_destroy_work);
 
 	return 0;
 }
@@ -688,6 +726,7 @@ static int ivpu_job_submit(struct ivpu_job *job, u8 priority, u32 cmdq_id)
 	struct ivpu_file_priv *file_priv = job->file_priv;
 	struct ivpu_device *vdev = job->vdev;
 	struct ivpu_cmdq *cmdq;
+	bool flushed = false;
 	bool is_first_job;
 	int ret;
 
@@ -695,6 +734,7 @@ static int ivpu_job_submit(struct ivpu_job *job, u8 priority, u32 cmdq_id)
 	if (ret < 0)
 		return ret;
 
+retry:
 	mutex_lock(&vdev->submitted_jobs_lock);
 	mutex_lock(&file_priv->lock);
 
@@ -708,6 +748,14 @@ static int ivpu_job_submit(struct ivpu_job *job, u8 priority, u32 cmdq_id)
 	}
 
 	ret = ivpu_cmdq_register(file_priv, cmdq);
+	if (ret == -EBUSY && !flushed) {
+		/* Doorbell may be held by jobs pending deferred cleanup */
+		mutex_unlock(&file_priv->lock);
+		mutex_unlock(&vdev->submitted_jobs_lock);
+		flush_work(&vdev->job_destroy_work);
+		flushed = true;
+		goto retry;
+	}
 	if (ret) {
 		ivpu_err(vdev, "Failed to register command queue: %d\n", ret);
 		goto err_unlock;
@@ -1100,7 +1148,7 @@ ivpu_job_done_callback(struct ivpu_device *vdev, struct ivpu_ipc_hdr *ipc_hdr,
 	mutex_lock(&vdev->submitted_jobs_lock);
 	if (!ivpu_job_handle_engine_error(vdev, payload->job_id, payload->job_status))
 		/* No engine error, complete the job normally */
-		ivpu_job_signal_and_destroy(vdev, payload->job_id, payload->job_status);
+		ivpu_job_signal_and_defer_destroy(vdev, payload->job_id, payload->job_status);
 	mutex_unlock(&vdev->submitted_jobs_lock);
 }
 
@@ -1115,6 +1163,51 @@ void ivpu_job_done_consumer_fini(struct ivpu_device *vdev)
 	ivpu_ipc_consumer_del(vdev, &vdev->job_done_consumer);
 }
 
+static int reset_engine_and_mark_faulty_contexts(struct ivpu_device *vdev)
+{
+	u32 num_impacted_contexts;
+	struct vpu_jsm_msg resp;
+	int ret;
+	u32 i;
+
+	ret = ivpu_jsm_reset_engine(vdev, 0, &resp);
+	if (ret)
+		return ret;
+
+	/*
+	 * If faults are detected, ignore guilty contexts from engine reset as NPU may not be stuck
+	 * and could return currently running good context and faulty contexts are already marked
+	 */
+	if (atomic_cmpxchg(&vdev->faults_detected, 1, 0) == 1)
+		return 0;
+
+	num_impacted_contexts = resp.payload.engine_reset_done.num_impacted_contexts;
+
+	ivpu_warn_ratelimited(vdev, "Engine reset performed, impacted contexts: %u\n",
+			      num_impacted_contexts);
+
+	if (!in_range(num_impacted_contexts, 1, VPU_MAX_ENGINE_RESET_IMPACTED_CONTEXTS - 1)) {
+		ivpu_pm_trigger_recovery(vdev, "Cannot determine guilty contexts");
+		return -EIO;
+	}
+
+	/* No faults detected, NPU likely got stuck. Mark returned contexts as guilty */
+	guard(mutex)(&vdev->context_list_lock);
+
+	for (i = 0; i < num_impacted_contexts; i++) {
+		u32 ssid = resp.payload.engine_reset_done.impacted_contexts[i].host_ssid;
+		struct ivpu_file_priv *file_priv = xa_load(&vdev->context_xa, ssid);
+
+		if (file_priv) {
+			mutex_lock(&file_priv->lock);
+			file_priv->has_mmu_faults = true;
+			mutex_unlock(&file_priv->lock);
+		}
+	}
+
+	return 0;
+}
+
 void ivpu_context_abort_work_fn(struct work_struct *work)
 {
 	struct ivpu_device *vdev = container_of(work, struct ivpu_device, context_abort_work);
@@ -1127,7 +1220,7 @@ void ivpu_context_abort_work_fn(struct work_struct *work)
 		return;
 
 	if (vdev->fw->sched_mode == VPU_SCHEDULING_MODE_HW)
-		if (ivpu_jsm_reset_engine(vdev, 0))
+		if (reset_engine_and_mark_faulty_contexts(vdev))
 			goto runtime_put;
 
 	mutex_lock(&vdev->context_list_lock);

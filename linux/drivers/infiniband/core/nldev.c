@@ -51,6 +51,7 @@
  * a controlled QKEY.
  */
 static bool privileged_qkey;
+static DEFINE_MUTEX(nldev_dellink_mutex);
 
 typedef int (*res_fill_func_t)(struct sk_buff*, bool,
 			       struct rdma_restrack_entry*, uint32_t);
@@ -187,6 +188,7 @@ static const struct nla_policy nldev_policy[RDMA_NLDEV_ATTR_MAX] = {
 	[RDMA_NLDEV_ATTR_FRMR_POOLS_AGING_PERIOD] = { .type = NLA_U32 },
 	[RDMA_NLDEV_ATTR_FRMR_POOL_PINNED_HANDLES] = { .type = NLA_U32 },
 	[RDMA_NLDEV_ATTR_FRMR_POOL_KEY_KERNEL_VENDOR_KEY] = { .type = NLA_U64 },
+	[RDMA_NLDEV_ATTR_RES_SUMMARY_ENTRY_MAX]	= { .type = NLA_U64 },
 };
 
 static int put_driver_name_print_type(struct sk_buff *msg, const char *name,
@@ -412,7 +414,7 @@ out:
 }
 
 static int fill_res_info_entry(struct sk_buff *msg,
-			       const char *name, u64 curr)
+			       const char *name, u64 curr, u64 max)
 {
 	struct nlattr *entry_attr;
 
@@ -425,6 +427,9 @@ static int fill_res_info_entry(struct sk_buff *msg,
 		goto err;
 	if (nla_put_u64_64bit(msg, RDMA_NLDEV_ATTR_RES_SUMMARY_ENTRY_CURR, curr,
 			      RDMA_NLDEV_ATTR_PAD))
+		goto err;
+	if (max && nla_put_u64_64bit(msg, RDMA_NLDEV_ATTR_RES_SUMMARY_ENTRY_MAX,
+				     max, RDMA_NLDEV_ATTR_PAD))
 		goto err;
 
 	nla_nest_end(msg, entry_attr);
@@ -449,7 +454,7 @@ static int fill_res_info(struct sk_buff *msg, struct ib_device *device,
 	};
 
 	struct nlattr *table_attr;
-	int ret, i, curr;
+	int ret, i, curr, max;
 
 	if (fill_nldev_handle(msg, device))
 		return -EMSGSIZE;
@@ -462,7 +467,26 @@ static int fill_res_info(struct sk_buff *msg, struct ib_device *device,
 		if (!names[i])
 			continue;
 		curr = rdma_restrack_count(device, i, show_details);
-		ret = fill_res_info_entry(msg, names[i], curr);
+		switch (i) {
+		case RDMA_RESTRACK_QP:
+			max = device->attrs.max_qp;
+			break;
+		case RDMA_RESTRACK_CQ:
+			max = device->attrs.max_cq;
+			break;
+		case RDMA_RESTRACK_MR:
+			max = device->attrs.max_mr;
+			break;
+		case RDMA_RESTRACK_PD:
+			max = device->attrs.max_pd;
+			break;
+		case RDMA_RESTRACK_SRQ:
+			max = device->attrs.max_srq;
+			break;
+		default:
+			max = 0;
+		}
+		ret = fill_res_info_entry(msg, names[i], curr, max);
 		if (ret)
 			goto err;
 	}
@@ -694,7 +718,7 @@ static int fill_res_mr_entry(struct sk_buff *msg, bool has_cap_net_admin,
 			     struct rdma_restrack_entry *res, uint32_t port)
 {
 	struct ib_mr *mr = container_of(res, struct ib_mr, res);
-	struct ib_device *dev = mr->pd->device;
+	struct ib_device *dev = mr->device;
 
 	if (has_cap_net_admin) {
 		if (nla_put_u32(msg, RDMA_NLDEV_ATTR_RES_RKEY, mr->rkey))
@@ -710,9 +734,12 @@ static int fill_res_mr_entry(struct sk_buff *msg, bool has_cap_net_admin,
 	if (nla_put_u32(msg, RDMA_NLDEV_ATTR_RES_MRN, res->id))
 		return -EMSGSIZE;
 
-	if (!rdma_is_kernel_res(res) &&
-	    nla_put_u32(msg, RDMA_NLDEV_ATTR_RES_PDN, mr->pd->res.id))
-		return -EMSGSIZE;
+	if (!rdma_is_kernel_res(res)) {
+		struct ib_pd *pd = READ_ONCE(mr->pd);
+
+		if (nla_put_u32(msg, RDMA_NLDEV_ATTR_RES_PDN, pd->res.id))
+			return -EMSGSIZE;
+	}
 
 	if (fill_res_name_pid(msg, res))
 		return -EMSGSIZE;
@@ -726,7 +753,7 @@ static int fill_res_mr_raw_entry(struct sk_buff *msg, bool has_cap_net_admin,
 				 struct rdma_restrack_entry *res, uint32_t port)
 {
 	struct ib_mr *mr = container_of(res, struct ib_mr, res);
-	struct ib_device *dev = mr->pd->device;
+	struct ib_device *dev = mr->device;
 
 	if (!dev->ops.fill_res_mr_entry_raw)
 		return -EINVAL;
@@ -1016,7 +1043,7 @@ static int fill_stat_mr_entry(struct sk_buff *msg, bool has_cap_net_admin,
 			      struct rdma_restrack_entry *res, uint32_t port)
 {
 	struct ib_mr *mr = container_of(res, struct ib_mr, res);
-	struct ib_device *dev = mr->pd->device;
+	struct ib_device *dev = mr->device;
 
 	if (nla_put_u32(msg, RDMA_NLDEV_ATTR_RES_MRN, res->id))
 		goto err;
@@ -1837,6 +1864,20 @@ static int nldev_dellink(struct sk_buff *skb, struct nlmsghdr *nlh,
 	if (!(device->attrs.kernel_cap_flags & IBK_ALLOW_USER_UNREG)) {
 		ib_device_put(device);
 		return -EINVAL;
+	}
+
+	/*
+	 * This path is triggered by the 'rdma link delete' administrative command.
+	 * For Soft-RoCE (RXE), we ensure that transport sockets are closed here.
+	 * Note: iWARP driver does not implement .dellink, so this logic is
+	 * implicitly scoped to the driver supporting dynamic link deletion like RXE.
+	 */
+	if (device->link_ops && device->link_ops->dellink) {
+		mutex_lock(&nldev_dellink_mutex);
+		err = device->link_ops->dellink(device);
+		mutex_unlock(&nldev_dellink_mutex);
+		if (err)
+			return err;
 	}
 
 	ib_unregister_device_and_put(device);

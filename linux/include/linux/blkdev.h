@@ -39,6 +39,7 @@ struct blk_flush_queue;
 struct kiocb;
 struct pr_ops;
 struct rq_qos;
+struct hd_geometry;
 struct blk_report_zones_args;
 struct blk_queue_stats;
 struct blk_stat_callback;
@@ -125,8 +126,6 @@ struct blk_integrity {
 	unsigned char				pi_tuple_size;
 };
 
-typedef unsigned int __bitwise blk_mode_t;
-
 /* open for reading */
 #define BLK_OPEN_READ		((__force blk_mode_t)(1 << 0))
 /* open for writing */
@@ -175,6 +174,7 @@ struct gendisk {
 #define GD_SUPPRESS_PART_SCAN		5
 #define GD_OWNS_QUEUE			6
 #define GD_ZONE_APPEND_USED		7
+#define GD_ERROR_INJECT			8
 
 	struct mutex open_mutex;	/* open/close mutex */
 	unsigned open_partitions;	/* number of open partitions */
@@ -225,6 +225,11 @@ struct gendisk {
 	 * devices that do not have multiple independent access ranges.
 	 */
 	struct blk_independent_access_ranges *ia_ranges;
+
+#ifdef CONFIG_BLK_ERROR_INJECTION
+	struct mutex		error_injection_lock;
+	struct list_head	error_injection_list;
+#endif
 
 	struct mutex rqos_state_mutex;	/* rqos state change mutex */
 };
@@ -1039,7 +1044,6 @@ extern const char *blk_op_str(enum req_op op);
 
 int blk_status_to_errno(blk_status_t status);
 blk_status_t errno_to_blk_status(int errno);
-const char *blk_status_to_str(blk_status_t status);
 
 /* only poll the hardware once, don't continue until a completion was found */
 #define BLK_POLL_ONESHOT		(1 << 0)
@@ -1092,15 +1096,17 @@ static inline unsigned int blk_boundary_sectors_left(sector_t offset,
  */
 static inline struct queue_limits
 queue_limits_start_update(struct request_queue *q)
+	__acquires(&q->limits_lock)
 {
 	mutex_lock(&q->limits_lock);
 	return q->limits;
 }
 int queue_limits_commit_update_frozen(struct request_queue *q,
-		struct queue_limits *lim);
+		struct queue_limits *lim) __releases(&q->limits_lock);
 int queue_limits_commit_update(struct request_queue *q,
-		struct queue_limits *lim);
-int queue_limits_set(struct request_queue *q, struct queue_limits *lim);
+		struct queue_limits *lim) __releases(&q->limits_lock);
+int queue_limits_set(struct request_queue *q, struct queue_limits *lim)
+	__must_not_hold(&q->limits_lock);
 int blk_validate_limits(struct queue_limits *lim);
 
 /**
@@ -1112,6 +1118,7 @@ int blk_validate_limits(struct queue_limits *lim);
  * starting update.
  */
 static inline void queue_limits_cancel_update(struct request_queue *q)
+	__releases(&q->limits_lock)
 {
 	mutex_unlock(&q->limits_lock);
 }
@@ -1213,16 +1220,12 @@ static inline void blk_flush_plug(struct blk_plug *plug, bool async)
 		__blk_flush_plug(plug, async);
 }
 
-/*
- * tsk == current here
- */
-static inline void blk_plug_invalidate_ts(struct task_struct *tsk)
+static __always_inline void blk_plug_invalidate_ts(void)
 {
-	struct blk_plug *plug = tsk->plug;
-
-	if (plug)
-		plug->cur_ktime = 0;
-	current->flags &= ~PF_BLOCK_TS;
+	if (unlikely(current->flags & PF_BLOCK_TS)) {
+		current->plug->cur_ktime = 0;
+		current->flags &= ~PF_BLOCK_TS;
+	}
 }
 
 int blkdev_issue_flush(struct block_device *bdev);
@@ -1248,7 +1251,7 @@ static inline void blk_flush_plug(struct blk_plug *plug, bool async)
 {
 }
 
-static inline void blk_plug_invalidate_ts(struct task_struct *tsk)
+static inline void blk_plug_invalidate_ts(void)
 {
 }
 
@@ -1743,30 +1746,27 @@ void blkdev_show(struct seq_file *seqf, off_t offset);
 #endif
 
 struct blk_holder_ops {
-	void (*mark_dead)(struct block_device *bdev, bool surprise);
+	void (*mark_dead)(struct block_device *bdev, bool surprise)
+		__releases(&bdev->bd_holder_lock);
 
 	/*
 	 * Sync the file system mounted on the block device.
 	 */
-	void (*sync)(struct block_device *bdev);
+	void (*sync)(struct block_device *bdev)
+		__releases(&bdev->bd_holder_lock);
 
 	/*
 	 * Freeze the file system mounted on the block device.
 	 */
-	int (*freeze)(struct block_device *bdev);
+	int (*freeze)(struct block_device *bdev)
+		__releases(&bdev->bd_holder_lock);
 
 	/*
 	 * Thaw the file system mounted on the block device.
 	 */
-	int (*thaw)(struct block_device *bdev);
+	int (*thaw)(struct block_device *bdev)
+		__releases(&bdev->bd_holder_lock);
 };
-
-/*
- * For filesystems using @fs_holder_ops, the @holder argument passed to
- * helpers used to open and claim block devices via
- * bd_prepare_to_claim() must point to a superblock.
- */
-extern const struct blk_holder_ops fs_holder_ops;
 
 /*
  * Return the correct open flags for blkdev_get_by_* for super block flags
@@ -1828,7 +1828,10 @@ static inline int early_lookup_bdev(const char *pathname, dev_t *dev)
 
 int bdev_freeze(struct block_device *bdev);
 int bdev_thaw(struct block_device *bdev);
+int bdev_deny_freeze(struct block_device *bdev);
+void bdev_allow_freeze(struct block_device *bdev);
 void bdev_fput(struct file *bdev_file);
+void bdev_yield_claim(struct file *bdev_file);
 
 struct io_comp_batch {
 	struct rq_list req_list;

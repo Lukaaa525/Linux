@@ -55,7 +55,7 @@ void abort(void);
 __attribute__((weak,unused,noreturn,section(".text.nolibc_abort")))
 void abort(void)
 {
-	sys_kill(sys_getpid(), SIGABRT);
+	_sys_kill(_sys_getpid(), SIGABRT);
 	for (;;);
 }
 
@@ -145,9 +145,9 @@ void *malloc(size_t len)
 static __attribute__((unused))
 void *calloc(size_t size, size_t nmemb)
 {
-	size_t x = size * nmemb;
+	size_t x;
 
-	if (__builtin_expect(size && ((x / size) != nmemb), 0)) {
+	if (__builtin_expect(__builtin_mul_overflow(size, nmemb, &x), 0)) {
 		SET_ERRNO(ENOMEM);
 		return NULL;
 	}

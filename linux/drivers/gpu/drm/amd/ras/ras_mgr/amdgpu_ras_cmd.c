@@ -30,9 +30,6 @@
 #include "amdgpu_ras_mgr.h"
 #include "amdgpu_virt_ras_cmd.h"
 
-/* inject address is 52 bits */
-#define	RAS_UMC_INJECT_ADDR_LIMIT	(0x1ULL << 52)
-
 #define AMDGPU_RAS_TYPE_RASCORE  0x1
 #define AMDGPU_RAS_TYPE_AMDGPU   0x2
 #define AMDGPU_RAS_TYPE_VF       0x3
@@ -119,11 +116,6 @@ static int amdgpu_ras_inject_error(struct ras_core_context *ras_core,
 	amdgpu_ras_trigger_error_prepare(ras_core, req);
 	ret = rascore_handle_cmd(ras_core, cmd, data);
 	amdgpu_ras_trigger_error_end(ras_core, req);
-	if (ret) {
-		RAS_DEV_ERR(adev, "ras inject block %u failed %d\n", req->block_id, ret);
-		ret = RAS_CMD__ERROR_ACCESS_DENIED;
-	}
-
 
 	return ret;
 }
@@ -139,7 +131,8 @@ static int amdgpu_ras_get_ras_safe_fb_addr_ranges(struct ras_core_context *ras_c
 	struct amdgpu_mem_partition_info *mem_ranges;
 	uint32_t i = 0;
 
-	if (cmd->input_size != sizeof(*input_data))
+	if ((cmd->input_size != sizeof(*input_data)) ||
+		(cmd->output_buf_size < sizeof(*ranges)))
 		return RAS_CMD__ERROR_INVALID_INPUT_DATA;
 
 	mem_ranges = adev->gmc.mem_partitions;
@@ -207,7 +200,8 @@ static int amdgpu_ras_translate_fb_address(struct ras_core_context *ras_core,
 			(struct ras_cmd_translate_fb_address_rsp *)cmd->output_buff_raw;
 	int ret = RAS_CMD__ERROR_GENERIC;
 
-	if (cmd->input_size != sizeof(struct ras_cmd_translate_fb_address_req))
+	if ((cmd->input_size != sizeof(struct ras_cmd_translate_fb_address_req)) ||
+		(cmd->output_buf_size < sizeof(*rsp_buff)))
 		return RAS_CMD__ERROR_INVALID_INPUT_SIZE;
 
 	if ((req_buff->src_addr_type >= RAS_FB_ADDR_UNKNOWN) ||
@@ -279,12 +273,12 @@ int amdgpu_ras_submit_cmd(struct ras_core_context *ras_core, struct ras_cmd_ctx 
 
 	cmd->cmd_res = res;
 
-	if (cmd->output_size > cmd->output_buf_size) {
+	if (!res && (cmd->output_size > cmd->output_buf_size)) {
 		RAS_DEV_ERR(cmd_core->dev,
 			"Output size 0x%x exceeds output buffer size 0x%x!\n",
 			cmd->output_size, cmd->output_buf_size);
 		return RAS_CMD__SUCCESS_EXEED_BUFFER;
 	}
 
-	return RAS_CMD__SUCCESS;
+	return res;
 }

@@ -95,7 +95,7 @@ static int scan_dsq_pool(void)
 			record_peek_result(task->pid);
 
 			/* Try to move this task to local */
-			if (!moved && scx_bpf_dsq_move_to_local(dsq_id, 0) == 0) {
+			if (!moved && scx_bpf_dsq_move_to_local(dsq_id, 0)) {
 				moved = 1;
 				break;
 			}
@@ -197,7 +197,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(peek_dsq_init)
 	}
 	err = scx_bpf_create_dsq(real_dsq_id, -1);
 	if (err) {
-		scx_bpf_error("Failed to create DSQ %d: %d", test_dsq_id, err);
+		scx_bpf_error("Failed to create DSQ %d: %d", real_dsq_id, err);
 		return err;
 	}
 

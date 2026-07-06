@@ -67,9 +67,10 @@ static struct {
 	u32        fw_build_num;
 } coredump_info;
 
-static const guid_t btintel_guid_dsm =
+const guid_t btintel_guid_dsm =
 	GUID_INIT(0xaa10f4e0, 0x81ac, 0x4233,
 		  0xab, 0xf6, 0x3b, 0x2a, 0xc5, 0x0e, 0x28, 0xd9);
+EXPORT_SYMBOL_GPL(btintel_guid_dsm);
 
 int btintel_check_bdaddr(struct hci_dev *hdev)
 {
@@ -264,11 +265,13 @@ void btintel_hw_error(struct hci_dev *hdev, u8 code)
 
 	bt_dev_err(hdev, "Hardware error 0x%2.2x", code);
 
+	hci_req_sync_lock(hdev);
+
 	skb = __hci_cmd_sync(hdev, HCI_OP_RESET, 0, NULL, HCI_INIT_TIMEOUT);
 	if (IS_ERR(skb)) {
 		bt_dev_err(hdev, "Reset after hardware error failed (%ld)",
 			   PTR_ERR(skb));
-		return;
+		goto unlock;
 	}
 	kfree_skb(skb);
 
@@ -276,18 +279,21 @@ void btintel_hw_error(struct hci_dev *hdev, u8 code)
 	if (IS_ERR(skb)) {
 		bt_dev_err(hdev, "Retrieving Intel exception info failed (%ld)",
 			   PTR_ERR(skb));
-		return;
+		goto unlock;
 	}
 
 	if (skb->len != 13) {
 		bt_dev_err(hdev, "Exception info size mismatch");
 		kfree_skb(skb);
-		return;
+		goto unlock;
 	}
 
 	bt_dev_err(hdev, "Exception info %s", (char *)(skb->data + 1));
 
 	kfree_skb(skb);
+
+unlock:
+	hci_req_sync_unlock(hdev);
 }
 EXPORT_SYMBOL_GPL(btintel_hw_error);
 
@@ -2619,7 +2625,7 @@ static void btintel_set_ppag(struct hci_dev *hdev, struct intel_version_tlv *ver
 	kfree_skb(skb);
 }
 
-static int btintel_acpi_reset_method(struct hci_dev *hdev)
+int btintel_acpi_reset_method(struct hci_dev *hdev)
 {
 	int ret = 0;
 	acpi_status status;
@@ -2627,14 +2633,14 @@ static int btintel_acpi_reset_method(struct hci_dev *hdev)
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
 
 	status = acpi_evaluate_object(ACPI_HANDLE(GET_HCIDEV_DEV(hdev)), "_PRR", NULL, &buffer);
-	if (ACPI_FAILURE(status)) {
+	if (ACPI_FAILURE(status) || !buffer.pointer) {
 		bt_dev_err(hdev, "Failed to run _PRR method");
 		ret = -ENODEV;
 		return ret;
 	}
 	p = buffer.pointer;
 
-	if (p->package.count != 1 || p->type != ACPI_TYPE_PACKAGE) {
+	if (p->type != ACPI_TYPE_PACKAGE || p->package.count != 1) {
 		bt_dev_err(hdev, "Invalid arguments");
 		ret = -EINVAL;
 		goto exit_on_error;
@@ -2658,6 +2664,7 @@ exit_on_error:
 	kfree(buffer.pointer);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(btintel_acpi_reset_method);
 
 static void btintel_set_dsm_reset_method(struct hci_dev *hdev,
 					 struct intel_version_tlv *ver_tlv)

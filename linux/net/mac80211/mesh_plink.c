@@ -165,8 +165,6 @@ static u64 mesh_set_ht_prot_mode(struct ieee80211_sub_if_data *sdata)
 
 	switch (sdata->vif.bss_conf.chanreq.oper.width) {
 	case NL80211_CHAN_WIDTH_20_NOHT:
-	case NL80211_CHAN_WIDTH_5:
-	case NL80211_CHAN_WIDTH_10:
 		return 0;
 	default:
 		break;
@@ -450,12 +448,13 @@ static void mesh_sta_info_init(struct ieee80211_sub_if_data *sdata,
 		changed |= IEEE80211_RC_SUPP_RATES_CHANGED;
 	sta->sta.deflink.supp_rates[sband->band] = rates;
 
-	if (ieee80211_ht_cap_ie_to_sta_ht_cap(sdata, sband,
+	if (ieee80211_ht_cap_ie_to_sta_ht_cap(sdata, &sband->ht_cap,
 					      elems->ht_cap_elem,
 					      &sta->deflink))
 		changed |= IEEE80211_RC_BW_CHANGED;
 
 	ieee80211_vht_cap_ie_to_sta_vht_cap(sdata, sband,
+					    &sband->vht_cap,
 					    elems->vht_cap_elem, NULL,
 					    &sta->deflink);
 
@@ -468,6 +467,9 @@ static void mesh_sta_info_init(struct ieee80211_sub_if_data *sdata,
 					    elems->he_cap_len,
 					    elems->eht_cap, elems->eht_cap_len,
 					    &sta->deflink);
+
+	ieee80211_sta_init_nss_bw_capa(&sta->deflink,
+				       &sdata->deflink.conf->chanreq.oper);
 
 	if (bw != sta->sta.deflink.bandwidth)
 		changed |= IEEE80211_RC_BW_CHANGED;
@@ -711,7 +713,7 @@ void mesh_plink_timer(struct timer_list *t)
 				"Mesh plink for %pM (retry, timeout): %d %d\n",
 				sta->sta.addr, sta->mesh->plink_retries,
 				sta->mesh->plink_timeout);
-			get_random_bytes(&rand, sizeof(u32));
+			rand = get_random_u32();
 			sta->mesh->plink_timeout = sta->mesh->plink_timeout +
 					     rand % sta->mesh->plink_timeout;
 			++sta->mesh->plink_retries;

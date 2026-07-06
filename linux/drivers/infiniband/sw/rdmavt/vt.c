@@ -6,6 +6,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/dma-mapping.h>
+#include <rdma/uverbs_ioctl.h>
 #include "vt.h"
 #include "cq.h"
 #include "trace.h"
@@ -79,14 +80,16 @@ static int rvt_query_device(struct ib_device *ibdev,
 			    struct ib_udata *uhw)
 {
 	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
+	int err;
 
-	if (uhw->inlen || uhw->outlen)
-		return -EINVAL;
+	err = ib_is_udata_in_empty(uhw);
+	if (err)
+		return err;
 	/*
 	 * Return rvt_dev_info.dparms.props contents
 	 */
 	*props = rdi->dparms.props;
-	return 0;
+	return ib_respond_empty_udata(uhw);
 }
 
 static int rvt_get_numa_node(struct ib_device *ibdev)
@@ -375,7 +378,7 @@ static const struct ib_device_ops rvt_dev_ops = {
 	.query_srq = rvt_query_srq,
 	.reg_user_mr = rvt_reg_user_mr,
 	.req_notify_cq = rvt_req_notify_cq,
-	.resize_cq = rvt_resize_cq,
+	.resize_user_cq = rvt_resize_cq,
 
 	INIT_RDMA_OBJ_SIZE(ib_ah, rvt_ah, ibah),
 	INIT_RDMA_OBJ_SIZE(ib_cq, rvt_cq, ibcq),

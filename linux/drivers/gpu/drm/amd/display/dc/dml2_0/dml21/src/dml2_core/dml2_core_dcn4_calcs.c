@@ -7,6 +7,7 @@
 #include "dml2_core_dcn4_calcs.h"
 #include "dml2_debug.h"
 #include "lib_float_math.h"
+#include "lib_frl_cap_check.h"
 #include "dml_top_types.h"
 
 #define DML2_MAX_FMT_420_BUFFER_WIDTH 4096
@@ -202,7 +203,7 @@ static unsigned int dml_round_to_multiple(unsigned int num, unsigned int multipl
 		return (num - remainder);
 }
 
-static unsigned int dml_get_num_active_pipes(int unsigned num_planes, const struct core_display_cfg_support_info *cfg_support_info)
+static unsigned int dml_get_num_active_pipes(unsigned int num_planes, const struct core_display_cfg_support_info *cfg_support_info)
 {
 	unsigned int num_active_pipes = 0;
 
@@ -546,9 +547,9 @@ static bool dml_is_vertical_rotation(enum dml2_rotation_angle Scan)
 	return is_vert;
 }
 
-static int unsigned dml_get_gfx_version(enum dml2_swizzle_mode sw_mode)
+static unsigned int dml_get_gfx_version(enum dml2_swizzle_mode sw_mode)
 {
-	int unsigned version = 0;
+	unsigned int version = 0;
 
 	if (sw_mode == dml2_sw_linear ||
 		sw_mode == dml2_sw_256b_2d ||
@@ -840,6 +841,7 @@ static void CalculateSwathWidth(
 	unsigned int swath_width_luma_ub[], // per-pipe
 	unsigned int swath_width_chroma_ub[]) // per-pipe
 {
+	(void)BytePerPixY;
 	enum dml2_odm_mode MainSurfaceODMMode;
 	double odm_hactive_factor = 1.0;
 	unsigned int req_width_horz_y;
@@ -1283,6 +1285,8 @@ static double TruncToValidBPP(
 	// Output
 	unsigned int *RequiredSlots)
 {
+	(void)DSCInputBitPerComponent;
+	(void)RequiredSlots;
 	double MaxLinkBPP;
 	unsigned int MinDSCBPP;
 	double MaxDSCBPP;
@@ -1291,19 +1295,39 @@ static double TruncToValidBPP(
 	unsigned int NonDSCBPP2;
 	enum dml2_odm_mode ODMMode;
 
+	enum lib_frl_cap_check_status hdmifrlresult = LIB_FRL_CAP_CHECK_OK;
+
+	l->hdmifrlparams.lanes = (int)Lanes;
+	l->hdmifrlparams.f_pixel_clock_nominal = PixelClock * 1000000;
+	l->hdmifrlparams.r_bit_nominal = LinkBitRate * 1000000;
+	l->hdmifrlparams.layout = (int)AudioLayout;
+	l->hdmifrlparams.f_audio = AudioRate * 1000;
+	l->hdmifrlparams.h_active = (int)HActive;
+	l->hdmifrlparams.h_blank = (int)(HTotal - HActive);
+	l->hdmifrlparams.bpc = (int)(DesiredBPP / 3);
+	l->hdmifrlparams.compressed = DSCEnable;
+	l->hdmifrlparams.slices = (int)DSCSlices;
+	l->hdmifrlparams.slice_width = (int)(math_ceil2((double)HActive / DSCSlices, 1.0));
+	l->hdmifrlparams.bpp_target = DesiredBPP;
 	if (Format == dml2_420) {
 		NonDSCBPP0 = 12;
 		NonDSCBPP1 = 15;
 		NonDSCBPP2 = 18;
 		MinDSCBPP = 6;
 		MaxDSCBPP = 16;
+		l->hdmifrlparams.pixel_encoding = LIB_FRL_CAP_CHECK_PIXEL_ENCODING_420;
+		l->hdmifrlparams.bpc = (int)(DesiredBPP / 1.5);
 	} else if (Format == dml2_444) {
 		NonDSCBPP0 = 24;
 		NonDSCBPP1 = 30;
 		NonDSCBPP2 = 36;
 		MinDSCBPP = 8;
 		MaxDSCBPP = 16;
+		l->hdmifrlparams.pixel_encoding = LIB_FRL_CAP_CHECK_PIXEL_ENCODING_444;
+		l->hdmifrlparams.bpc = (int)(DesiredBPP / 3.0);
 	} else {
+		l->hdmifrlparams.pixel_encoding = LIB_FRL_CAP_CHECK_PIXEL_ENCODING_422;
+		l->hdmifrlparams.bpc = (int)(DesiredBPP / 2.0);
 
 		if (Output == dml2_hdmi || Output == dml2_hdmifrl) {
 			NonDSCBPP0 = 24;
@@ -1323,7 +1347,11 @@ static double TruncToValidBPP(
 		}
 	}
 
-	if (Output == dml2_dp2p0) {
+	if (Output == dml2_hdmifrl) {
+		hdmifrlresult = frl_cap_check_intermediates(&l->hdmifrlparams, &l->hdmifrlinter);
+		MaxLinkBPP = (1 - l->hdmifrlinter.overhead_max) * math_min2(l->hdmifrlinter.r_frl_char_min * 16.0 * (double)Lanes / l->hdmifrlinter.f_pixel_clock_max + 24.0 * (double)DML2_FRL_CHK_TB_BORROWED_MAX / (double)HActive,
+			(l->hdmifrlinter.r_frl_char_min * 16.0 * (double)Lanes / l->hdmifrlinter.f_pixel_clock_max * (double)HTotal - 16.0 * (double)l->hdmifrlinter.blank_audio_min) / (double)HActive);
+	} else if (Output == dml2_dp2p0) {
 		MaxLinkBPP = LinkBitRate * Lanes / PixelClock * 128.0 / 132.0 * 383.0 / 384.0 * 65536.0 / 65540.0;
 	} else if (DSCEnable && Output == dml2_dp) {
 		MaxLinkBPP = LinkBitRate / 10.0 * 8.0 * Lanes / PixelClock * (1 - 2.4 / 100);
@@ -1360,6 +1388,8 @@ static double TruncToValidBPP(
 	} else {
 		if (!((DSCEnable == false && (DesiredBPP == NonDSCBPP2 || DesiredBPP == NonDSCBPP1 || DesiredBPP == NonDSCBPP0)) ||
 			(DSCEnable && DesiredBPP >= MinDSCBPP && DesiredBPP <= MaxDSCBPP))) {
+			return __DML2_CALCS_DPP_INVALID__;
+		} else if ((Output == dml2_hdmifrl && hdmifrlresult != LIB_FRL_CAP_CHECK_OK) || (Output != dml2_hdmifrl && MaxLinkBPP < DesiredBPP)) {
 			return __DML2_CALCS_DPP_INVALID__;
 		} else {
 			return DesiredBPP;
@@ -1761,7 +1791,7 @@ static unsigned int CalculateVMAndRowBytes(struct dml2_core_shared_calculate_vm_
 		*p->PixelPTEBytesPerRow = (unsigned int)((double)*p->dpte_row_width_ub / (double)*p->PixelPTEReqWidth * *p->PTERequestSize);
 
 		// VBA_DELTA, VBA doesn't have programming value for pte row height linear.
-		*p->dpte_row_height_linear = (unsigned int)1 << (unsigned int)math_floor2(math_log((float)(p->PTEBufferSizeInRequests * PixelPTEReqWidth_linear / p->Pitch), 2.0), 1);
+		*p->dpte_row_height_linear = 1U << (unsigned int)math_floor2(math_log((float)(p->PTEBufferSizeInRequests * PixelPTEReqWidth_linear / p->Pitch), 2.0), 1);
 		if (*p->dpte_row_height_linear > 128)
 			*p->dpte_row_height_linear = 128;
 
@@ -1922,6 +1952,7 @@ static void CalculateRowBandwidth(
 	double *dpte_row_bw,
 	double *meta_row_bw)
 {
+	(void)use_one_row_for_frame;
 	if (!DCCEnable || !mrq_present) {
 		*meta_row_bw = 0;
 	} else if (dml_is_420(SourcePixelFormat) || SourcePixelFormat == dml2_rgbe_alpha) {
@@ -2020,6 +2051,11 @@ static void CalculateDCCConfiguration(
 	unsigned int *IndependentBlockLuma,
 	unsigned int *IndependentBlockChroma)
 {
+	(void)SurfaceWidthChroma;
+	(void)SurfaceHeightChroma;
+	(void)TilingFormat;
+	(void)BytePerPixelDETY;
+	(void)BytePerPixelDETC;
 	unsigned int DETBufferSizeForDCC = nomDETInKByte * 1024;
 
 	unsigned int segment_order_horz_contiguous_luma;
@@ -2270,6 +2306,7 @@ static void calculate_mcache_row_bytes(
 	struct dml2_core_internal_scratch *scratch,
 	struct dml2_core_calcs_calculate_mcache_row_bytes_params *p)
 {
+	(void)scratch;
 	unsigned int vmpg_bytes = 0;
 	unsigned int blk_bytes = 0;
 	float meta_per_mvmpg_per_channel = 0;
@@ -2664,7 +2701,8 @@ static double dml_get_return_bandwidth_available(
 	bool is_hvm_only,
 	double dcfclk_mhz,
 	double fclk_mhz,
-	double dram_bw_mbps)
+	double dram_bw_mbps,
+	unsigned int uclk_dpm_level)
 {
 	double return_bw_mbps = 0.;
 	double ideal_sdp_bandwidth = (double)soc->return_bus_width_bytes * dcfclk_mhz;
@@ -2685,9 +2723,16 @@ static double dml_get_return_bandwidth_available(
 			derate_fabric_factor = soc->qos_parameters.derate_table.dcn_mall_prefetch_average.fclk_derate_percent / 100.0;
 			derate_dram_factor = soc->qos_parameters.derate_table.dcn_mall_prefetch_average.dram_derate_percent_pixel / 100.0;
 		} else { // just assume sys_active
-			derate_sdp_factor = soc->qos_parameters.derate_table.system_active_average.dcfclk_derate_percent / 100.0;
-			derate_fabric_factor = soc->qos_parameters.derate_table.system_active_average.fclk_derate_percent / 100.0;
-			derate_dram_factor = soc->qos_parameters.derate_table.system_active_average.dram_derate_percent_pixel / 100.0;
+			// use per dpm derates if the values are populated. Otherwise use global derates
+			derate_sdp_factor = soc->qos_parameters.derate_table_per_dpm.system_active_derates_per_dpm.dcfclk_derate_percent[uclk_dpm_level] != 0 ?
+				soc->qos_parameters.derate_table_per_dpm.system_active_derates_per_dpm.dcfclk_derate_percent[uclk_dpm_level] / 100.0 :
+				soc->qos_parameters.derate_table.system_active_average.dcfclk_derate_percent / 100.0;
+			derate_fabric_factor = soc->qos_parameters.derate_table_per_dpm.system_active_derates_per_dpm.fclk_derate_percent[uclk_dpm_level] != 0 ?
+				soc->qos_parameters.derate_table_per_dpm.system_active_derates_per_dpm.fclk_derate_percent[uclk_dpm_level] / 100.0 :
+				soc->qos_parameters.derate_table.system_active_average.fclk_derate_percent / 100.0;
+			derate_dram_factor = soc->qos_parameters.derate_table_per_dpm.system_active_derates_per_dpm.dram_derate_percent_pixel[uclk_dpm_level] != 0 ?
+				soc->qos_parameters.derate_table_per_dpm.system_active_derates_per_dpm.dram_derate_percent_pixel[uclk_dpm_level] / 100.0 :
+				soc->qos_parameters.derate_table.system_active_average.dram_derate_percent_pixel / 100.0;
 		}
 	} else { // urgent bw
 		if (state_type == dml2_core_internal_soc_state_svp_prefetch) {
@@ -2741,6 +2786,7 @@ static double dml_get_return_bandwidth_available(
 	DML_LOG_VERBOSE("DML::%s: derate_fabric_bandwidth = %f (derate %f)\n", __func__, derate_fabric_bandwidth, derate_fabric_factor);
 	DML_LOG_VERBOSE("DML::%s: derate_dram_bandwidth = %f (derate %f)\n", __func__, derate_dram_bandwidth, derate_dram_factor);
 	DML_LOG_VERBOSE("DML::%s: return_bw_mbps = %f\n", __func__, return_bw_mbps);
+	DML_LOG_VERBOSE("DML::%s: uclk_dpm_level = %u\n", __func__, uclk_dpm_level);
 	return return_bw_mbps;
 }
 
@@ -2756,7 +2802,8 @@ static noinline_for_stack void calculate_bandwidth_available(
 	bool HostVMEnable,
 	double dcfclk_mhz,
 	double fclk_mhz,
-	double dram_bw_mbps)
+	double dram_bw_mbps,
+	unsigned int uclk_dpm_level)
 {
 	unsigned int n, m;
 
@@ -2775,9 +2822,10 @@ static noinline_for_stack void calculate_bandwidth_available(
 				0, // hvm_only
 				dcfclk_mhz,
 				fclk_mhz,
-				dram_bw_mbps);
+				dram_bw_mbps,
+				uclk_dpm_level);
 
-			urg_bandwidth_available[m][n] = dml_get_return_bandwidth_available(soc, m, n, 0, HostVMEnable, 0, dcfclk_mhz, fclk_mhz, dram_bw_mbps);
+			urg_bandwidth_available[m][n] = dml_get_return_bandwidth_available(soc, m, n, 0, HostVMEnable, 0, dcfclk_mhz, fclk_mhz, dram_bw_mbps, uclk_dpm_level);
 
 
 #ifdef __DML_VBA_DEBUG__
@@ -2787,8 +2835,8 @@ static noinline_for_stack void calculate_bandwidth_available(
 
 			// urg_bandwidth_available_vm_only is indexed by soc_state
 			if (n == dml2_core_internal_bw_dram) {
-				urg_bandwidth_available_vm_only[m] = dml_get_return_bandwidth_available(soc, m, n, 0, HostVMEnable, 1, dcfclk_mhz, fclk_mhz, dram_bw_mbps);
-				urg_bandwidth_available_pixel_and_vm[m] = dml_get_return_bandwidth_available(soc, m, n, 0, HostVMEnable, 0, dcfclk_mhz, fclk_mhz, dram_bw_mbps);
+				urg_bandwidth_available_vm_only[m] = dml_get_return_bandwidth_available(soc, m, n, 0, HostVMEnable, 1, dcfclk_mhz, fclk_mhz, dram_bw_mbps, uclk_dpm_level);
+				urg_bandwidth_available_pixel_and_vm[m] = dml_get_return_bandwidth_available(soc, m, n, 0, HostVMEnable, 0, dcfclk_mhz, fclk_mhz, dram_bw_mbps, uclk_dpm_level);
 			}
 		}
 
@@ -3377,7 +3425,7 @@ static void calculate_cursor_req_attributes(
 	DML_LOG_VERBOSE("DML::%s: cursor_bytes_per_line = %d\n", __func__, *cursor_bytes_per_line);
 	DML_LOG_VERBOSE("DML::%s: cursor_bytes_per_chunk = %d\n", __func__, *cursor_bytes_per_chunk);
 	DML_LOG_VERBOSE("DML::%s: cursor_bytes = %d\n", __func__, *cursor_bytes);
-	DML_LOG_VERBOSE("DML::%s: cursor_pitch = %d\n", __func__, cursor_bpp == 2 ? 256 : (unsigned int)1 << (unsigned int)math_ceil2(math_log((float)cursor_width, 2), 1));
+	DML_LOG_VERBOSE("DML::%s: cursor_pitch = %d\n", __func__, cursor_bpp == 2 ? 256 : 1U << (unsigned int)math_ceil2(math_log((float)cursor_width, 2), 1));
 #endif
 }
 
@@ -3642,6 +3690,8 @@ static double CalculateWriteBackDelay(
 	unsigned int WritebackSourceHeight,
 	unsigned int HTotal)
 {
+	(void)WritebackPixelFormat;
+	(void)WritebackHRatio;
 	double CalculateWriteBackDelay;
 	double Line_length;
 	double Output_lines_last_notclamped;
@@ -3959,6 +4009,7 @@ static enum dml2_odm_mode DecideODMMode(unsigned int HActive,
 	double SurfaceRequiredDISPCLKWithODMCombineThreeToOne,
 	double SurfaceRequiredDISPCLKWithODMCombineFourToOne)
 {
+	(void)SurfaceRequiredDISPCLKWithODMCombineFourToOne;
 	enum dml2_odm_mode MinimumRequiredODMModeForMaxDispClock;
 	enum dml2_odm_mode MinimumRequiredODMModeForMaxDSCHActive;
 	enum dml2_odm_mode MinimumRequiredODMModeForMax420HActive;
@@ -4460,6 +4511,8 @@ static double CalculateWriteBackDISPCLK(
 	unsigned int HTotal,
 	unsigned int WritebackLineBufferSize)
 {
+	(void)WritebackPixelFormat;
+	(void)WritebackVRatio;
 	double DISPCLK_H, DISPCLK_V, DISPCLK_HB;
 
 	DISPCLK_H = PixelClock * math_ceil2((double)WritebackHTaps / 8.0, 1) / WritebackHRatio;
@@ -4561,6 +4614,10 @@ static void CalculateSurfaceSizeInMall(
 	unsigned int SurfaceSizeInMALL[],
 	bool *ExceededMALLSize)
 {
+	(void)Read256BytesBlockWidthY;
+	(void)Read256BytesBlockWidthC;
+	(void)Read256BytesBlockHeightY;
+	(void)Read256BytesBlockHeightC;
 	unsigned int TotalSurfaceSizeInMALLForSS = 0;
 	unsigned int TotalSurfaceSizeInMALLForSubVP = 0;
 	unsigned int MALLAllocatedForDCNInBytes = MALLAllocatedForDCN * 1024 * 1024;
@@ -4620,6 +4677,7 @@ static void calculate_tdlut_setting(
 		struct dml2_core_internal_scratch *scratch,
 		struct dml2_core_calcs_calculate_tdlut_setting_params *p)
 {
+	(void)scratch;
 	// locals
 	unsigned int tdlut_bpe = 8;
 	unsigned int tdlut_width;
@@ -6503,6 +6561,7 @@ static void CalculateFlipSchedule(
 	double *final_flip_bw,
 	bool *ImmediateFlipSupportedForPipe)
 {
+	(void)use_one_row_for_frame_flip;
 	struct dml2_core_shared_CalculateFlipSchedule_locals *l = &s->CalculateFlipSchedule_locals;
 
 	l->dual_plane = dml_is_420(SourcePixelFormat) || SourcePixelFormat == dml2_rgbe_alpha;
@@ -7381,7 +7440,7 @@ static noinline_for_stack void dml_core_ms_prefetch_check(struct dml2_core_inter
 		s->tdlut_bytes_per_group,
 		s->HostVMInefficiencyFactor,
 		s->HostVMInefficiencyFactorPrefetch,
-		mode_lib->soc.hostvm_min_page_size_kbytes,
+		mode_lib->soc.hostvm_min_page_size_kbytes * 1024,
 		mode_lib->soc.qos_parameters.qos_type,
 		!(display_cfg->overrides.max_outstanding_when_urgent_expected_disable),
 		mode_lib->soc.max_outstanding_reqs,
@@ -7477,12 +7536,11 @@ static noinline_for_stack void dml_core_ms_prefetch_check(struct dml2_core_inter
 			CalculatePrefetchSchedule_params->OutputFormat = display_cfg->stream_descriptors[display_cfg->plane_descriptors[k].stream_index].output.output_format;
 			CalculatePrefetchSchedule_params->MaxInterDCNTileRepeaters = mode_lib->ip.max_inter_dcn_tile_repeaters;
 			CalculatePrefetchSchedule_params->VStartup = s->MaximumVStartup[k];
-			CalculatePrefetchSchedule_params->HostVMMinPageSize = mode_lib->soc.hostvm_min_page_size_kbytes;
+			CalculatePrefetchSchedule_params->HostVMMinPageSize = mode_lib->soc.hostvm_min_page_size_kbytes * 1024;
 			CalculatePrefetchSchedule_params->DynamicMetadataEnable = display_cfg->plane_descriptors[k].dynamic_meta_data.enable;
 			CalculatePrefetchSchedule_params->DynamicMetadataVMEnabled = mode_lib->ip.dynamic_metadata_vm_enabled;
 			CalculatePrefetchSchedule_params->DynamicMetadataLinesBeforeActiveRequired = display_cfg->plane_descriptors[k].dynamic_meta_data.lines_before_active_required;
 			CalculatePrefetchSchedule_params->DynamicMetadataTransmittedBytes = display_cfg->plane_descriptors[k].dynamic_meta_data.transmitted_bytes;
-			CalculatePrefetchSchedule_params->UrgentLatency = mode_lib->ms.UrgLatency;
 			CalculatePrefetchSchedule_params->ExtraLatencyPrefetch = mode_lib->ms.ExtraLatencyPrefetch;
 			CalculatePrefetchSchedule_params->TCalc = mode_lib->ms.TimeCalc;
 			CalculatePrefetchSchedule_params->vm_bytes = mode_lib->ms.vm_bytes[k];
@@ -8965,7 +9023,7 @@ static bool dml_core_mode_support(struct dml2_core_calcs_mode_support_ex *in_out
 	CalculateVMRowAndSwath_params->MALLAllocatedForDCN = mode_lib->soc.mall_allocated_for_dcn_mbytes;
 	CalculateVMRowAndSwath_params->SwathWidthY = mode_lib->ms.SwathWidthY;
 	CalculateVMRowAndSwath_params->SwathWidthC = mode_lib->ms.SwathWidthC;
-	CalculateVMRowAndSwath_params->HostVMMinPageSize = mode_lib->soc.hostvm_min_page_size_kbytes;
+	CalculateVMRowAndSwath_params->HostVMMinPageSize = mode_lib->soc.hostvm_min_page_size_kbytes * 1024;
 	CalculateVMRowAndSwath_params->DCCMetaBufferSizeBytes = mode_lib->ip.dcc_meta_buffer_size_bytes;
 	CalculateVMRowAndSwath_params->mrq_present = mode_lib->ip.dcn_mrq_present;
 
@@ -9436,7 +9494,8 @@ static bool dml_core_mode_support(struct dml2_core_calcs_mode_support_ex *in_out
 		display_cfg->hostvm_enable,
 		mode_lib->ms.DCFCLK,
 		mode_lib->ms.FabricClock,
-		mode_lib->ms.dram_bw_mbps);
+		mode_lib->ms.dram_bw_mbps,
+		mode_lib->ms.active_min_uclk_dpm_index);
 
 	calculate_bandwidth_available(
 		mode_lib->ms.support.avg_bandwidth_available_min,
@@ -9451,10 +9510,12 @@ static bool dml_core_mode_support(struct dml2_core_calcs_mode_support_ex *in_out
 		mode_lib->ms.MaxDCFCLK,
 		mode_lib->ms.MaxFabricClock,
 #ifdef DML_MODE_SUPPORT_USE_DPM_DRAM_BW
-		mode_lib->ms.dram_bw_mbps);
+		mode_lib->ms.dram_bw_mbps,
 #else
-		mode_lib->ms.max_dram_bw_mbps);
+		mode_lib->ms.max_dram_bw_mbps,
 #endif
+		mode_lib->ms.active_min_uclk_dpm_index);
+
 
 	// Average BW support check
 	calculate_avg_bandwidth_required(
@@ -9968,6 +10029,8 @@ static void CalculateVMGroupAndRequestTimes(
 	double TimePerVMRequestVBlank[],
 	double TimePerVMRequestFlip[])
 {
+	(void)dpte_row_width_luma_ub;
+	(void)dpte_row_width_chroma_ub;
 	unsigned int num_group_per_lower_vm_stage = 0;
 	unsigned int num_req_per_lower_vm_stage = 0;
 	unsigned int num_group_per_lower_vm_stage_flip;
@@ -10755,7 +10818,7 @@ static bool dml_core_mode_programming(struct dml2_core_calcs_mode_programming_ex
 	CalculateVMRowAndSwath_params->MALLAllocatedForDCN = mode_lib->soc.mall_allocated_for_dcn_mbytes;
 	CalculateVMRowAndSwath_params->SwathWidthY = mode_lib->mp.SwathWidthY;
 	CalculateVMRowAndSwath_params->SwathWidthC = mode_lib->mp.SwathWidthC;
-	CalculateVMRowAndSwath_params->HostVMMinPageSize = mode_lib->soc.hostvm_min_page_size_kbytes;
+	CalculateVMRowAndSwath_params->HostVMMinPageSize = mode_lib->soc.hostvm_min_page_size_kbytes * 1024;
 	CalculateVMRowAndSwath_params->DCCMetaBufferSizeBytes = mode_lib->ip.dcc_meta_buffer_size_bytes;
 	CalculateVMRowAndSwath_params->mrq_present = mode_lib->ip.dcn_mrq_present;
 
@@ -10909,7 +10972,8 @@ static bool dml_core_mode_programming(struct dml2_core_calcs_mode_programming_ex
 		display_cfg->hostvm_enable,
 		mode_lib->mp.Dcfclk,
 		mode_lib->mp.FabricClock,
-		mode_lib->mp.dram_bw_mbps);
+		mode_lib->mp.dram_bw_mbps,
+		mode_lib->mp.active_min_uclk_dpm_index);
 
 
 	calculate_hostvm_inefficiency_factor(
@@ -10971,7 +11035,7 @@ static bool dml_core_mode_programming(struct dml2_core_calcs_mode_programming_ex
 		s->tdlut_bytes_per_group,
 		s->HostVMInefficiencyFactor,
 		s->HostVMInefficiencyFactorPrefetch,
-		mode_lib->soc.hostvm_min_page_size_kbytes,
+		mode_lib->soc.hostvm_min_page_size_kbytes * 1024,
 		mode_lib->soc.qos_parameters.qos_type,
 		!(display_cfg->overrides.max_outstanding_when_urgent_expected_disable),
 		mode_lib->soc.max_outstanding_reqs,
@@ -11264,12 +11328,11 @@ static bool dml_core_mode_programming(struct dml2_core_calcs_mode_programming_ex
 			CalculatePrefetchSchedule_params->OutputFormat = display_cfg->stream_descriptors[display_cfg->plane_descriptors[k].stream_index].output.output_format;
 			CalculatePrefetchSchedule_params->MaxInterDCNTileRepeaters = mode_lib->ip.max_inter_dcn_tile_repeaters;
 			CalculatePrefetchSchedule_params->VStartup = s->MaxVStartupLines[k];
-			CalculatePrefetchSchedule_params->HostVMMinPageSize = mode_lib->soc.hostvm_min_page_size_kbytes;
+			CalculatePrefetchSchedule_params->HostVMMinPageSize = mode_lib->soc.hostvm_min_page_size_kbytes * 1024;
 			CalculatePrefetchSchedule_params->DynamicMetadataEnable = display_cfg->plane_descriptors[k].dynamic_meta_data.enable;
 			CalculatePrefetchSchedule_params->DynamicMetadataVMEnabled = mode_lib->ip.dynamic_metadata_vm_enabled;
 			CalculatePrefetchSchedule_params->DynamicMetadataLinesBeforeActiveRequired = display_cfg->plane_descriptors[k].dynamic_meta_data.lines_before_active_required;
 			CalculatePrefetchSchedule_params->DynamicMetadataTransmittedBytes = display_cfg->plane_descriptors[k].dynamic_meta_data.transmitted_bytes;
-			CalculatePrefetchSchedule_params->UrgentLatency = mode_lib->mp.UrgentLatency;
 			CalculatePrefetchSchedule_params->ExtraLatencyPrefetch = mode_lib->mp.ExtraLatencyPrefetch;
 			CalculatePrefetchSchedule_params->TCalc = mode_lib->mp.TCalc;
 			CalculatePrefetchSchedule_params->vm_bytes = mode_lib->mp.vm_bytes[k];
@@ -12205,15 +12268,15 @@ static void rq_dlg_get_wm_regs(const struct dml2_display_cfg *display_cfg, const
 {
 	double refclk_freq_in_mhz = (display_cfg->overrides.hw.dlg_ref_clk_mhz > 0) ? (double)display_cfg->overrides.hw.dlg_ref_clk_mhz : mode_lib->soc.dchub_refclk_mhz;
 
-	wm_regs->fclk_pstate = (int unsigned)(mode_lib->mp.Watermark.FCLKChangeWatermark * refclk_freq_in_mhz);
-	wm_regs->sr_enter = (int unsigned)(mode_lib->mp.Watermark.StutterEnterPlusExitWatermark * refclk_freq_in_mhz);
-	wm_regs->sr_exit = (int unsigned)(mode_lib->mp.Watermark.StutterExitWatermark * refclk_freq_in_mhz);
-	wm_regs->sr_enter_z8 = (int unsigned)(mode_lib->mp.Watermark.Z8StutterEnterPlusExitWatermark * refclk_freq_in_mhz);
-	wm_regs->sr_exit_z8 = (int unsigned)(mode_lib->mp.Watermark.Z8StutterExitWatermark * refclk_freq_in_mhz);
-	wm_regs->temp_read_or_ppt = (int unsigned)(mode_lib->mp.Watermark.temp_read_or_ppt_watermark_us * refclk_freq_in_mhz);
-	wm_regs->uclk_pstate = (int unsigned)(mode_lib->mp.Watermark.DRAMClockChangeWatermark * refclk_freq_in_mhz);
-	wm_regs->urgent = (int unsigned)(mode_lib->mp.Watermark.UrgentWatermark * refclk_freq_in_mhz);
-	wm_regs->usr = (int unsigned)(mode_lib->mp.Watermark.USRRetrainingWatermark * refclk_freq_in_mhz);
+	wm_regs->fclk_pstate = (unsigned int)(mode_lib->mp.Watermark.FCLKChangeWatermark * refclk_freq_in_mhz);
+	wm_regs->sr_enter = (unsigned int)(mode_lib->mp.Watermark.StutterEnterPlusExitWatermark * refclk_freq_in_mhz);
+	wm_regs->sr_exit = (unsigned int)(mode_lib->mp.Watermark.StutterExitWatermark * refclk_freq_in_mhz);
+	wm_regs->sr_enter_z8 = (unsigned int)(mode_lib->mp.Watermark.Z8StutterEnterPlusExitWatermark * refclk_freq_in_mhz);
+	wm_regs->sr_exit_z8 = (unsigned int)(mode_lib->mp.Watermark.Z8StutterExitWatermark * refclk_freq_in_mhz);
+	wm_regs->temp_read_or_ppt = (unsigned int)(mode_lib->mp.Watermark.temp_read_or_ppt_watermark_us * refclk_freq_in_mhz);
+	wm_regs->uclk_pstate = (unsigned int)(mode_lib->mp.Watermark.DRAMClockChangeWatermark * refclk_freq_in_mhz);
+	wm_regs->urgent = (unsigned int)(mode_lib->mp.Watermark.UrgentWatermark * refclk_freq_in_mhz);
+	wm_regs->usr = (unsigned int)(mode_lib->mp.Watermark.USRRetrainingWatermark * refclk_freq_in_mhz);
 	wm_regs->refcyc_per_trip_to_mem = (unsigned int)(mode_lib->mp.UrgentLatency * refclk_freq_in_mhz);
 	wm_regs->refcyc_per_meta_trip_to_mem = (unsigned int)(mode_lib->mp.MetaTripToMemory * refclk_freq_in_mhz);
 	wm_regs->frac_urg_bw_flip = (unsigned int)(mode_lib->mp.FractionOfUrgentBandwidthImmediateFlip * 1000);
@@ -12692,7 +12755,7 @@ static void rq_dlg_get_dlg_reg(
 			disp_dlg_regs->refcyc_per_vm_req_flip = (unsigned int)(math_pow(2, 23) - 1);
 
 
-		DML_ASSERT(disp_dlg_regs->dst_y_after_scaler < (unsigned int)8);
+		DML_ASSERT(disp_dlg_regs->dst_y_after_scaler < 8U);
 		DML_ASSERT(disp_dlg_regs->refcyc_x_after_scaler < (unsigned int)math_pow(2, 13));
 
 		if (disp_dlg_regs->dst_y_per_pte_row_nom_l >= (unsigned int)math_pow(2, 17)) {
@@ -13248,7 +13311,7 @@ void dml2_core_calcs_get_informative(const struct dml2_core_internal_display_mod
 
 	out->informative.misc.cstate_max_cap_mode = dml_get_cstate_max_cap_mode(mode_lib);
 
-	out->min_clocks.dcn4x.dpprefclk_khz = (int unsigned)dml_get_global_dppclk_khz(mode_lib);
+	out->min_clocks.dcn4x.dpprefclk_khz = (unsigned int)dml_get_global_dppclk_khz(mode_lib);
 
 	out->informative.qos.max_active_fclk_change_latency_supported = dml_get_fclk_change_latency(mode_lib);
 

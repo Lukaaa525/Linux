@@ -25,6 +25,7 @@
 #include "include/crypto.h"
 #include "include/file.h"
 #include "include/match.h"
+#include "include/net.h"
 #include "include/path.h"
 #include "include/policy.h"
 #include "include/policy_unpack.h"
@@ -879,6 +880,7 @@ static int unpack_tags(struct aa_ext *e, struct aa_tags_struct *tags,
 			*info = "failed to unpack profile tag.sets";
 			goto fail;
 		}
+		error = -EPROTO;
 		if (!aa_unpack_nameX(e, AA_STRUCTEND, NULL))
 			goto fail;
 
@@ -1044,7 +1046,7 @@ static int unpack_pdb(struct aa_ext *e, struct aa_policydb **policy,
 	}
 
 	/* accept2 is in some cases being allocated, even with perms */
-	if (pdb->perms && !pdb->dfa->tables[YYTD_ID_ACCEPT2]) {
+	if (pdb->dfa && pdb->perms && !pdb->dfa->tables[YYTD_ID_ACCEPT2]) {
 		/* add dfa flags table missing in v2 */
 		u32 noents = pdb->dfa->tables[YYTD_ID_ACCEPT]->td_lolen;
 		u16 tdflags = pdb->dfa->tables[YYTD_ID_ACCEPT]->td_flags;
@@ -1053,7 +1055,8 @@ static int unpack_pdb(struct aa_ext *e, struct aa_policydb **policy,
 		pdb->dfa->tables[YYTD_ID_ACCEPT2] = kvzalloc(tsize, GFP_KERNEL);
 		if (!pdb->dfa->tables[YYTD_ID_ACCEPT2]) {
 			*info = "failed to alloc dfa flags table";
-			goto out;
+			error = -ENOMEM;
+			goto fail;
 		}
 		pdb->dfa->tables[YYTD_ID_ACCEPT2]->td_lolen = noents;
 		pdb->dfa->tables[YYTD_ID_ACCEPT2]->td_flags = tdflags;
@@ -1078,7 +1081,6 @@ static int unpack_pdb(struct aa_ext *e, struct aa_policydb **policy,
 	 * - move free of unneeded trans table here, has to be done
 	 *   after perm mapping.
 	 */
-out:
 	*policy = pdb;
 	return 0;
 
@@ -1465,6 +1467,7 @@ static int verify_header(struct aa_ext *e, int required, const char **ns)
 		if (*ns && strcmp(*ns, name)) {
 			audit_iface(NULL, NULL, NULL, "invalid ns change", e,
 				    error);
+			return error;
 		} else if (!*ns) {
 			*ns = kstrdup(name, GFP_KERNEL);
 			if (!*ns)
@@ -1715,6 +1718,8 @@ static int compress_loaddata(struct aa_loaddata *data)
  * @udata: user data copied to kmem  (NOT NULL)
  * @lh: list to place unpacked profiles in a aa_repl_ws
  * @ns: Returns namespace profile is in if specified else NULL (NOT NULL)
+ * @compressed_data: The userspace-provided compressed data. May be NULL
+ * @compressed_size: If compressed_data is not NULL, the compressed data size
  *
  * Unpack user data and return refcounted allocated profile(s) stored in
  * @lh in order of discovery, with the list chain stored in base.list
@@ -1723,12 +1728,12 @@ static int compress_loaddata(struct aa_loaddata *data)
  * Returns: profile(s) on @lh else error pointer if fails to unpack
  */
 int aa_unpack(struct aa_loaddata *udata, struct list_head *lh,
-	      const char **ns)
+	      const char **ns, char *compressed_data, size_t compressed_size)
 {
 	struct aa_load_ent *tmp, *ent;
 	struct aa_profile *profile = NULL;
 	char *ns_name = NULL;
-	int error;
+	int error = 0;
 	struct aa_ext e = {
 		.start = udata->data,
 		.end = udata->data + udata->size,
@@ -1781,10 +1786,23 @@ int aa_unpack(struct aa_loaddata *udata, struct list_head *lh,
 	}
 
 	if (aa_g_export_binary) {
-		error = compress_loaddata(udata);
+		/* Do we have userspace-compressed data? */
+		if (compressed_data) {
+			kvfree(udata->data);
+			udata->data = compressed_data;
+			udata->compressed_size = compressed_size;
+			compressed_data = NULL; /* consumed */
+
+		} else
+			error = compress_loaddata(udata);
+
 		if (error)
 			goto fail;
+	} else if (compressed_data) {
+		kvfree(compressed_data);
+		compressed_data = NULL;
 	}
+
 	return 0;
 
 fail_profile:
@@ -1792,6 +1810,8 @@ fail_profile:
 	aa_put_profile(profile);
 
 fail:
+	if (compressed_data)
+		kvfree(compressed_data);
 	list_for_each_entry_safe(ent, tmp, lh, list) {
 		list_del_init(&ent->list);
 		aa_load_ent_free(ent);

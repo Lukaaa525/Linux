@@ -46,7 +46,7 @@ EXPORT_SYMBOL(dst_default_metrics);
 
 #ifdef CONFIG_NET_DEV_REFCNT_TRACKER
 
-#define DST_TRACE_BUFFER_SIZE 4096
+#define DST_TRACE_BUFFER_SIZE 8192
 static struct dst_trace_buffer {
 	struct dst_entry *dst; // no-ref
 	struct net_device *ndev; // no-ref

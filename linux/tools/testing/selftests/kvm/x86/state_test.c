@@ -19,8 +19,6 @@
 #include "vmx.h"
 #include "svm_util.h"
 
-#define L2_GUEST_STACK_SIZE 256
-
 void svm_l2_guest_code(void)
 {
 	GUEST_SYNC(4);
@@ -35,13 +33,11 @@ void svm_l2_guest_code(void)
 
 static void svm_l1_guest_code(struct svm_test_data *svm)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 	struct vmcb *vmcb = svm->vmcb;
 
 	GUEST_ASSERT(svm->vmcb_gpa);
 	/* Prepare for L2 execution. */
-	generic_svm_setup(svm, svm_l2_guest_code,
-			  &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	generic_svm_setup(svm, svm_l2_guest_code);
 
 	vmcb->control.int_ctl |= (V_GIF_ENABLE_MASK | V_GIF_MASK);
 
@@ -78,8 +74,6 @@ void vmx_l2_guest_code(void)
 
 static void vmx_l1_guest_code(struct vmx_pages *vmx_pages)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
-
 	GUEST_ASSERT(vmx_pages->vmcs_gpa);
 	GUEST_ASSERT(prepare_for_vmx_operation(vmx_pages));
 	GUEST_SYNC(3);
@@ -89,8 +83,7 @@ static void vmx_l1_guest_code(struct vmx_pages *vmx_pages)
 	GUEST_SYNC(4);
 	GUEST_ASSERT(vmptrstz() == vmx_pages->vmcs_gpa);
 
-	prepare_vmcs(vmx_pages, vmx_l2_guest_code,
-		     &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	prepare_vmcs(vmx_pages, vmx_l2_guest_code);
 
 	GUEST_SYNC(5);
 	GUEST_ASSERT(vmptrstz() == vmx_pages->vmcs_gpa);
@@ -144,8 +137,8 @@ static void __attribute__((__flatten__)) guest_code(void *arg)
 	GUEST_SYNC(1);
 
 	if (this_cpu_has(X86_FEATURE_XSAVE)) {
-		uint64_t supported_xcr0 = this_cpu_supported_xcr0();
-		uint8_t buffer[PAGE_SIZE];
+		u64 supported_xcr0 = this_cpu_supported_xcr0();
+		u8 buffer[PAGE_SIZE];
 
 		memset(buffer, 0xcc, sizeof(buffer));
 
@@ -172,8 +165,8 @@ static void __attribute__((__flatten__)) guest_code(void *arg)
 		}
 
 		if (this_cpu_has(X86_FEATURE_MPX)) {
-			uint64_t bounds[2] = { 10, 0xffffffffull };
-			uint64_t output[2] = { };
+			u64 bounds[2] = { 10, 0xffffffffull };
+			u64 output[2] = { };
 
 			GUEST_ASSERT(supported_xcr0 & XFEATURE_MASK_BNDREGS);
 			GUEST_ASSERT(supported_xcr0 & XFEATURE_MASK_BNDCSR);
@@ -257,8 +250,8 @@ void check_nested_state(int stage, struct kvm_x86_state *state)
 
 int main(int argc, char *argv[])
 {
-	uint64_t *xstate_bv, saved_xstate_bv;
-	vm_vaddr_t nested_gva = 0;
+	u64 *xstate_bv, saved_xstate_bv;
+	gva_t nested_gva = 0;
 	struct kvm_cpuid2 empty_cpuid = {};
 	struct kvm_regs regs1, regs2;
 	struct kvm_vcpu *vcpu, *vcpuN;
@@ -331,7 +324,7 @@ int main(int argc, char *argv[])
 		 * supported features, even if something goes awry in saving
 		 * the original snapshot.
 		 */
-		xstate_bv = (void *)&((uint8_t *)state->xsave->region)[512];
+		xstate_bv = (void *)&((u8 *)state->xsave->region)[512];
 		saved_xstate_bv = *xstate_bv;
 
 		vcpuN = __vm_vcpu_add(vm, vcpu->id + 1);

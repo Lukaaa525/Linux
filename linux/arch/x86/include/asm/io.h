@@ -242,20 +242,18 @@ extern int io_delay_type;
 extern void io_delay_init(void);
 
 #if defined(CONFIG_PARAVIRT)
-#include <asm/paravirt.h>
+#include <asm/paravirt-base.h>
 #else
+#define call_io_delay() true
+#endif
 
 static inline void slow_down_io(void)
 {
-	native_io_delay();
-#ifdef REALLY_SLOW_IO
-	native_io_delay();
-	native_io_delay();
-	native_io_delay();
-#endif
-}
+	if (!call_io_delay())
+		return;
 
-#endif
+	native_io_delay();
+}
 
 #define BUILDIO(bwl, type)						\
 static inline void out##bwl##_p(type value, u16 port)			\

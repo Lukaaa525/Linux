@@ -23,7 +23,6 @@
 #include <linux/list.h>
 #include <linux/lockdep.h>
 #include <linux/minmax.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/notifier.h>
@@ -35,8 +34,6 @@
 #include <linux/string_helpers.h>
 #include <linux/sysfs.h>
 #include <linux/types.h>
-
-#include "dev-sync-probe.h"
 
 #define GPIO_SIM_NGPIO_MAX	1024
 #define GPIO_SIM_PROP_MAX	5 /* Max 4 properties + sentinel. */
@@ -546,7 +543,7 @@ static struct platform_driver gpio_sim_driver = {
 };
 
 struct gpio_sim_device {
-	struct dev_sync_probe_data probe_data;
+	struct platform_device *pdev;
 	struct config_group group;
 
 	int id;
@@ -673,7 +670,7 @@ static bool gpio_sim_device_is_live(struct gpio_sim_device *dev)
 {
 	lockdep_assert_held(&dev->lock);
 
-	return !!dev->probe_data.pdev;
+	return !!dev->pdev;
 }
 
 static char *gpio_sim_strdup_trimmed(const char *str, size_t count)
@@ -695,11 +692,11 @@ static ssize_t gpio_sim_device_config_dev_name_show(struct config_item *item,
 
 	guard(mutex)(&dev->lock);
 
-	pdev = dev->probe_data.pdev;
+	pdev = dev->pdev;
 	if (pdev)
-		return sprintf(page, "%s\n", dev_name(&pdev->dev));
+		return sysfs_emit(page, "%s\n", dev_name(&pdev->dev));
 
-	return sprintf(page, "gpio-sim.%d\n", dev->id);
+	return sysfs_emit(page, "gpio-sim.%d\n", dev->id);
 }
 
 CONFIGFS_ATTR_RO(gpio_sim_device_config_, dev_name);
@@ -713,7 +710,7 @@ gpio_sim_device_config_live_show(struct config_item *item, char *page)
 	scoped_guard(mutex, &dev->lock)
 		live = gpio_sim_device_is_live(dev);
 
-	return sprintf(page, "%c\n", live ? '1' : '0');
+	return sysfs_emit(page, "%c\n", live ? '1' : '0');
 }
 
 static unsigned int gpio_sim_get_line_names_size(struct gpio_sim_bank *bank)
@@ -900,9 +897,10 @@ static bool gpio_sim_bank_labels_non_unique(struct gpio_sim_device *dev)
 static int gpio_sim_device_activate(struct gpio_sim_device *dev)
 {
 	struct platform_device_info pdevinfo;
+	struct platform_device *pdev;
 	struct fwnode_handle *swnode;
 	struct gpio_sim_bank *bank;
-	int ret;
+	int ret = 0;
 
 	lockdep_assert_held(&dev->lock);
 
@@ -927,28 +925,42 @@ static int gpio_sim_device_activate(struct gpio_sim_device *dev)
 		bank->swnode = gpio_sim_make_bank_swnode(bank, swnode);
 		if (IS_ERR(bank->swnode)) {
 			ret = PTR_ERR(bank->swnode);
-			gpio_sim_remove_swnode_recursive(swnode);
-			return ret;
+			goto err_remove_swnode;
 		}
 
 		ret = gpio_sim_bank_add_hogs(bank);
-		if (ret) {
-			gpio_sim_remove_swnode_recursive(swnode);
-			return ret;
-		}
+		if (ret)
+			goto err_remove_swnode;
 	}
 
 	pdevinfo.name = "gpio-sim";
 	pdevinfo.fwnode = swnode;
 	pdevinfo.id = dev->id;
 
-	ret = dev_sync_probe_register(&dev->probe_data, &pdevinfo);
-	if (ret) {
-		gpio_sim_remove_swnode_recursive(swnode);
-		return ret;
+	pdev = platform_device_register_full(&pdevinfo);
+	if (IS_ERR(pdev)) {
+		ret = PTR_ERR(pdev);
+		goto err_remove_swnode;
 	}
 
+	wait_for_device_probe();
+
+	scoped_guard(device, &pdev->dev) {
+		if (!device_is_bound(&pdev->dev)) {
+			ret = -ENXIO;
+			goto err_unregister_pdev;
+		}
+	}
+
+	dev->pdev = pdev;
 	return 0;
+
+err_unregister_pdev:
+	platform_device_unregister(pdev);
+err_remove_swnode:
+	gpio_sim_remove_swnode_recursive(swnode);
+
+	return ret;
 }
 
 static void gpio_sim_device_deactivate(struct gpio_sim_device *dev)
@@ -957,8 +969,9 @@ static void gpio_sim_device_deactivate(struct gpio_sim_device *dev)
 
 	lockdep_assert_held(&dev->lock);
 
-	swnode = dev_fwnode(&dev->probe_data.pdev->dev);
-	dev_sync_probe_unregister(&dev->probe_data);
+	swnode = dev_fwnode(&dev->pdev->dev);
+	platform_device_unregister(dev->pdev);
+	dev->pdev = NULL;
 	gpio_sim_remove_swnode_recursive(swnode);
 }
 
@@ -1045,7 +1058,7 @@ static int gpio_sim_emit_chip_name(struct device *dev, void *data)
 		return 0;
 
 	if (device_match_fwnode(dev, ctx->swnode))
-		return sprintf(ctx->page, "%s\n", dev_name(dev));
+		return sysfs_emit(ctx->page, "%s\n", dev_name(dev));
 
 	return 0;
 }
@@ -1060,10 +1073,10 @@ static ssize_t gpio_sim_bank_config_chip_name_show(struct config_item *item,
 	guard(mutex)(&dev->lock);
 
 	if (gpio_sim_device_is_live(dev))
-		return device_for_each_child(&dev->probe_data.pdev->dev, &ctx,
+		return device_for_each_child(&dev->pdev->dev, &ctx,
 					     gpio_sim_emit_chip_name);
 
-	return sprintf(page, "none\n");
+	return sysfs_emit(page, "none\n");
 }
 
 CONFIGFS_ATTR_RO(gpio_sim_bank_config_, chip_name);
@@ -1076,7 +1089,7 @@ gpio_sim_bank_config_label_show(struct config_item *item, char *page)
 
 	guard(mutex)(&dev->lock);
 
-	return sprintf(page, "%s\n", bank->label ?: "");
+	return sysfs_emit(page, "%s\n", bank->label ?: "");
 }
 
 static ssize_t gpio_sim_bank_config_label_store(struct config_item *item,
@@ -1111,7 +1124,7 @@ gpio_sim_bank_config_num_lines_show(struct config_item *item, char *page)
 
 	guard(mutex)(&dev->lock);
 
-	return sprintf(page, "%u\n", bank->num_lines);
+	return sysfs_emit(page, "%u\n", bank->num_lines);
 }
 
 static ssize_t
@@ -1157,7 +1170,7 @@ gpio_sim_line_config_name_show(struct config_item *item, char *page)
 
 	guard(mutex)(&dev->lock);
 
-	return sprintf(page, "%s\n", line->name ?: "");
+	return sysfs_emit(page, "%s\n", line->name ?: "");
 }
 
 static ssize_t gpio_sim_line_config_name_store(struct config_item *item,
@@ -1192,7 +1205,7 @@ gpio_sim_line_config_valid_show(struct config_item *item, char *page)
 
 	guard(mutex)(&dev->lock);
 
-	return sprintf(page, "%c\n", line->valid ? '1' : '0');
+	return sysfs_emit(page, "%c\n", line->valid ? '1' : '0');
 }
 
 static ssize_t gpio_sim_line_config_valid_store(struct config_item *item,
@@ -1230,7 +1243,7 @@ static ssize_t gpio_sim_hog_config_name_show(struct config_item *item,
 
 	guard(mutex)(&dev->lock);
 
-	return sprintf(page, "%s\n", hog->name ?: "");
+	return sysfs_emit(page, "%s\n", hog->name ?: "");
 }
 
 static ssize_t gpio_sim_hog_config_name_store(struct config_item *item,
@@ -1284,7 +1297,7 @@ static ssize_t gpio_sim_hog_config_direction_show(struct config_item *item,
 		return -EINVAL;
 	}
 
-	return sprintf(page, "%s\n", repr);
+	return sysfs_emit(page, "%s\n", repr);
 }
 
 static ssize_t
@@ -1324,7 +1337,7 @@ static ssize_t gpio_sim_hog_config_active_low_show(struct config_item *item,
 
 	guard(mutex)(&dev->lock);
 
-	return sprintf(page, "%c\n", hog->active_low ? '1' : '0');
+	return sysfs_emit(page, "%c\n", hog->active_low ? '1' : '0');
 }
 
 static ssize_t
@@ -1570,8 +1583,6 @@ gpio_sim_config_make_device_group(struct config_group *group, const char *name)
 	dev->id = id;
 	mutex_init(&dev->lock);
 	INIT_LIST_HEAD(&dev->bank_list);
-
-	dev_sync_probe_init(&dev->probe_data);
 
 	return &no_free_ptr(dev)->group;
 }

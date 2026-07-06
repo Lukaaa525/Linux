@@ -153,8 +153,7 @@ static DECLARE_PHY_INTERFACE_MASK(phylink_sfp_interfaces);
  * phylink_set_port_modes() - set the port type modes in the ethtool mask
  * @mask: ethtool link mode mask
  *
- * Sets all the port type modes in the ethtool mask.  MAC drivers should
- * use this in their 'validate' callback.
+ * Sets all the port type modes in the ethtool mask.
  */
 void phylink_set_port_modes(unsigned long *mask)
 {
@@ -1341,6 +1340,13 @@ static void phylink_major_config(struct phylink *pl, bool restart,
 	}
 
 	if (pl->phydev && pl->phy_ib_mode) {
+		phylink_dbg(pl, "configuring PHY for inband%s%s%s\n",
+			    pl->phy_ib_mode & LINK_INBAND_DISABLE ?
+				" disable" : "",
+			    pl->phy_ib_mode & LINK_INBAND_ENABLE ?
+				" enable" : "",
+			    pl->phy_ib_mode & LINK_INBAND_BYPASS ?
+				" bypass" : "");
 		err = phy_config_inband(pl->phydev, pl->phy_ib_mode);
 		if (err < 0) {
 			phylink_err(pl, "phy_config_inband: %pe\n",
@@ -2088,9 +2094,9 @@ static int phylink_bringup_phy(struct phylink *pl, struct phy_device *phy,
 	/*
 	 * This is the new way of dealing with flow control for PHYs,
 	 * as described by Timur Tabi in commit 529ed1275263 ("net: phy:
-	 * phy drivers should not set SUPPORTED_[Asym_]Pause") except
-	 * using our validate call to the MAC, we rely upon the MAC
-	 * clearing the bits from both supported and advertising fields.
+	 * phy drivers should not set SUPPORTED_[Asym_]Pause"). MAC drivers
+	 * set their support using the MAC_SYM_PAUSE and MAC_ASYM_PAUSE
+	 * capabilities and must NOT change the phy's pause settings directly.
 	 */
 	phy_support_asym_pause(phy);
 
@@ -2288,14 +2294,12 @@ int phylink_fwnode_phy_connect(struct phylink *pl,
 	struct phy_device *phy_dev;
 	int ret;
 
-	/* Fixed links and 802.3z are handled without needing a PHY */
-	if (pl->cfg_link_an_mode == MLO_AN_FIXED ||
-	    (pl->cfg_link_an_mode == MLO_AN_INBAND &&
-	     phy_interface_mode_is_8023z(pl->link_interface)))
+	if (!phylink_expects_phy(pl))
 		return 0;
 
 	phy_fwnode = fwnode_get_phy_node(fwnode);
 	if (IS_ERR(phy_fwnode)) {
+		/* PHY mode requires a PHY to be specified. */
 		if (pl->cfg_link_an_mode == MLO_AN_PHY)
 			return -ENODEV;
 		return 0;
@@ -3926,9 +3930,9 @@ static int phylink_sfp_connect_phy(void *upstream, struct phy_device *phy)
 	/*
 	 * This is the new way of dealing with flow control for PHYs,
 	 * as described by Timur Tabi in commit 529ed1275263 ("net: phy:
-	 * phy drivers should not set SUPPORTED_[Asym_]Pause") except
-	 * using our validate call to the MAC, we rely upon the MAC
-	 * clearing the bits from both supported and advertising fields.
+	 * phy drivers should not set SUPPORTED_[Asym_]Pause"). MAC drivers
+	 * set their support using the MAC_SYM_PAUSE and MAC_ASYM_PAUSE
+	 * capabilities and must NOT change the phy's pause settings directly.
 	 */
 	phy_support_asym_pause(phy);
 

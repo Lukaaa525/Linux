@@ -175,6 +175,7 @@ auto-test-targets :=			\
 	maximal				\
 	maybe_null			\
 	minimal				\
+	non_scx_kfunc_deny		\
 	numa				\
 	allowed_cpus			\
 	peek_dsq			\
@@ -189,6 +190,7 @@ auto-test-targets :=			\
 	rt_stall			\
 	test_example			\
 	total_bw			\
+	cyclic_kick_wait		\
 
 testcase-targets := $(addsuffix .o,$(addprefix $(SCXOBJ_DIR)/,$(auto-test-targets)))
 

@@ -475,12 +475,9 @@ int btrfs_force_cow_block(struct btrfs_trans_handle *trans,
 	struct extent_buffer *cow;
 	int level, ret;
 	int last_ref = 0;
-	int unlock_orig = 0;
+	const bool unlock_orig = (*cow_ret == buf);
 	u64 parent_start = 0;
 	u64 reloc_src_root = 0;
-
-	if (*cow_ret == buf)
-		unlock_orig = 1;
 
 	btrfs_assert_tree_write_locked(buf);
 
@@ -767,22 +764,21 @@ int btrfs_bin_search(const struct extent_buffer *eb, int first_slot,
 
 	while (low < high) {
 		const int unit_size = eb->folio_size;
-		unsigned long oil;
+		unsigned long oif;
 		unsigned long offset;
 		struct btrfs_disk_key *tmp;
 		struct btrfs_disk_key unaligned;
-		int mid;
+		u32 mid;
 
 		mid = (low + high) / 2;
 		offset = p + mid * item_size;
-		oil = get_eb_offset_in_folio(eb, offset);
+		oif = get_eb_offset_in_folio(eb, offset);
 
-		if (oil + key_size <= unit_size) {
+		if (oif + key_size <= unit_size) {
 			const unsigned long idx = get_eb_folio_index(eb, offset);
 			char *kaddr = folio_address(eb->folios[idx]);
 
-			oil = get_eb_offset_in_folio(eb, offset);
-			tmp = (struct btrfs_disk_key *)(kaddr + oil);
+			tmp = (struct btrfs_disk_key *)(kaddr + oif);
 		} else {
 			read_extent_buffer(eb, &unaligned, offset, key_size);
 			tmp = &unaligned;
@@ -1498,17 +1494,11 @@ read_block_for_search(struct btrfs_root *root, struct btrfs_path *p,
 		if (p->reada == READA_FORWARD_ALWAYS)
 			reada_for_search(fs_info, p, parent_level, slot, key->objectid);
 
-		/* first we do an atomic uptodate check */
-		if (btrfs_buffer_uptodate(tmp, check.transid, true, NULL) > 0) {
-			/*
-			 * Do extra check for first_key, eb can be stale due to
-			 * being cached, read from scrub, or have multiple
-			 * parents (shared tree blocks).
-			 */
-			if (unlikely(btrfs_verify_level_key(tmp, &check))) {
-				ret = -EUCLEAN;
-				goto out;
-			}
+		/* Check if the cached eb is uptodate. */
+		ret = btrfs_buffer_uptodate(tmp, check.transid, &check);
+		if (unlikely(ret < 0))
+			goto out;
+		if (ret > 0) {
 			*eb_ret = tmp;
 			tmp = NULL;
 			ret = 0;
@@ -2076,7 +2066,7 @@ again:
 	}
 
 	while (b) {
-		int dec = 0;
+		bool dec = false;
 		int ret2;
 
 		level = btrfs_header_level(b);
@@ -2159,7 +2149,7 @@ cow_done:
 		prev_cmp = ret;
 
 		if (ret && slot > 0) {
-			dec = 1;
+			dec = true;
 			slot--;
 		}
 		p->slots[level] = slot;
@@ -2289,7 +2279,7 @@ again:
 	p->locks[level] = BTRFS_READ_LOCK;
 
 	while (b) {
-		int dec = 0;
+		bool dec = false;
 		int ret2;
 
 		level = btrfs_header_level(b);
@@ -2314,7 +2304,7 @@ again:
 		}
 
 		if (ret && slot > 0) {
-			dec = 1;
+			dec = true;
 			slot--;
 		}
 		p->slots[level] = slot;
@@ -3675,7 +3665,7 @@ static noinline int split_leaf(struct btrfs_trans_handle *trans,
 	int wret;
 	int split;
 	int num_doubles = 0;
-	int tried_avoid_double = 0;
+	bool tried_avoid_double = false;
 
 	l = path->nodes[0];
 	slot = path->slots[0];
@@ -3837,7 +3827,7 @@ again:
 
 push_for_double:
 	push_for_double_split(trans, root, path, data_size);
-	tried_avoid_double = 1;
+	tried_avoid_double = true;
 	if (btrfs_leaf_free_space(path->nodes[0]) >= data_size)
 		return 0;
 	goto again;

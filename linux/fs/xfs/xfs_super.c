@@ -400,8 +400,8 @@ xfs_blkdev_get(
 	blk_mode_t		mode;
 
 	mode = sb_open_mode(mp->m_super->s_flags);
-	*bdev_filep = bdev_file_open_by_path(name, mode,
-			mp->m_super, &fs_holder_ops);
+	*bdev_filep = fs_bdev_file_open_by_path(name, mode,
+			mp->m_super, mp->m_super);
 	if (IS_ERR(*bdev_filep)) {
 		error = PTR_ERR(*bdev_filep);
 		*bdev_filep = NULL;
@@ -526,7 +526,7 @@ xfs_open_devices(
 		mp->m_logdev_targp = mp->m_ddev_targp;
 		/* Handle won't be used, drop it */
 		if (logdev_file)
-			bdev_fput(logdev_file);
+			fs_bdev_file_release(logdev_file, mp->m_super);
 	}
 
 	return 0;
@@ -534,14 +534,17 @@ xfs_open_devices(
  out_free_rtdev_targ:
 	if (mp->m_rtdev_targp)
 		xfs_free_buftarg(mp->m_rtdev_targp);
+	mp->m_rtdev_targp = NULL;
+	rtdev_file = NULL;	/* released by xfs_free_buftarg() */
  out_free_ddev_targ:
 	xfs_free_buftarg(mp->m_ddev_targp);
+	mp->m_ddev_targp = NULL;
  out_close_rtdev:
 	 if (rtdev_file)
-		bdev_fput(rtdev_file);
+		fs_bdev_file_release(rtdev_file, mp->m_super);
  out_close_logdev:
 	if (logdev_file)
-		bdev_fput(logdev_file);
+		fs_bdev_file_release(logdev_file, mp->m_super);
 	return error;
 }
 
@@ -1901,7 +1904,6 @@ xfs_fs_fill_super(
 			error = -EINVAL;
 			goto out_filestream_unmount;
 		}
-		xfs_warn_experimental(mp, XFS_EXPERIMENTAL_ZONED);
 	}
 
 	if (xfs_has_reflink(mp)) {

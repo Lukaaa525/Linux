@@ -222,6 +222,27 @@ class OutputFormat:
 
         return None
 
+    def output_symbols(self, fname, symbols):
+        """
+        Handles a set of KdocItem symbols.
+        """
+        self.set_symbols(symbols)
+
+        msg = ""
+        for arg in symbols:
+            m = self.msg(fname, arg.name, arg)
+
+            if m is None:
+                ln = arg.get("ln", 0)
+                dtype = arg.get('type', "")
+
+                self.config.log.warning("%s:%d Can't handle %s",
+                                        fname, ln, dtype)
+            else:
+                msg += m
+
+        return msg
+
     # Virtual methods to be overridden by inherited classes
     # At the base class, those do nothing.
     def set_symbols(self, symbols):
@@ -368,7 +389,7 @@ class RestFormat(OutputFormat):
             else:
                 self.data += f'{self.lineprefix}**{section}**\n\n'
 
-            self.print_lineno(args.section_start_lines.get(section, 0))
+            self.print_lineno(args.sections_start_lines.get(section, 0))
             self.output_highlight(text)
             self.data += "\n"
         self.data += "\n"
@@ -492,7 +513,9 @@ class RestFormat(OutputFormat):
     def out_var(self, fname, name, args):
         oldprefix = self.lineprefix
         ln = args.declaration_start_line
-        full_proto = args.other_stuff["full_proto"]
+        full_proto = args.other_stuff.get("full_proto")
+        if not full_proto:
+            raise KeyError(f"Can't find full proto for {name} variable")
 
         self.lineprefix = "  "
 
@@ -601,7 +624,7 @@ class ManFormat(OutputFormat):
     ``manual``
         Defaults to ``Kernel API Manual``.
 
-    The above controls the output of teh corresponding fields on troff
+    The above controls the output of the corresponding fields on troff
     title headers, which will be filled like this::
 
         .TH "{name}" {section} "{date}" "{modulename}" "{manual}"
@@ -825,14 +848,14 @@ class ManFormat(OutputFormat):
         colspec_row = None
 
         pos = []
-        for m in KernRe(r'\-+').finditer(lines[i]):
+        for m in KernRe(r'\=+').finditer(lines[i]):
             pos.append((m.start(), m.end() - 1))
 
         i += 1
         while i < len(lines):
             line = lines[i]
 
-            if KernRe(r"^\s*[\-]+[ \t\-]+$").match(line):
+            if KernRe(r"^\s*[\=]+[ \t\=]+$").match(line):
                 i += 1
                 break
 
@@ -948,7 +971,7 @@ class ManFormat(OutputFormat):
                     self.data += text
                     continue
 
-                if KernRe(r"^\-+[ \t]\-[ \t\-]+$").match(line):
+                if KernRe(r"^\=+[ \t]\=[ \t\=]+$").match(line):
                     i, text = self.simple_table(lines, i)
                     self.data += text
                     continue

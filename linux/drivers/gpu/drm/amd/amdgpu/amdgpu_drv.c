@@ -33,7 +33,6 @@
 #include <drm/drm_vblank.h>
 
 #include <linux/cc_platform.h>
-#include <linux/console.h>
 #include <linux/dynamic_debug.h>
 #include <linux/module.h>
 #include <linux/mmu_notifier.h>
@@ -146,7 +145,9 @@ enum AMDGPU_DEBUG_MASK {
 	AMDGPU_DEBUG_SMU_POOL = BIT(7),
 	AMDGPU_DEBUG_VM_USERPTR = BIT(8),
 	AMDGPU_DEBUG_DISABLE_RAS_CE_LOG = BIT(9),
-	AMDGPU_DEBUG_ENABLE_CE_CS = BIT(10)
+	AMDGPU_DEBUG_ENABLE_CE_CS = BIT(10),
+	AMDGPU_DEBUG_HIBERNATION_THAW_RESUME_GPU = BIT(11),
+	AMDGPU_DEBUG_DISABLE_IP_BLOCK_SOFT_RESET = BIT(12),
 };
 
 unsigned int amdgpu_vram_limit = UINT_MAX;
@@ -246,6 +247,7 @@ int amdgpu_umsch_mm_fwlog;
 int amdgpu_rebar = -1; /* auto */
 int amdgpu_user_queue = -1;
 uint amdgpu_hdmi_hpd_debounce_delay_ms;
+int amdgpu_ptl = -1; /* auto */
 
 DECLARE_DYNDBG_CLASSMAP(drm_debug_classes, DD_CLASS_TYPE_DISJOINT_BITS, 0,
 			"DRM_UT_CORE",
@@ -641,9 +643,7 @@ module_param_named(si_support, amdgpu_si_support, int, 0444);
  * CIK (Sea Islands) are second generation GCN GPUs, supported by both
  * drivers: radeon (old) and amdgpu (new). This parameter controls whether
  * amdgpu should support CIK.
- * By default:
- * - CIK dedicated GPUs are supported by amdgpu.
- * - CIK APUs are supported by radeon (except when radeon is not built).
+ * By default, CIK dedicated GPUs and APUs are supported by amdgpu.
  * Only relevant when CONFIG_DRM_AMDGPU_CIK is enabled to build CIK support in amdgpu.
  * See also radeon.cik_support which should be disabled when amdgpu.cik_support is
  * enabled, and vice versa.
@@ -1113,6 +1113,18 @@ module_param_named(user_queue, amdgpu_user_queue, int, 0444);
  */
 MODULE_PARM_DESC(hdmi_hpd_debounce_delay_ms, "HDMI HPD disconnect debounce delay in milliseconds (0 to disable (by default), 1500 is common)");
 module_param_named(hdmi_hpd_debounce_delay_ms, amdgpu_hdmi_hpd_debounce_delay_ms, uint, 0644);
+
+/**
+ * DOC: ptl (int)
+ * Enable PTL feature at boot time. Possible values:
+ *
+ * - -1 = auto (ASIC specific default)
+ * -  0 = disable PTL (default)
+ * -  1 = enable PTL
+ * -  2 = permanently disable PTL (cannot be re-enabled at runtime)
+ */
+MODULE_PARM_DESC(ptl, "Enable PTL (-1 = auto, 0 = disable (default), 1 = enable, 2 = permanently disable)");
+module_param_named(ptl, amdgpu_ptl, int, 0444);
 
 /* These devices are not supported by amdgpu.
  * They are supported by the mach64, r128, radeon drivers
@@ -1928,6 +1940,7 @@ static const struct pci_device_id pciidlist[] = {
 	{0x1002, 0x6646, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_BONAIRE|AMD_IS_MOBILITY},
 	{0x1002, 0x6647, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_BONAIRE|AMD_IS_MOBILITY},
 	{0x1002, 0x6649, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_BONAIRE},
+	{0x1002, 0x664D, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_BONAIRE},
 	{0x1002, 0x6650, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_BONAIRE},
 	{0x1002, 0x6651, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_BONAIRE},
 	{0x1002, 0x6658, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_BONAIRE},
@@ -1997,6 +2010,7 @@ static const struct pci_device_id pciidlist[] = {
 	{0x1002, 0x6930, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_TONGA},
 	{0x1002, 0x6938, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_TONGA},
 	{0x1002, 0x6939, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_TONGA},
+	{0x1002, 0x693B, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_TONGA},
 	/* fiji */
 	{0x1002, 0x7300, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_FIJI},
 	{0x1002, 0x730F, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_FIJI},
@@ -2025,6 +2039,7 @@ static const struct pci_device_id pciidlist[] = {
 	{0x1002, 0x67C4, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS10},
 	{0x1002, 0x67C7, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS10},
 	{0x1002, 0x67D0, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS10},
+	{0x1002, 0x67D4, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS10},
 	{0x1002, 0x67DF, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS10},
 	{0x1002, 0x67C8, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS10},
 	{0x1002, 0x67C9, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS10},
@@ -2038,6 +2053,7 @@ static const struct pci_device_id pciidlist[] = {
 	{0x1002, 0x6985, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS12},
 	{0x1002, 0x6986, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS12},
 	{0x1002, 0x6987, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS12},
+	{0x1002, 0x698F, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS12},
 	{0x1002, 0x6995, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS12},
 	{0x1002, 0x6997, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS12},
 	{0x1002, 0x699F, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_POLARIS12},
@@ -2239,7 +2255,7 @@ static void amdgpu_init_debug_options(struct amdgpu_device *adev)
 	}
 
 	if (amdgpu_debug_mask & AMDGPU_DEBUG_DISABLE_GPU_SOFT_RECOVERY) {
-		pr_info("debug: soft reset for GPU recovery disabled\n");
+		pr_info("debug: soft recovery disabled\n");
 		adev->debug_disable_soft_recovery = true;
 	}
 
@@ -2279,6 +2295,16 @@ static void amdgpu_init_debug_options(struct amdgpu_device *adev)
 	if (amdgpu_debug_mask & AMDGPU_DEBUG_ENABLE_CE_CS) {
 		pr_info("debug: allowing command submission to CE engine\n");
 		adev->debug_enable_ce_cs = true;
+	}
+
+	if (amdgpu_debug_mask & AMDGPU_DEBUG_HIBERNATION_THAW_RESUME_GPU) {
+		pr_info("debug: resume gpu in thaw() of hibernation\n");
+		adev->debug_hibernation_thaw_resume_gpu = true;
+	}
+
+	if (amdgpu_debug_mask & AMDGPU_DEBUG_DISABLE_IP_BLOCK_SOFT_RESET) {
+		pr_info("debug: IP block soft reset disabled\n");
+		adev->debug_disable_ip_block_soft_reset = true;
 	}
 }
 
@@ -2323,8 +2349,6 @@ static bool amdgpu_support_enabled(struct device *dev,
 
 	case CHIP_BONAIRE:
 	case CHIP_HAWAII:
-		support_by_default = true;
-		fallthrough;
 	case CHIP_KAVERI:
 	case CHIP_KABINI:
 	case CHIP_MULLINS:
@@ -2332,6 +2356,7 @@ static bool amdgpu_support_enabled(struct device *dev,
 		param = "cik_support";
 		module_param = amdgpu_cik_support;
 		amdgpu_support_built = IS_ENABLED(CONFIG_DRM_AMDGPU_CIK);
+		support_by_default = true;
 		break;
 
 	default:
@@ -2542,6 +2567,8 @@ amdgpu_pci_remove(struct pci_dev *pdev)
 
 	amdgpu_driver_unload_kms(dev);
 
+	amdgpu_discovery_sysfs_early_fini(pdev);
+
 	/*
 	 * Flush any in flight DMA operations from device.
 	 * Clear the Bus Master Enable bit and then wait on the PCIe Device
@@ -2683,17 +2710,22 @@ static int amdgpu_pmops_freeze(struct device *dev)
 	if (r)
 		return r;
 
-	if (amdgpu_acpi_should_gpu_reset(adev))
-		return amdgpu_asic_reset(adev);
+	if (amdgpu_acpi_should_gpu_reset(adev)) {
+		amdgpu_device_lock_reset_domain(adev->reset_domain);
+		r = amdgpu_asic_reset(adev);
+		amdgpu_device_unlock_reset_domain(adev->reset_domain);
+		return r;
+	}
 	return 0;
 }
 
 static int amdgpu_pmops_thaw(struct device *dev)
 {
 	struct drm_device *drm_dev = dev_get_drvdata(dev);
+	struct amdgpu_device *adev = drm_to_adev(drm_dev);
 
 	/* do not resume device if it's normal hibernation */
-	if (console_suspend_enabled &&
+	if (!adev->debug_hibernation_thaw_resume_gpu &&
 	    !pm_hibernate_is_recovering() &&
 	    !pm_hibernation_mode_is_suspend())
 		return 0;
@@ -2796,12 +2828,11 @@ static int amdgpu_runtime_idle_check_userq(struct device *dev)
 	return xa_empty(&adev->userq_doorbell_xa) ? 0 : -EBUSY;
 }
 
-static int amdgpu_pmops_runtime_suspend(struct device *dev)
+static int amdgpu_pmops_runtime_checks(struct device *dev)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct drm_device *drm_dev = pci_get_drvdata(pdev);
+	struct drm_device *drm_dev = dev_get_drvdata(dev);
 	struct amdgpu_device *adev = drm_to_adev(drm_dev);
-	int ret, i;
+	int ret;
 
 	if (adev->pm.rpm_mode == AMDGPU_RUNPM_NONE) {
 		pm_runtime_forbid(dev);
@@ -2811,7 +2842,27 @@ static int amdgpu_pmops_runtime_suspend(struct device *dev)
 	ret = amdgpu_runtime_idle_check_display(dev);
 	if (ret)
 		return ret;
-	ret = amdgpu_runtime_idle_check_userq(dev);
+
+	return amdgpu_runtime_idle_check_userq(dev);
+}
+
+static int amdgpu_pmops_runtime_idle(struct device *dev)
+{
+	int ret;
+
+	ret = amdgpu_pmops_runtime_checks(dev);
+	pm_runtime_autosuspend(dev);
+	return ret;
+}
+
+static int amdgpu_pmops_runtime_suspend(struct device *dev)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct drm_device *drm_dev = pci_get_drvdata(pdev);
+	struct amdgpu_device *adev = drm_to_adev(drm_dev);
+	int ret, i;
+
+	ret = amdgpu_pmops_runtime_checks(dev);
 	if (ret)
 		return ret;
 
@@ -2921,27 +2972,6 @@ static int amdgpu_pmops_runtime_resume(struct device *dev)
 		drm_dev->switch_power_state = DRM_SWITCH_POWER_ON;
 	adev->in_runpm = false;
 	return 0;
-}
-
-static int amdgpu_pmops_runtime_idle(struct device *dev)
-{
-	struct drm_device *drm_dev = dev_get_drvdata(dev);
-	struct amdgpu_device *adev = drm_to_adev(drm_dev);
-	int ret;
-
-	if (adev->pm.rpm_mode == AMDGPU_RUNPM_NONE) {
-		pm_runtime_forbid(dev);
-		return -EBUSY;
-	}
-
-	ret = amdgpu_runtime_idle_check_display(dev);
-	if (ret)
-		goto done;
-
-	ret = amdgpu_runtime_idle_check_userq(dev);
-done:
-	pm_runtime_autosuspend(dev);
-	return ret;
 }
 
 static int amdgpu_drm_release(struct inode *inode, struct file *filp)
@@ -3064,6 +3094,7 @@ const struct drm_ioctl_desc amdgpu_ioctls_kms[] = {
 	DRM_IOCTL_DEF_DRV(AMDGPU_USERQ_SIGNAL, amdgpu_userq_signal_ioctl, DRM_AUTH|DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(AMDGPU_USERQ_WAIT, amdgpu_userq_wait_ioctl, DRM_AUTH|DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(AMDGPU_GEM_LIST_HANDLES, amdgpu_gem_list_handles_ioctl, DRM_AUTH|DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(AMDGPU_PROC_OPTIONS, amdgpu_proc_options_ioctl, DRM_AUTH|DRM_RENDER_ALLOW),
 };
 
 static const struct drm_driver amdgpu_kms_driver = {
@@ -3146,19 +3177,20 @@ static int __init amdgpu_init(void)
 {
 	int r;
 
+	/* Train lockdep on correct lock ordering */
+	amdgpu_lockdep_init();
+
 	r = amdgpu_sync_init();
 	if (r)
-		goto error_sync;
-
-	r = amdgpu_userq_fence_slab_init();
-	if (r)
-		goto error_fence;
+		return r;
 
 	amdgpu_register_atpx_handler();
 	amdgpu_acpi_detect();
 
-	/* Ignore KFD init failures. Normal when CONFIG_HSA_AMD is not set. */
-	amdgpu_amdkfd_init();
+	/* Ignore KFD init failures when CONFIG_HSA_AMD is not set. */
+	r = amdgpu_amdkfd_init();
+	if (r && r != -ENOENT)
+		goto error_fini_sync;
 
 	if (amdgpu_pp_feature_mask & PP_OVERDRIVE_MASK) {
 		add_taint(TAINT_CPU_OUT_OF_SPEC, LOCKDEP_STILL_OK);
@@ -3169,10 +3201,8 @@ static int __init amdgpu_init(void)
 	/* let modprobe override vga console setting */
 	return pci_register_driver(&amdgpu_kms_pci_driver);
 
-error_fence:
+error_fini_sync:
 	amdgpu_sync_fini();
-
-error_sync:
 	return r;
 }
 
@@ -3183,9 +3213,16 @@ static void __exit amdgpu_exit(void)
 	amdgpu_unregister_atpx_handler();
 	amdgpu_acpi_release();
 	amdgpu_sync_fini();
-	amdgpu_userq_fence_slab_fini();
 	mmu_notifier_synchronize();
 	amdgpu_xcp_drv_release();
+
+	/*
+	 * Flush outstanding call_rcu() callbacks before the
+	 * module text is freed.  Otherwise a grace period elapsing after
+	 * unload invokes a callback in already-freed module memory and
+	 * faults in rcu_do_batch().
+	 */
+	rcu_barrier();
 }
 
 module_init(amdgpu_init);

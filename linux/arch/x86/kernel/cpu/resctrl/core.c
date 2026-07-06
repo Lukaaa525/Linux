@@ -22,6 +22,7 @@
 #include <linux/cpuhotplug.h>
 
 #include <asm/cpu_device_id.h>
+#include <asm/cpuid/api.h>
 #include <asm/msr.h>
 #include <asm/resctrl.h>
 #include "internal.h"
@@ -724,13 +725,16 @@ static void domain_remove_cpu(int cpu, struct rdt_resource *r)
 static void clear_closid_rmid(int cpu)
 {
 	struct resctrl_pqr_state *state = this_cpu_ptr(&pqr_state);
+	struct msr val = {
+		.l = RESCTRL_RESERVED_RMID,
+		.h = RESCTRL_RESERVED_CLOSID
+	};
 
 	state->default_closid = RESCTRL_RESERVED_CLOSID;
 	state->default_rmid = RESCTRL_RESERVED_RMID;
 	state->cur_closid = RESCTRL_RESERVED_CLOSID;
 	state->cur_rmid = RESCTRL_RESERVED_RMID;
-	wrmsr(MSR_IA32_PQR_ASSOC, RESCTRL_RESERVED_RMID,
-	      RESCTRL_RESERVED_CLOSID);
+	wrmsrq(MSR_IA32_PQR_ASSOC, val.q);
 }
 
 static int resctrl_arch_online_cpu(unsigned int cpu)

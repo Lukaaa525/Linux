@@ -7,7 +7,7 @@
 #include "xarray-shared.h"
 #include "test.h"
 
-#undef CONFIG_DEBUG_XARRAY
+#undef XA_DEBUG
 #include "../../../lib/test_xarray.c"
 
 void xarray_tests(void)

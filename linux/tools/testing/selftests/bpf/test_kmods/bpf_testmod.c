@@ -470,6 +470,11 @@ noinline void bpf_testmod_stacktrace_test_1(void)
 
 int bpf_testmod_fentry_ok;
 
+noinline int bpf_testmod_trampoline_count_test(void)
+{
+	return 0;
+}
+
 noinline ssize_t
 bpf_testmod_test_read(struct file *file, struct kobject *kobj,
 		      const struct bin_attribute *bin_attr,
@@ -547,6 +552,8 @@ bpf_testmod_test_read(struct file *file, struct kobject *kobj,
 	    bpf_testmod_fentry_test11(16, (void *)17, 18, 19, (void *)20,
 			21, 22, 23, 24, 25, 26) != 231)
 		goto out;
+
+	bpf_testmod_trampoline_count_test();
 
 	bpf_testmod_stacktrace_test_1();
 
@@ -716,6 +723,7 @@ BTF_ID_FLAGS(func, bpf_iter_testmod_seq_next, KF_ITER_NEXT | KF_RET_NULL)
 BTF_ID_FLAGS(func, bpf_iter_testmod_seq_destroy, KF_ITER_DESTROY)
 BTF_ID_FLAGS(func, bpf_iter_testmod_seq_value)
 BTF_ID_FLAGS(func, bpf_kfunc_common_test)
+BTF_ID_FLAGS(func, bpf_kfunc_call_test_mem_len_pass1)
 BTF_ID_FLAGS(func, bpf_kfunc_dynptr_test)
 BTF_ID_FLAGS(func, bpf_kfunc_nested_acquire_nonzero_offset_test, KF_ACQUIRE)
 BTF_ID_FLAGS(func, bpf_kfunc_nested_acquire_zero_offset_test, KF_ACQUIRE)
@@ -815,6 +823,76 @@ __bpf_kfunc int bpf_kfunc_call_test5(u8 a, u16 b, u32 c)
 		return 6;
 
 	return 0;
+}
+
+__bpf_kfunc u64 bpf_kfunc_call_stack_arg(u64 a, u64 b, u64 c, u64 d,
+					 u64 e, u64 f, u64 g, u64 h,
+					 u64 i, u64 j)
+{
+	return a + b + c + d + e + f + g + h + i + j;
+}
+
+__bpf_kfunc u64 bpf_kfunc_call_stack_arg_ptr(u64 a, u64 b, u64 c, u64 d, u64 e,
+					     u64 f, u64 g, u64 h, u64 i,
+					     struct prog_test_pass1 *p)
+{
+	return a + b + c + d + e + f + g + h + i + p->x0 + p->x1;
+}
+
+__bpf_kfunc u64 bpf_kfunc_call_stack_arg_mix(u64 a, u64 b, u64 c, u64 d, u64 e,
+					     u64 f, u64 g,
+					     struct prog_test_pass1 *p, u64 h,
+					     struct prog_test_pass1 *q)
+{
+	return a + b + c + d + e + f + g + p->x0 + h + q->x1;
+}
+
+__bpf_kfunc u64 bpf_kfunc_call_stack_arg_dynptr(u64 a, u64 b, u64 c, u64 d, u64 e,
+					       u64 f, u64 g, u64 h, u64 i,
+					       struct bpf_dynptr *ptr)
+{
+	const struct bpf_dynptr_kern *kern_ptr = (void *)ptr;
+
+	return a + b + c + d + e + f + g + h + i + (kern_ptr->size & 0xFFFFFF);
+}
+
+__bpf_kfunc u64 bpf_kfunc_call_stack_arg_mem(u64 a, u64 b, u64 c, u64 d, u64 e,
+					     void *mem, int mem__sz)
+{
+	const unsigned char *p = mem;
+	u64 sum = a + b + c + d + e;
+	int i;
+
+	for (i = 0; i < mem__sz; i++)
+		sum += p[i];
+	return sum;
+}
+
+__bpf_kfunc u64 bpf_kfunc_call_stack_arg_iter(u64 a, u64 b, u64 c, u64 d, u64 e,
+					      u64 f, u64 g, u64 h, u64 i,
+					      struct bpf_iter_testmod_seq *it__iter)
+{
+	return a + b + c + d + e + f + g + h + i + it__iter->value;
+}
+
+__bpf_kfunc u64 bpf_kfunc_call_stack_arg_const_str(u64 a, u64 b, u64 c, u64 d, u64 e,
+						   u64 f, u64 g, u64 h, u64 i,
+						   const char *str__str)
+{
+	return a + b + c + d + e + f + g + h + i;
+}
+
+__bpf_kfunc u64 bpf_kfunc_call_stack_arg_timer(u64 a, u64 b, u64 c, u64 d, u64 e,
+					       u64 f, u64 g, u64 h, u64 i,
+					       struct bpf_timer *timer)
+{
+	return a + b + c + d + e + f + g + h + i;
+}
+
+__bpf_kfunc u64 bpf_kfunc_call_stack_arg_big(u64 a, u64 b, u64 c, u64 d, u64 e,
+					     struct prog_test_big_arg s)
+{
+	return a + b + c + d + e + s.a + s.b;
 }
 
 static struct prog_test_ref_kfunc prog_test_struct = {
@@ -1280,7 +1358,15 @@ BTF_ID_FLAGS(func, bpf_kfunc_call_test2)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test3)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test4)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test5)
-BTF_ID_FLAGS(func, bpf_kfunc_call_test_mem_len_pass1)
+BTF_ID_FLAGS(func, bpf_kfunc_call_stack_arg)
+BTF_ID_FLAGS(func, bpf_kfunc_call_stack_arg_ptr)
+BTF_ID_FLAGS(func, bpf_kfunc_call_stack_arg_mix)
+BTF_ID_FLAGS(func, bpf_kfunc_call_stack_arg_dynptr)
+BTF_ID_FLAGS(func, bpf_kfunc_call_stack_arg_mem)
+BTF_ID_FLAGS(func, bpf_kfunc_call_stack_arg_iter)
+BTF_ID_FLAGS(func, bpf_kfunc_call_stack_arg_const_str)
+BTF_ID_FLAGS(func, bpf_kfunc_call_stack_arg_timer)
+BTF_ID_FLAGS(func, bpf_kfunc_call_stack_arg_big)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test_mem_len_fail1)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test_mem_len_fail2)
 BTF_ID_FLAGS(func, bpf_kfunc_call_test_acquire, KF_ACQUIRE | KF_RET_NULL)
@@ -1411,6 +1497,12 @@ static int bpf_testmod_ops__test_refcounted(int dummy,
 	return 0;
 }
 
+static int bpf_testmod_ops__test_refcounted_multi(int dummy, struct task_struct *task__nullable,
+						  struct task_struct *task__ref)
+{
+	return 0;
+}
+
 static struct task_struct *
 bpf_testmod_ops__test_return_ref_kptr(int dummy, struct task_struct *task__ref,
 				      struct cgroup *cgrp)
@@ -1423,6 +1515,7 @@ static struct bpf_testmod_ops __bpf_testmod_ops = {
 	.test_2 = bpf_testmod_test_2,
 	.test_maybe_null = bpf_testmod_ops__test_maybe_null,
 	.test_refcounted = bpf_testmod_ops__test_refcounted,
+	.test_refcounted_multi = bpf_testmod_ops__test_refcounted_multi,
 	.test_return_ref_kptr = bpf_testmod_ops__test_return_ref_kptr,
 };
 
@@ -1895,6 +1988,16 @@ struct bpf_struct_ops testmod_multi_st_ops = {
 
 extern int bpf_fentry_test1(int a);
 
+BTF_KFUNCS_START(bpf_testmod_trampoline_count_ids)
+BTF_ID_FLAGS(func, bpf_testmod_trampoline_count_test)
+BTF_KFUNCS_END(bpf_testmod_trampoline_count_ids)
+
+static const struct
+btf_kfunc_id_set bpf_testmod_trampoline_count_fmodret_set = {
+	.owner = THIS_MODULE,
+	.set = &bpf_testmod_trampoline_count_ids,
+};
+
 static int bpf_testmod_init(void)
 {
 	const struct btf_id_dtor_kfunc bpf_testmod_dtors[] = {
@@ -1911,6 +2014,7 @@ static int bpf_testmod_init(void)
 	ret = ret ?: register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING, &bpf_testmod_kfunc_set);
 	ret = ret ?: register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &bpf_testmod_kfunc_set);
 	ret = ret ?: register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &bpf_testmod_kfunc_set);
+	ret = ret ?: register_btf_fmodret_id_set(&bpf_testmod_trampoline_count_fmodret_set);
 	ret = ret ?: register_bpf_struct_ops(&bpf_bpf_testmod_ops, bpf_testmod_ops);
 	ret = ret ?: register_bpf_struct_ops(&bpf_testmod_ops2, bpf_testmod_ops2);
 	ret = ret ?: register_bpf_struct_ops(&bpf_testmod_ops3, bpf_testmod_ops3);

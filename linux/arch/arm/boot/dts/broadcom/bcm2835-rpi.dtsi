@@ -1,16 +1,14 @@
 #include <dt-bindings/power/raspberrypi-power.h>
 
 / {
-	soc {
-		firmware {
-			firmware: rpi-firmware {
-				compatible = "raspberrypi,bcm2835-firmware", "simple-mfd";
-				mboxes = <&mailbox>;
+	firmware {
+		firmware: rpi-firmware {
+			compatible = "raspberrypi,bcm2835-firmware", "simple-mfd";
+			mboxes = <&mailbox>;
 
-				firmware_clocks: clocks {
-					compatible = "raspberrypi,firmware-clocks";
-					#clock-cells = <1>;
-				};
+			firmware_clocks: clocks {
+				compatible = "raspberrypi,firmware-clocks";
+				#clock-cells = <1>;
 			};
 
 			power: power {
@@ -19,7 +17,9 @@
 				#power-domain-cells = <1>;
 			};
 		};
+	};
 
+	soc {
 		vchiq: mailbox@7e00b840 {
 			compatible = "brcm,bcm2835-vchiq";
 			reg = <0x7e00b840 0x3c>;

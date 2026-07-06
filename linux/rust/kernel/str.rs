@@ -3,14 +3,27 @@
 //! String representations.
 
 use crate::{
-    alloc::{flags::*, AllocError, KVec},
-    error::{to_result, Result},
-    fmt::{self, Write},
-    prelude::*,
+    alloc::{
+        AllocError,
+        KVec, //
+    },
+    error::{
+        to_result,
+        Result, //
+    },
+    fmt::{
+        self,
+        Write, //
+    },
+    prelude::*, //
 };
 use core::{
     marker::PhantomData,
-    ops::{Deref, DerefMut, Index},
+    ops::{
+        Deref,
+        DerefMut,
+        Index, //
+    }, //
 };
 
 pub use crate::prelude::CStr;
@@ -415,6 +428,7 @@ macro_rules! c_str {
     }};
 }
 
+#[cfg(CONFIG_RUST_STR_KUNIT_TEST)]
 #[kunit_tests(rust_kernel_str)]
 mod tests {
     use super::*;
@@ -844,7 +858,10 @@ impl CString {
         f.write_str("\0")?;
 
         // SAFETY: The number of bytes that can be written to `f` is bounded by `size`, which is
-        // `buf`'s capacity. The contents of the buffer have been initialised by writes to `f`.
+        // `buf`'s capacity. The `Formatter` is created with `size` as its limit, and the `?`
+        // operators on `write_fmt` and `write_str` above ensure that if writing exceeds this
+        // limit, an error is returned early. The contents of the buffer have been initialised
+        // by writes to `f`.
         unsafe { buf.inc_len(f.bytes_written()) };
 
         // Check that there are no `NUL` bytes before the end.

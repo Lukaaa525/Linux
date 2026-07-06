@@ -216,6 +216,11 @@ static inline void cmos_write_bank2(unsigned char val, unsigned char addr)
 
 /*----------------------------------------------------------------*/
 
+static bool cmos_no_alarm(struct cmos_rtc *cmos)
+{
+	return !is_valid_irq(cmos->irq) && !cmos_use_acpi_alarm();
+}
+
 static int cmos_read_time(struct device *dev, struct rtc_time *t)
 {
 	int ret;
@@ -287,7 +292,7 @@ static int cmos_read_alarm(struct device *dev, struct rtc_wkalrm *t)
 	};
 
 	/* This not only a rtc_op, but also called directly */
-	if (!is_valid_irq(cmos->irq))
+	if (cmos_no_alarm(cmos))
 		return -ETIMEDOUT;
 
 	/* Basic alarms only support hour, minute, and seconds fields.
@@ -520,7 +525,7 @@ static int cmos_set_alarm(struct device *dev, struct rtc_wkalrm *t)
 	int ret;
 
 	/* This not only a rtc_op, but also called directly */
-	if (!is_valid_irq(cmos->irq))
+	if (cmos_no_alarm(cmos))
 		return -EIO;
 
 	ret = cmos_validate_alarm(dev, t);
@@ -817,6 +822,9 @@ static void rtc_wake_off(struct device *dev)
 #ifdef CONFIG_X86
 static void use_acpi_alarm_quirks(void)
 {
+	if (acpi_gbl_FADT.flags & ACPI_FADT_FIXED_RTC)
+		return;
+
 	switch (boot_cpu_data.x86_vendor) {
 	case X86_VENDOR_INTEL:
 		if (dmi_get_bios_year() < 2015)
@@ -830,8 +838,6 @@ static void use_acpi_alarm_quirks(void)
 	default:
 		return;
 	}
-	if (!is_hpet_enabled())
-		return;
 
 	use_acpi_alarm = true;
 }
@@ -928,6 +934,7 @@ cmos_do_probe(struct device *dev, struct resource *ports, int rtc_irq)
 	unsigned char			rtc_control;
 	unsigned			address_space;
 	u32				flags = 0;
+	bool				hpet_registered = false;
 	struct nvmem_config nvmem_cfg = {
 		.name = "cmos_nvram",
 		.word_size = 1,
@@ -1085,6 +1092,7 @@ cmos_do_probe(struct device *dev, struct resource *ports, int rtc_irq)
 						" failed in rtc_init().");
 				goto cleanup1;
 			}
+			hpet_registered = true;
 		} else
 			rtc_cmos_int_handler = cmos_interrupt;
 
@@ -1095,7 +1103,7 @@ cmos_do_probe(struct device *dev, struct resource *ports, int rtc_irq)
 			dev_dbg(dev, "IRQ %d is already in use\n", rtc_irq);
 			goto cleanup1;
 		}
-	} else {
+	} else if (!cmos_use_acpi_alarm()) {
 		clear_bit(RTC_FEATURE_ALARM, cmos_rtc.rtc->features);
 	}
 
@@ -1120,7 +1128,7 @@ cmos_do_probe(struct device *dev, struct resource *ports, int rtc_irq)
 		acpi_rtc_event_setup(dev);
 
 	dev_info(dev, "%s%s, %d bytes nvram%s\n",
-		 !is_valid_irq(rtc_irq) ? "no alarms" :
+		 cmos_no_alarm(&cmos_rtc) ? "no alarms" :
 		 cmos_rtc.mon_alrm ? "alarms up to one year" :
 		 cmos_rtc.day_alrm ? "alarms up to one month" :
 		 "alarms up to one day",
@@ -1134,6 +1142,10 @@ cleanup2:
 	if (is_valid_irq(rtc_irq))
 		free_irq(rtc_irq, cmos_rtc.rtc);
 cleanup1:
+	if (hpet_registered) {
+		hpet_mask_rtc_irq_bit(RTC_IRQMASK);
+		hpet_unregister_irq_handler(cmos_interrupt);
+	}
 	cmos_rtc.dev = NULL;
 cleanup0:
 	if (RTC_IOMAPPED)
@@ -1146,7 +1158,7 @@ cleanup0:
 static void cmos_do_shutdown(int rtc_irq)
 {
 	spin_lock_irq(&rtc_lock);
-	if (is_valid_irq(rtc_irq))
+	if (!cmos_no_alarm(&cmos_rtc))
 		cmos_irq_disable(&cmos_rtc, RTC_IRQMASK);
 	spin_unlock_irq(&rtc_lock);
 }
@@ -1428,7 +1440,7 @@ static int __init cmos_platform_probe(struct platform_device *pdev)
 		irq = -1;
 #ifdef CONFIG_X86
 		/*
-		 * On some x86 systems the IRQ is not defined, but it should
+		 * On some x86 systems, the IRQ is not defined, but it should
 		 * always be safe to hardcode it on systems with a legacy PIC.
 		 */
 		if (nr_legacy_irqs())

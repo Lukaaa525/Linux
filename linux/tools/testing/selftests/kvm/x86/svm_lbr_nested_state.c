@@ -9,8 +9,6 @@
 #include "svm_util.h"
 
 
-#define L2_GUEST_STACK_SIZE 64
-
 #define DO_BRANCH() do { asm volatile("jmp 1f\n 1: nop"); } while (0)
 
 struct lbr_branch {
@@ -55,7 +53,6 @@ static void l2_guest_code(struct svm_test_data *svm)
 
 static void l1_guest_code(struct svm_test_data *svm, bool nested_lbrv)
 {
-	unsigned long l2_guest_stack[L2_GUEST_STACK_SIZE];
 	struct vmcb *vmcb = svm->vmcb;
 	struct lbr_branch l1_branch;
 
@@ -65,8 +62,7 @@ static void l1_guest_code(struct svm_test_data *svm, bool nested_lbrv)
 	CHECK_BRANCH_MSRS(&l1_branch);
 
 	/* Run L2, which will also do the same */
-	generic_svm_setup(svm, l2_guest_code,
-			  &l2_guest_stack[L2_GUEST_STACK_SIZE]);
+	generic_svm_setup(svm, l2_guest_code);
 
 	if (nested_lbrv)
 		vmcb->control.misc_ctl2 = SVM_MISC2_ENABLE_V_LBR;
@@ -97,9 +93,9 @@ void test_lbrv_nested_state(bool nested_lbrv)
 {
 	struct kvm_x86_state *state = NULL;
 	struct kvm_vcpu *vcpu;
-	vm_vaddr_t svm_gva;
 	struct kvm_vm *vm;
 	struct ucall uc;
+	gva_t svm_gva;
 
 	pr_info("Testing with nested LBRV %s\n", nested_lbrv ? "enabled" : "disabled");
 

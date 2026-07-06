@@ -18,7 +18,6 @@
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/sprintf.h>
 
@@ -90,6 +89,10 @@ static void amd_asf_process_target(struct work_struct *work)
 		outb_p(reg, ASFDATABNKSEL);
 		cmd = inb_p(ASFINDEX);
 		len = inb_p(ASFDATARWPTR);
+
+		if (len > ASF_BLOCK_MAX_BYTES)
+			return;
+
 		for (idx = 0; idx < len; idx++)
 			data[idx] = inb_p(ASFINDEX);
 

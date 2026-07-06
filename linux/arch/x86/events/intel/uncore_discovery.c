@@ -264,6 +264,7 @@ static int __parse_discovery_table(struct uncore_discovery_domain *domain,
 	struct uncore_unit_discovery unit;
 	void __iomem *io_addr;
 	unsigned long size;
+	int ret = 0;
 	int i;
 
 	size = UNCORE_DISCOVERY_GLOBAL_MAP_SIZE;
@@ -273,21 +274,23 @@ static int __parse_discovery_table(struct uncore_discovery_domain *domain,
 
 	/* Read Global Discovery State */
 	memcpy_fromio(&global, io_addr, sizeof(struct uncore_global_discovery));
+	iounmap(io_addr);
+
 	if (uncore_discovery_invalid_unit(global)) {
 		pr_info("Invalid Global Discovery State: 0x%llx 0x%llx 0x%llx\n",
 			global.table1, global.ctl, global.table3);
-		iounmap(io_addr);
 		return -EINVAL;
 	}
-	iounmap(io_addr);
 
 	size = (1 + global.max_units) * global.stride * 8;
 	io_addr = ioremap(addr, size);
 	if (!io_addr)
 		return -ENOMEM;
 
-	if (domain->global_init && domain->global_init(global.ctl))
-		return -ENODEV;
+	if (domain->global_init && domain->global_init(die, global.ctl)) {
+		ret = -ENODEV;
+		goto out;
+	}
 
 	/* Parsing Unit Discovery State */
 	for (i = 0; i < global.max_units; i++) {
@@ -307,8 +310,10 @@ static int __parse_discovery_table(struct uncore_discovery_domain *domain,
 	}
 
 	*parsed = true;
+
+out:
 	iounmap(io_addr);
-	return 0;
+	return ret;
 }
 
 static int parse_discovery_table(struct uncore_discovery_domain *domain,
@@ -366,7 +371,7 @@ static bool uncore_discovery_pci(struct uncore_discovery_domain *domain)
 				     (val & UNCORE_DISCOVERY_DVSEC2_BIR_MASK) * UNCORE_DISCOVERY_BIR_STEP;
 
 			die = get_device_die_id(dev);
-			if (die < 0)
+			if ((die < 0) || (die >= uncore_max_dies()))
 				continue;
 
 			parse_discovery_table(domain, dev, die, bar_offset, &parsed);
@@ -394,7 +399,6 @@ static bool uncore_discovery_msr(struct uncore_discovery_domain *domain)
 	if (!die_mask)
 		return false;
 
-	cpus_read_lock();
 	for_each_online_cpu(cpu) {
 		die = topology_logical_die_id(cpu);
 		if (__test_and_set_bit(die, die_mask))
@@ -409,8 +413,6 @@ static bool uncore_discovery_msr(struct uncore_discovery_domain *domain)
 		__parse_discovery_table(domain, base, die, &parsed);
 	}
 
-	cpus_read_unlock();
-
 	kfree(die_mask);
 	return parsed;
 }
@@ -424,10 +426,14 @@ bool uncore_discovery(struct uncore_plat_init *init)
 	for (i = 0; i < UNCORE_DISCOVERY_DOMAINS; i++) {
 		domain = &init->domain[i];
 		if (domain->discovery_base) {
+			cpus_read_lock();
+
 			if (!domain->base_is_pci)
 				ret |= uncore_discovery_msr(domain);
 			else
 				ret |= uncore_discovery_pci(domain);
+
+			cpus_read_unlock();
 		}
 	}
 
@@ -476,26 +482,38 @@ static u64 intel_generic_uncore_box_ctl(struct intel_uncore_box *box)
 	struct intel_uncore_discovery_unit *unit;
 
 	unit = intel_uncore_find_discovery_unit(box->pmu->type->boxes,
-						-1, box->pmu->pmu_idx);
-	if (WARN_ON_ONCE(!unit))
+						box->dieid, box->pmu->pmu_idx);
+	if (!unit)
 		return 0;
 
 	return unit->addr;
 }
 
-void intel_generic_uncore_msr_init_box(struct intel_uncore_box *box)
+int intel_generic_uncore_msr_init_box(struct intel_uncore_box *box)
 {
-	wrmsrq(intel_generic_uncore_box_ctl(box), GENERIC_PMON_BOX_CTL_INT);
+	u64 box_ctl = intel_generic_uncore_box_ctl(box);
+
+	if (!box_ctl)
+		return -ENODEV;
+
+	wrmsrq(box_ctl, GENERIC_PMON_BOX_CTL_INT);
+	return 0;
 }
 
 void intel_generic_uncore_msr_disable_box(struct intel_uncore_box *box)
 {
-	wrmsrq(intel_generic_uncore_box_ctl(box), GENERIC_PMON_BOX_CTL_FRZ);
+	u64 box_ctl = intel_generic_uncore_box_ctl(box);
+
+	if (box_ctl)
+		wrmsrq(box_ctl, GENERIC_PMON_BOX_CTL_FRZ);
 }
 
 void intel_generic_uncore_msr_enable_box(struct intel_uncore_box *box)
 {
-	wrmsrq(intel_generic_uncore_box_ctl(box), 0);
+	u64 box_ctl = intel_generic_uncore_box_ctl(box);
+
+	if (box_ctl)
+		wrmsrq(box_ctl, 0);
 }
 
 static void intel_generic_uncore_msr_enable_event(struct intel_uncore_box *box,
@@ -544,6 +562,7 @@ bool intel_generic_uncore_assign_hw_event(struct perf_event *event,
 
 	if (box->pci_dev) {
 		box_ctl = UNCORE_DISCOVERY_PCI_BOX_CTRL(box_ctl);
+
 		hwc->config_base = box_ctl + uncore_pci_event_ctl(box, hwc->idx);
 		hwc->event_base  = box_ctl + uncore_pci_perf_ctr(box, hwc->idx);
 		return true;
@@ -560,29 +579,33 @@ static inline int intel_pci_uncore_box_ctl(struct intel_uncore_box *box)
 	return UNCORE_DISCOVERY_PCI_BOX_CTRL(intel_generic_uncore_box_ctl(box));
 }
 
-void intel_generic_uncore_pci_init_box(struct intel_uncore_box *box)
+int intel_generic_uncore_pci_init_box(struct intel_uncore_box *box)
 {
-	struct pci_dev *pdev = box->pci_dev;
 	int box_ctl = intel_pci_uncore_box_ctl(box);
 
+	if (!box_ctl)
+		return -ENODEV;
+
 	__set_bit(UNCORE_BOX_FLAG_CTL_OFFS8, &box->flags);
-	pci_write_config_dword(pdev, box_ctl, GENERIC_PMON_BOX_CTL_INT);
+	return pci_write_config_dword(box->pci_dev, box_ctl,
+				      GENERIC_PMON_BOX_CTL_INT);
 }
 
 void intel_generic_uncore_pci_disable_box(struct intel_uncore_box *box)
 {
-	struct pci_dev *pdev = box->pci_dev;
 	int box_ctl = intel_pci_uncore_box_ctl(box);
 
-	pci_write_config_dword(pdev, box_ctl, GENERIC_PMON_BOX_CTL_FRZ);
+	if (box_ctl)
+		pci_write_config_dword(box->pci_dev, box_ctl,
+				       GENERIC_PMON_BOX_CTL_FRZ);
 }
 
 void intel_generic_uncore_pci_enable_box(struct intel_uncore_box *box)
 {
-	struct pci_dev *pdev = box->pci_dev;
 	int box_ctl = intel_pci_uncore_box_ctl(box);
 
-	pci_write_config_dword(pdev, box_ctl, 0);
+	if (box_ctl)
+		pci_write_config_dword(box->pci_dev, box_ctl, 0);
 }
 
 static void intel_generic_uncore_pci_enable_event(struct intel_uncore_box *box,
@@ -627,7 +650,7 @@ static struct intel_uncore_ops generic_uncore_pci_ops = {
 
 #define UNCORE_GENERIC_MMIO_SIZE		0x4000
 
-void intel_generic_uncore_mmio_init_box(struct intel_uncore_box *box)
+int intel_generic_uncore_mmio_init_box(struct intel_uncore_box *box)
 {
 	static struct intel_uncore_discovery_unit *unit;
 	struct intel_uncore_type *type = box->pmu->type;
@@ -637,13 +660,13 @@ void intel_generic_uncore_mmio_init_box(struct intel_uncore_box *box)
 	if (!unit) {
 		pr_warn("Uncore type %d id %d: Cannot find box control address.\n",
 			type->type_id, box->pmu->pmu_idx);
-		return;
+		return -ENODEV;
 	}
 
 	if (!unit->addr) {
 		pr_warn("Uncore type %d box %d: Invalid box control address.\n",
 			type->type_id, unit->id);
-		return;
+		return -ENODEV;
 	}
 
 	addr = unit->addr;
@@ -651,10 +674,11 @@ void intel_generic_uncore_mmio_init_box(struct intel_uncore_box *box)
 	if (!box->io_addr) {
 		pr_warn("Uncore type %d box %d: ioremap error for 0x%llx.\n",
 			type->type_id, unit->id, (unsigned long long)addr);
-		return;
+		return -ENOMEM;
 	}
 
 	writel(GENERIC_PMON_BOX_CTL_INT, box->io_addr);
+	return 0;
 }
 
 void intel_generic_uncore_mmio_disable_box(struct intel_uncore_box *box)

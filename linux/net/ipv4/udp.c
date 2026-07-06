@@ -76,6 +76,7 @@
 
 #include <linux/bpf-cgroup.h>
 #include <linux/uaccess.h>
+#include <linux/uio.h>
 #include <asm/ioctls.h>
 #include <linux/memblock.h>
 #include <linux/highmem.h>
@@ -118,15 +119,11 @@
 #include <net/addrconf.h>
 #include <net/udp_tunnel.h>
 #include <net/gro.h>
-#if IS_ENABLED(CONFIG_IPV6)
-#include <net/ipv6_stubs.h>
-#endif
 #include <net/rps.h>
 
 struct udp_table udp_table __read_mostly;
 
 long sysctl_udp_mem[3] __read_mostly;
-EXPORT_IPV6_MOD(sysctl_udp_mem);
 
 DEFINE_PER_CPU(int, udp_memory_per_cpu_fw_alloc);
 EXPORT_PER_CPU_SYMBOL_GPL(udp_memory_per_cpu_fw_alloc);
@@ -285,7 +282,7 @@ int udp_lib_get_port(struct sock *sk, unsigned short snum,
 	} else {
 		hslot = udp_hashslot(udptable, net, snum);
 		spin_lock_bh(&hslot->lock);
-		if (hslot->count > 10) {
+		if (inet_use_hash2_on_bind(sk) && hslot->count > 10) {
 			int exist;
 			unsigned int slot2 = udp_sk(sk)->udp_portaddr_hash ^ snum;
 
@@ -349,7 +346,6 @@ fail_unlock:
 fail:
 	return error;
 }
-EXPORT_IPV6_MOD(udp_lib_get_port);
 
 static int udp_v4_get_port(struct sock *sk, unsigned short snum)
 {
@@ -363,10 +359,10 @@ static int udp_v4_get_port(struct sock *sk, unsigned short snum)
 	return udp_lib_get_port(sk, snum, hash2_nulladdr);
 }
 
-static int compute_score(struct sock *sk, const struct net *net,
-			 __be32 saddr, __be16 sport,
-			 __be32 daddr, unsigned short hnum,
-			 int dif, int sdif)
+static __always_inline int
+compute_score(struct sock *sk, const struct net *net,
+	      __be32 saddr, __be16 sport, __be32 daddr,
+	      unsigned short hnum, int dif, int sdif)
 {
 	int score;
 	struct inet_sock *inet;
@@ -415,7 +411,6 @@ u32 udp_ehashfn(const struct net *net, const __be32 laddr, const __u16 lport,
 	return __inet_ehashfn(laddr, lport, faddr, fport,
 			      udp_ehash_secret + net_hash_mix(net));
 }
-EXPORT_IPV6_MOD(udp_ehashfn);
 
 /**
  * udp4_lib_lookup1() - Simplified lookup using primary hash (destination port)
@@ -506,8 +501,8 @@ rescore:
 				continue;
 
 			/* compute_score is too long of a function to be
-			 * inlined, and calling it again here yields
-			 * measurable overhead for some
+			 * inlined twice here, and calling it uninlined
+			 * here yields measurable overhead for some
 			 * workloads. Work around it by jumping
 			 * backwards to rescore 'result'.
 			 */
@@ -650,7 +645,6 @@ void udp_lib_hash4(struct sock *sk, u16 hash)
 
 	spin_unlock_bh(&hslot->lock);
 }
-EXPORT_IPV6_MOD(udp_lib_hash4);
 
 /* call with sock lock */
 void udp4_hash4(struct sock *sk)
@@ -666,7 +660,6 @@ void udp4_hash4(struct sock *sk)
 
 	udp_lib_hash4(sk, hash);
 }
-EXPORT_IPV6_MOD(udp4_hash4);
 #endif /* CONFIG_BASE_SMALL */
 
 /* UDP is nearly always wildcards out the wazoo, it makes no sense to try
@@ -802,11 +795,9 @@ static inline bool __udp_is_mcast_sock(struct net *net, const struct sock *sk,
 }
 
 DEFINE_STATIC_KEY_FALSE(udp_encap_needed_key);
-EXPORT_IPV6_MOD(udp_encap_needed_key);
 
 #if IS_ENABLED(CONFIG_IPV6)
 DEFINE_STATIC_KEY_FALSE(udpv6_encap_needed_key);
-EXPORT_IPV6_MOD(udpv6_encap_needed_key);
 #endif
 
 void udp_encap_enable(void)
@@ -1026,7 +1017,6 @@ void udp_flush_pending_frames(struct sock *sk)
 		ip_flush_pending_frames(sk);
 	}
 }
-EXPORT_IPV6_MOD(udp_flush_pending_frames);
 
 /**
  * 	udp4_hwcsum  -  handle outgoing HW checksumming
@@ -1204,7 +1194,6 @@ out:
 	WRITE_ONCE(up->pending, 0);
 	return err;
 }
-EXPORT_IPV6_MOD(udp_push_pending_frames);
 
 static int __udp_cmsg_send(struct cmsghdr *cmsg, u16 *gso_size)
 {
@@ -1241,7 +1230,6 @@ int udp_cmsg_send(struct sock *sk, struct msghdr *msg, u16 *gso_size)
 
 	return need_ip;
 }
-EXPORT_IPV6_MOD_GPL(udp_cmsg_send);
 
 int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 {
@@ -1532,7 +1520,6 @@ void udp_splice_eof(struct socket *sock)
 		udp_push_pending_frames(sk);
 	release_sock(sk);
 }
-EXPORT_IPV6_MOD_GPL(udp_splice_eof);
 
 #define UDP_SKB_IS_STATELESS 0x80000000
 
@@ -1647,7 +1634,6 @@ void udp_skb_destructor(struct sock *sk, struct sk_buff *skb)
 	prefetch(&skb->data);
 	udp_rmem_release(sk, udp_skb_truesize(skb), 1, false);
 }
-EXPORT_IPV6_MOD(udp_skb_destructor);
 
 /* as above, but the caller held the rx queue lock, too */
 static void udp_skb_dtor_locked(struct sock *sk, struct sk_buff *skb)
@@ -1800,7 +1786,6 @@ drop:
 	udp_drops_inc(sk);
 	return err;
 }
-EXPORT_IPV6_MOD_GPL(__udp_enqueue_schedule_skb);
 
 void udp_destruct_common(struct sock *sk)
 {
@@ -1817,7 +1802,6 @@ void udp_destruct_common(struct sock *sk)
 	udp_rmem_release(sk, total, 0, true);
 	kfree(up->udp_prod_queue);
 }
-EXPORT_IPV6_MOD_GPL(udp_destruct_common);
 
 static void udp_destruct_sock(struct sock *sk)
 {
@@ -1855,7 +1839,6 @@ void skb_consume_udp(struct sock *sk, struct sk_buff *skb, int len)
 		skb_release_head_state(skb);
 	__consume_stateless_skb(skb);
 }
-EXPORT_IPV6_MOD_GPL(skb_consume_udp);
 
 static struct sk_buff *__first_packet_length(struct sock *sk,
 					     struct sk_buff_head *rcvq,
@@ -1937,7 +1920,6 @@ int udp_ioctl(struct sock *sk, int cmd, int *karg)
 
 	return 0;
 }
-EXPORT_IPV6_MOD(udp_ioctl);
 
 struct sk_buff *__skb_recv_udp(struct sock *sk, unsigned int flags,
 			       int *off, int *err)
@@ -2030,9 +2012,16 @@ try_again:
 	}
 
 	WARN_ON_ONCE(!skb_set_owner_sk_safe(skb, sk));
+
+	/*
+	 * skb->dev still aliases the UDP rx dev_scratch (its charge was freed
+	 * on dequeue above); a sockmap verdict program may deref it via
+	 * bpf_sk_lookup_*(), so clear it -> bpf_skc_lookup() uses skb->sk
+	 */
+	skb->dev = NULL;
+
 	return recv_actor(sk, skb);
 }
-EXPORT_IPV6_MOD(udp_read_skb);
 
 /*
  * 	This should be easy, if there is something there we
@@ -2154,7 +2143,6 @@ int udp_pre_connect(struct sock *sk, struct sockaddr_unsized *uaddr,
 
 	return BPF_CGROUP_RUN_PROG_INET4_CONNECT_LOCK(sk, uaddr, &addr_len);
 }
-EXPORT_IPV6_MOD(udp_pre_connect);
 
 static int udp_connect(struct sock *sk, struct sockaddr_unsized *uaddr,
 		       int addr_len)
@@ -2204,7 +2192,6 @@ int udp_disconnect(struct sock *sk, int flags)
 	release_sock(sk);
 	return 0;
 }
-EXPORT_IPV6_MOD(udp_disconnect);
 
 void udp_lib_unhash(struct sock *sk)
 {
@@ -2236,7 +2223,6 @@ void udp_lib_unhash(struct sock *sk)
 		spin_unlock_bh(&hslot->lock);
 	}
 }
-EXPORT_IPV6_MOD(udp_lib_unhash);
 
 /*
  * inet_rcv_saddr was changed, we must rehash secondary hash
@@ -2306,7 +2292,6 @@ void udp_lib_rehash(struct sock *sk, u16 newhash, u16 newhash4)
 		udp_sk(sk)->udp_portaddr_hash = newhash;
 	}
 }
-EXPORT_IPV6_MOD(udp_lib_rehash);
 
 static void udp_v4_rehash(struct sock *sk)
 {
@@ -2416,7 +2401,8 @@ static int udp_queue_rcv_one_skb(struct sock *sk, struct sk_buff *skb)
 	    udp_lib_checksum_complete(skb))
 			goto csum_error;
 
-	if (sk_filter_trim_cap(sk, skb, sizeof(struct udphdr), &drop_reason))
+	drop_reason = sk_filter_trim_cap(sk, skb, sizeof(struct udphdr));
+	if (drop_reason)
 		goto drop;
 
 	udp_csum_pull_header(skb);
@@ -2470,7 +2456,6 @@ bool udp_sk_rx_dst_set(struct sock *sk, struct dst_entry *dst)
 	}
 	return false;
 }
-EXPORT_IPV6_MOD(udp_sk_rx_dst_set);
 
 /*
  *	Multicasts and broadcasts go to each listener.
@@ -2877,7 +2862,7 @@ static void set_xfrm_gro_udp_encap_rcv(__u16 encap_type, unsigned short family,
 
 	if (udp_test_bit(GRO_ENABLED, sk) && encap_type == UDP_ENCAP_ESPINUDP) {
 		if (IS_ENABLED(CONFIG_IPV6) && family == AF_INET6)
-			new_gro_receive = ipv6_stub->xfrm6_gro_udp_encap_rcv;
+			new_gro_receive = xfrm6_gro_udp_encap_rcv;
 		else
 			new_gro_receive = xfrm4_gro_udp_encap_rcv;
 
@@ -2949,7 +2934,7 @@ int udp_lib_setsockopt(struct sock *sk, int level, int optname,
 #if IS_ENABLED(CONFIG_IPV6)
 			if (sk->sk_family == AF_INET6)
 				WRITE_ONCE(up->encap_rcv,
-					   ipv6_stub->xfrm6_udp_encap_rcv);
+					   xfrm6_udp_encap_rcv);
 			else
 #endif
 				WRITE_ONCE(up->encap_rcv,
@@ -2999,7 +2984,6 @@ int udp_lib_setsockopt(struct sock *sk, int level, int optname,
 
 	return err;
 }
-EXPORT_IPV6_MOD(udp_lib_setsockopt);
 
 static int udp_setsockopt(struct sock *sk, int level, int optname, sockptr_t optval,
 			  unsigned int optlen)
@@ -3012,14 +2996,13 @@ static int udp_setsockopt(struct sock *sk, int level, int optname, sockptr_t opt
 }
 
 int udp_lib_getsockopt(struct sock *sk, int level, int optname,
-		       char __user *optval, int __user *optlen)
+		       sockopt_t *opt)
 {
 	struct udp_sock *up = udp_sk(sk);
 	int val, len;
 
-	if (get_user(len, optlen))
-		return -EFAULT;
-
+	len = opt->optlen;
+	/* keep the check so direct sockopt_t callers stay covered. */
 	if (len < 0)
 		return -EINVAL;
 
@@ -3054,20 +3037,38 @@ int udp_lib_getsockopt(struct sock *sk, int level, int optname,
 		return -ENOPROTOOPT;
 	}
 
-	if (put_user(len, optlen))
-		return -EFAULT;
-	if (copy_to_user(optval, &val, len))
+	opt->optlen = len;
+	if (copy_to_iter(&val, len, &opt->iter_out) != len)
 		return -EFAULT;
 	return 0;
 }
-EXPORT_IPV6_MOD(udp_lib_getsockopt);
 
 static int udp_getsockopt(struct sock *sk, int level, int optname,
 			  char __user *optval, int __user *optlen)
 {
-	if (level == SOL_UDP)
-		return udp_lib_getsockopt(sk, level, optname, optval, optlen);
-	return ip_getsockopt(sk, level, optname, optval, optlen);
+	sockopt_t opt;
+	int err;
+
+	/*
+	 * keep the old __user pointers, until ip_getsockopt() moves
+	 * to sockopt_t
+	 */
+	if (level != SOL_UDP)
+		return ip_getsockopt(sk, level, optname, optval, optlen);
+
+	err = sockopt_init_user(&opt, optval, optlen);
+	if (err)
+		return err;
+
+	err = udp_lib_getsockopt(sk, level, optname, &opt);
+	if (err)
+		return err;
+
+	/* optval was written by copy_to_iter() in udp_lib_getsockopt() */
+	if (put_user(opt.optlen, optlen))
+		return -EFAULT;
+
+	return 0;
 }
 
 /**
@@ -3102,7 +3103,6 @@ __poll_t udp_poll(struct file *file, struct socket *sock, poll_table *wait)
 	return mask;
 
 }
-EXPORT_IPV6_MOD(udp_poll);
 
 int udp_abort(struct sock *sk, int err)
 {
@@ -3125,7 +3125,6 @@ out:
 
 	return 0;
 }
-EXPORT_IPV6_MOD_GPL(udp_abort);
 
 struct proto udp_prot = {
 	.name			= "UDP",
@@ -3245,7 +3244,6 @@ void *udp_seq_start(struct seq_file *seq, loff_t *pos)
 
 	return *pos ? udp_get_idx(seq, *pos-1) : SEQ_START_TOKEN;
 }
-EXPORT_IPV6_MOD(udp_seq_start);
 
 void *udp_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
@@ -3259,7 +3257,6 @@ void *udp_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	++*pos;
 	return sk;
 }
-EXPORT_IPV6_MOD(udp_seq_next);
 
 void udp_seq_stop(struct seq_file *seq, void *v)
 {
@@ -3271,7 +3268,6 @@ void udp_seq_stop(struct seq_file *seq, void *v)
 	if (state->bucket <= udptable->mask)
 		spin_unlock_bh(&udptable->hash[state->bucket].lock);
 }
-EXPORT_IPV6_MOD(udp_seq_stop);
 
 /* ------------------------------------------------------------------------ */
 static void udp4_format_sock(struct sock *sp, struct seq_file *f,

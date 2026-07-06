@@ -11,9 +11,49 @@
 #ifndef _VIDEO_FONT_H
 #define _VIDEO_FONT_H
 
+#include <linux/math.h>
 #include <linux/types.h>
 
 struct console_font;
+
+/*
+ * Glyphs
+ */
+
+/**
+ * font_glyph_pitch - Calculates the number of bytes per scanline
+ * @width: The glyph width in bits per scanline
+ *
+ * A glyph's pitch is the number of bytes in a single scanline, rounded
+ * up to the next full byte. The parameter @width receives the number
+ * of visible bits per scanline. For example, if width is 14 bytes per
+ * scanline, the pitch is 2 bytes per scanline. If width is 8 bits per
+ * scanline, the pitch is 1 byte per scanline.
+ *
+ * Returns:
+ * The number of bytes in a single scanline of the glyph
+ */
+static inline unsigned int font_glyph_pitch(unsigned int width)
+{
+	return DIV_ROUND_UP(width, 8);
+}
+
+/**
+ * font_glyph_size - Calculates the number of bytes per glyph
+ * @width: The glyph width in bits per scanline
+ * @vpitch: The number of scanlines in the glyph
+ *
+ * The number of bytes in a glyph depends on the pitch and the number
+ * of scanlines. font_glyph_size automatically calculates the pitch
+ * from the given width. The parameter @vpitch gives the number of
+ * scanlines, which is usually the glyph's height in scanlines. Fonts
+ * coming from user space can sometimes have a different vertical pitch
+ * with empty scanlines between two adjacent glyphs.
+ */
+static inline unsigned int font_glyph_size(unsigned int width, unsigned int vpitch)
+{
+	return font_glyph_pitch(width) * vpitch;
+}
 
 /*
  * font_data_t and helpers
@@ -61,8 +101,22 @@ font_data_t *font_data_import(const struct console_font *font, unsigned int vpit
 void font_data_get(font_data_t *fd);
 bool font_data_put(font_data_t *fd);
 unsigned int font_data_size(font_data_t *fd);
+const unsigned char *font_data_glyph_buf(font_data_t *fd,
+					 unsigned int width, unsigned int vpitch,
+					 unsigned int c);
 bool font_data_is_equal(font_data_t *lhs, font_data_t *rhs);
 int font_data_export(font_data_t *fd, struct console_font *font, unsigned int vpitch);
+
+/* font_rotate.c */
+void font_glyph_rotate_90(const unsigned char *glyph, unsigned int width, unsigned int height,
+			  unsigned char *out);
+void font_glyph_rotate_180(const unsigned char *glyph, unsigned int width, unsigned int height,
+			   unsigned char *out);
+void font_glyph_rotate_270(const unsigned char *glyph, unsigned int width, unsigned int height,
+			   unsigned char *out);
+unsigned char *font_data_rotate(font_data_t *fd, unsigned int width, unsigned int height,
+				unsigned int charcount, unsigned int steps,
+				unsigned char *buf, size_t *bufsize);
 
 /*
  * Font description

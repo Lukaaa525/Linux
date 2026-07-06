@@ -76,7 +76,7 @@
 #define	ENOPROTOOPT	92	/* Protocol not available */
 #define	EPROTONOSUPPORT	93	/* Protocol not supported */
 #define	ESOCKTNOSUPPORT	94	/* Socket type not supported */
-#define	EOPNOTSUPP	95	/* Operation not supported on transport endpoint */
+#define	EOPNOTSUPP	95	/* Operation not supported */
 #define	EPFNOSUPPORT	96	/* Protocol family not supported */
 #define	EAFNOSUPPORT	97	/* Address family not supported by protocol */
 #define	EADDRINUSE	98	/* Address already in use */
@@ -121,5 +121,7 @@
 #define ERFKILL		132	/* Operation not possible due to RF-kill */
 
 #define EHWPOISON	133	/* Memory page has hardware error */
+
+#define EFTYPE		134	/* Wrong file type for the intended operation */
 
 #endif

@@ -13,7 +13,6 @@
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/mm.h>
-#include <linux/mmzone_lock.h>
 #include <linux/suspend.h>
 #include <linux/delay.h>
 #include <linux/bitops.h>
@@ -1245,14 +1244,15 @@ unsigned int snapshot_additional_pages(struct zone *zone)
 static void mark_free_pages(struct zone *zone)
 {
 	unsigned long pfn, max_zone_pfn, page_count = WD_PAGE_COUNT;
+	struct list_head *free_list;
 	unsigned long flags;
-	unsigned int order, t;
+	unsigned int order;
 	struct page *page;
 
 	if (zone_is_empty(zone))
 		return;
 
-	zone_lock_irqsave(zone, flags);
+	spin_lock_irqsave(&zone->lock, flags);
 
 	max_zone_pfn = zone_end_pfn(zone);
 	for_each_valid_pfn(pfn, zone->zone_start_pfn, max_zone_pfn) {
@@ -1270,9 +1270,8 @@ static void mark_free_pages(struct zone *zone)
 			swsusp_unset_page_free(page);
 	}
 
-	for_each_migratetype_order(order, t) {
-		list_for_each_entry(page,
-				&zone->free_area[order].free_list[t], buddy_list) {
+	for_each_free_list(free_list, zone, order) {
+		list_for_each_entry(page, free_list, buddy_list) {
 			unsigned long i;
 
 			pfn = page_to_pfn(page);
@@ -1285,7 +1284,7 @@ static void mark_free_pages(struct zone *zone)
 			}
 		}
 	}
-	zone_unlock_irqrestore(zone, flags);
+	spin_unlock_irqrestore(&zone->lock, flags);
 }
 
 #ifdef CONFIG_HIGHMEM
@@ -2856,6 +2855,17 @@ int snapshot_write_finalize(struct snapshot_handle *handle)
 {
 	int error;
 
+	/*
+	 * Call snapshot_write_next() to drain any trailing zero pages,
+	 * but make sure we're in the data page region first.
+	 * This function can return PAGE_SIZE if the kernel was expecting
+	 * another copy page. Return -ENODATA in that situation.
+	 */
+	if (handle->cur > nr_meta_pages + 1) {
+		error = snapshot_write_next(handle);
+		if (error)
+			return error > 0 ? -ENODATA : error;
+	}
 	copy_last_highmem_page();
 	error = hibernate_restore_protect_page(handle->buffer);
 	/* Do that only if we have loaded the image entirely */

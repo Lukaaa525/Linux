@@ -479,9 +479,14 @@ static int smu_v13_0_12_get_system_metrics_table(struct smu_context *smu)
 	}
 
 	amdgpu_hdp_invalidate(smu->adev, NULL);
+
+	ret = smu_cmn_vram_cpy(smu, sys_table->cache.buffer,
+			       table->cpu_addr,
+			       smu_v13_0_12_get_system_metrics_size());
+	if (ret)
+		return ret;
+
 	smu_table_cache_update_time(sys_table, jiffies);
-	memcpy(sys_table->cache.buffer, table->cpu_addr,
-	       smu_v13_0_12_get_system_metrics_size());
 
 	return 0;
 }
@@ -1037,7 +1042,7 @@ static int smu_v13_0_12_get_badpage_count(struct amdgpu_device *adev, uint32_t *
 		/* eeprom is not ready */
 		if (ret != -EBUSY)
 			return ret;
-		mdelay(10);
+		usleep_range(10000, 15000);
 		now = (uint64_t)ktime_to_ms(ktime_get());
 	} while (now < end);
 
@@ -1132,16 +1137,10 @@ static const struct ras_eeprom_smu_funcs smu_v13_0_12_eeprom_smu_funcs = {
 
 static void smu_v13_0_12_ras_smu_feature_flags(struct amdgpu_device *adev, uint64_t *flags)
 {
-	struct smu_context *smu = adev->powerplay.pp_handle;
-
 	if (!flags)
 		return;
 
 	*flags = 0ULL;
-
-	if (smu_v13_0_6_cap_supported(smu, SMU_CAP(RAS_EEPROM)))
-		*flags |= RAS_SMU_FEATURE_BIT__RAS_EEPROM;
-
 }
 
 const struct ras_smu_drv smu_v13_0_12_ras_smu_drv = {

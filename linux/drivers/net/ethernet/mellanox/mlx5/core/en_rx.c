@@ -300,6 +300,35 @@ static void mlx5e_page_release_fragmented(struct page_pool *pp,
 		page_pool_put_unrefed_netmem(pp, netmem, -1, true);
 }
 
+static int mlx5e_mpwqe_linear_page_refill(struct mlx5e_rq *rq)
+{
+	struct mlx5e_mpw_linear_info *li = rq->mpwqe.linear_info;
+
+	if (likely(li->frag_page.frags < li->max_frags))
+		return 0;
+
+	if (likely(li->frag_page.netmem)) {
+		mlx5e_page_release_fragmented(rq->page_pool, &li->frag_page);
+		li->frag_page.netmem = 0;
+	}
+
+	return mlx5e_page_alloc_fragmented(rq->page_pool, &li->frag_page);
+}
+
+static void *mlx5e_mpwqe_get_linear_page_frag(struct mlx5e_rq *rq)
+{
+	struct mlx5e_mpw_linear_info *li = rq->mpwqe.linear_info;
+	u32 frag_offset;
+
+	if (unlikely(mlx5e_mpwqe_linear_page_refill(rq)))
+		return NULL;
+
+	frag_offset = li->frag_page.frags << MLX5E_XDP_LOG_MAX_LINEAR_SZ;
+	WARN_ON(frag_offset >= BIT(rq->mpwqe.page_shift));
+
+	return netmem_address(li->frag_page.netmem) + frag_offset;
+}
+
 static inline int mlx5e_get_rx_frag(struct mlx5e_rq *rq,
 				    struct mlx5e_wqe_frag_info *frag)
 {
@@ -700,6 +729,22 @@ static void mlx5e_dealloc_rx_mpwqe(struct mlx5e_rq *rq, u16 ix)
 	 * for missing wqes on an already flushed RQ.
 	 */
 	bitmap_fill(wi->skip_release_bitmap, rq->mpwqe.pages_per_wqe);
+}
+
+void mlx5e_mpwqe_dealloc_linear_page(struct mlx5e_rq *rq)
+{
+	struct mlx5e_mpw_linear_info *li = rq->mpwqe.linear_info;
+
+	if (!li || !li->frag_page.netmem)
+		return;
+
+	mlx5e_page_release_fragmented(rq->page_pool, &li->frag_page);
+
+	/* Recovery flow can call this function and then alloc again, so leave
+	 * things in a good state for re-allocation.
+	 */
+	li->frag_page.netmem = 0;
+	li->frag_page.frags = li->max_frags;
 }
 
 INDIRECT_CALLABLE_SCOPE bool mlx5e_post_rx_wqes(struct mlx5e_rq *rq)
@@ -1867,8 +1912,8 @@ mlx5e_skb_from_cqe_mpwrq_nonlinear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *w
 				   u32 page_idx)
 {
 	struct mlx5e_frag_page *frag_page = &wi->alloc_units.frag_pages[page_idx];
-	u16 headlen = min_t(u16, MLX5E_RX_MAX_HEAD, cqe_bcnt);
 	struct mlx5e_frag_page *head_page = frag_page;
+	struct mlx5e_frag_page *linear_page = NULL;
 	struct mlx5e_xdp_buff *mxbuf = &rq->mxbuf;
 	u32 page_size = BIT(rq->mpwqe.page_shift);
 	u32 frag_offset    = head_offset;
@@ -1877,11 +1922,12 @@ mlx5e_skb_from_cqe_mpwrq_nonlinear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *w
 	unsigned int truesize = 0;
 	u32 pg_consumed_bytes;
 	struct bpf_prog *prog;
+	void *va, *head_addr;
 	struct sk_buff *skb;
 	u32 linear_frame_sz;
 	u16 linear_data_len;
 	u16 linear_hr;
-	void *va;
+	u16 headlen;
 
 	if (unlikely(cqe_bcnt > rq->hw_mtu)) {
 		u8 lro_num_seg = get_cqe_lro_num_seg(cqe);
@@ -1894,21 +1940,26 @@ mlx5e_skb_from_cqe_mpwrq_nonlinear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *w
 
 	prog = rcu_dereference(rq->xdp_prog);
 
+	head_addr = netmem_address(head_page->netmem) + head_offset;
+
 	if (prog) {
 		/* area for bpf_xdp_[store|load]_bytes */
-		net_prefetchw(netmem_address(frag_page->netmem) + frag_offset);
-		if (unlikely(mlx5e_page_alloc_fragmented(rq->page_pool,
-							 &wi->linear_page))) {
+		net_prefetchw(head_addr);
+
+		va = mlx5e_mpwqe_get_linear_page_frag(rq);
+		if (!va) {
 			rq->stats->buff_alloc_err++;
 			return NULL;
 		}
 
-		va = netmem_address(wi->linear_page.netmem);
 		net_prefetchw(va); /* xdp_frame data area */
 		linear_hr = XDP_PACKET_HEADROOM;
 		linear_data_len = 0;
 		linear_frame_sz = MLX5_SKB_FRAG_SZ(linear_hr + MLX5E_RX_MAX_HEAD);
+		linear_page = &rq->mpwqe.linear_info->frag_page;
 	} else {
+		dma_addr_t addr;
+
 		skb = napi_alloc_skb(rq->cq.napi,
 				     ALIGN(MLX5E_RX_MAX_HEAD, sizeof(long)));
 		if (unlikely(!skb)) {
@@ -1919,6 +1970,14 @@ mlx5e_skb_from_cqe_mpwrq_nonlinear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *w
 		va = skb->head;
 		net_prefetchw(va); /* xdp_frame data area */
 		net_prefetchw(skb->data);
+
+		headlen = min(MLX5E_RX_MAX_HEAD, cqe_bcnt);
+		addr = page_pool_get_dma_addr_netmem(head_page->netmem);
+		dma_sync_single_for_cpu(rq->pdev, addr + head_offset,
+					ALIGN(headlen, sizeof(long)),
+					rq->buff.map_dir);
+
+		headlen = eth_get_headlen(rq->netdev, head_addr, headlen);
 
 		frag_offset += headlen;
 		byte_cnt -= headlen;
@@ -1966,10 +2025,8 @@ mlx5e_skb_from_cqe_mpwrq_nonlinear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *w
 				for (pfp = head_page; pfp < frag_page; pfp++)
 					pfp->frags++;
 
-				wi->linear_page.frags++;
+				linear_page->frags++;
 			}
-			mlx5e_page_release_fragmented(rq->page_pool,
-						      &wi->linear_page);
 			return NULL; /* page/packet was consumed by XDP */
 		}
 
@@ -1986,15 +2043,11 @@ mlx5e_skb_from_cqe_mpwrq_nonlinear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *w
 			rq, mxbuf->xdp.data_hard_start, linear_frame_sz,
 			mxbuf->xdp.data - mxbuf->xdp.data_hard_start, len,
 			mxbuf->xdp.data - mxbuf->xdp.data_meta);
-		if (unlikely(!skb)) {
-			mlx5e_page_release_fragmented(rq->page_pool,
-						      &wi->linear_page);
+		if (unlikely(!skb))
 			return NULL;
-		}
 
 		skb_mark_for_recycle(skb);
-		wi->linear_page.frags++;
-		mlx5e_page_release_fragmented(rq->page_pool, &wi->linear_page);
+		linear_page->frags++;
 
 		if (xdp_buff_has_frags(&mxbuf->xdp)) {
 			struct mlx5e_frag_page *pagep;
@@ -2010,13 +2063,11 @@ mlx5e_skb_from_cqe_mpwrq_nonlinear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *w
 				pagep->frags++;
 			while (++pagep < frag_page);
 
-			headlen = min_t(u16, MLX5E_RX_MAX_HEAD - len,
-					skb->data_len);
-			__pskb_pull_tail(skb, headlen);
+			if (len < ETH_HLEN)
+				__pskb_pull_tail(skb, min(ETH_HLEN - len,
+							  skb->data_len));
 		}
 	} else {
-		dma_addr_t addr;
-
 		if (xdp_buff_has_frags(&mxbuf->xdp)) {
 			struct mlx5e_frag_page *pagep;
 
@@ -2030,10 +2081,11 @@ mlx5e_skb_from_cqe_mpwrq_nonlinear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *w
 				pagep->frags++;
 			while (++pagep < frag_page);
 		}
+
 		/* copy header */
-		addr = page_pool_get_dma_addr_netmem(head_page->netmem);
-		mlx5e_copy_skb_header(rq, skb, head_page->netmem, addr,
-				      head_offset, head_offset, headlen);
+		skb_copy_to_linear_data(skb, head_addr,
+					ALIGN(headlen, sizeof(long)));
+
 		/* skb linear part was allocated with headlen and aligned to long */
 		skb->tail += headlen;
 		skb->len  += headlen;

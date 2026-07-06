@@ -4,7 +4,6 @@
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/mmzone.h>
-#include <linux/mmzone_lock.h>
 #include <linux/random.h>
 #include <linux/moduleparam.h>
 #include "internal.h"
@@ -86,7 +85,7 @@ void __meminit __shuffle_zone(struct zone *z)
 	const int order = SHUFFLE_ORDER;
 	const int order_pages = 1 << order;
 
-	zone_lock_irqsave(z, flags);
+	spin_lock_irqsave(&z->lock, flags);
 	start_pfn = ALIGN(start_pfn, order_pages);
 	for (i = start_pfn; i < end_pfn; i += order_pages) {
 		unsigned long j;
@@ -139,12 +138,12 @@ void __meminit __shuffle_zone(struct zone *z)
 
 		/* take it easy on the zone lock */
 		if ((i % (100 * order_pages)) == 0) {
-			zone_unlock_irqrestore(z, flags);
+			spin_unlock_irqrestore(&z->lock, flags);
 			cond_resched();
-			zone_lock_irqsave(z, flags);
+			spin_lock_irqsave(&z->lock, flags);
 		}
 	}
-	zone_unlock_irqrestore(z, flags);
+	spin_unlock_irqrestore(&z->lock, flags);
 }
 
 /*

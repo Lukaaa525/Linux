@@ -487,7 +487,13 @@ void __mpol_put(struct mempolicy *pol)
 {
 	if (!atomic_dec_and_test(&pol->refcnt))
 		return;
-	kmem_cache_free(policy_cache, pol);
+	/*
+	 * Required to allow mmap_lock_speculative*() access, see for example
+	 * futex_key_to_node_opt(). All accesses are serialized by mmap_lock,
+	 * however the speculative lock section unbound by the normal lock
+	 * boundaries, requiring RCU freeing.
+	 */
+	kfree_rcu(pol, rcu);
 }
 EXPORT_SYMBOL_FOR_MODULES(__mpol_put, "kvm");
 
@@ -1020,7 +1026,7 @@ static int vma_replace_policy(struct vm_area_struct *vma,
 	}
 
 	old = vma->vm_policy;
-	vma->vm_policy = new; /* protected by mmap_lock */
+	WRITE_ONCE(vma->vm_policy, new); /* protected by mmap_lock */
 	mpol_put(old);
 
 	return 0;
@@ -1239,7 +1245,7 @@ static long do_get_mempolicy(int *policy, nodemask_t *nmask,
 	return err;
 }
 
-#ifdef CONFIG_MIGRATION
+#ifdef CONFIG_NUMA_MIGRATION
 static bool migrate_folio_add(struct folio *folio, struct list_head *foliolist,
 				unsigned long flags)
 {
@@ -2051,24 +2057,15 @@ struct mempolicy *get_vma_policy(struct vm_area_struct *vma,
 bool vma_policy_mof(struct vm_area_struct *vma)
 {
 	struct mempolicy *pol;
+	pgoff_t ilx;
+	bool mof;
 
-	if (vma->vm_ops && vma->vm_ops->get_policy) {
-		bool ret = false;
-		pgoff_t ilx;		/* ignored here */
-
-		pol = vma->vm_ops->get_policy(vma, vma->vm_start, &ilx);
-		if (pol && (pol->flags & MPOL_F_MOF))
-			ret = true;
-		mpol_cond_put(pol);
-
-		return ret;
-	}
-
-	pol = vma->vm_policy;
+	pol = __get_vma_policy(vma, vma->vm_start, &ilx);
 	if (!pol)
 		pol = get_task_policy(current);
-
-	return pol->flags & MPOL_F_MOF;
+	mof = pol->flags & MPOL_F_MOF;
+	mpol_cond_put(pol);
+	return mof;
 }
 
 bool apply_policy_zone(struct mempolicy *policy, enum zone_type zone)
@@ -2859,7 +2856,7 @@ bool __mpol_equal(struct mempolicy *a, struct mempolicy *b)
 	case MPOL_PREFERRED:
 	case MPOL_PREFERRED_MANY:
 	case MPOL_WEIGHTED_INTERLEAVE:
-		return !!nodes_equal(a->nodes, b->nodes);
+		return nodes_equal(a->nodes, b->nodes);
 	case MPOL_LOCAL:
 		return true;
 	default:
@@ -3700,18 +3697,19 @@ static ssize_t weighted_interleave_auto_store(struct kobject *kobj,
 		new_wi_state->iw_table[i] = 1;
 
 	mutex_lock(&wi_state_lock);
-	if (!input) {
-		old_wi_state = rcu_dereference_protected(wi_state,
-					lockdep_is_held(&wi_state_lock));
-		if (!old_wi_state)
-			goto update_wi_state;
-		if (input == old_wi_state->mode_auto) {
-			mutex_unlock(&wi_state_lock);
-			return count;
-		}
+	old_wi_state = rcu_dereference_protected(wi_state,
+				lockdep_is_held(&wi_state_lock));
 
-		memcpy(new_wi_state->iw_table, old_wi_state->iw_table,
-					       nr_node_ids * sizeof(u8));
+	if (old_wi_state && input == old_wi_state->mode_auto) {
+		mutex_unlock(&wi_state_lock);
+		kfree(new_wi_state);
+		return count;
+	}
+
+	if (!input) {
+		if (old_wi_state)
+			memcpy(new_wi_state->iw_table, old_wi_state->iw_table,
+						       nr_node_ids * sizeof(u8));
 		goto update_wi_state;
 	}
 
@@ -3781,9 +3779,11 @@ static void wi_state_free(void)
 	}
 }
 
-static struct kobj_attribute wi_auto_attr =
-	__ATTR(auto, 0664, weighted_interleave_auto_show,
-			   weighted_interleave_auto_store);
+static struct kobj_attribute wi_auto_attr = {
+	.attr = { .name = "auto", .mode = 0664 },
+	.show = weighted_interleave_auto_show,
+	.store = weighted_interleave_auto_store,
+};
 
 static void wi_cleanup(void) {
 	sysfs_remove_file(&wi_group->wi_kobj, &wi_auto_attr.attr);

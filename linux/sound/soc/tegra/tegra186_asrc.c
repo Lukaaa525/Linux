@@ -7,7 +7,6 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/io.h>
-#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -989,10 +988,9 @@ static int tegra186_asrc_platform_probe(struct platform_device *pdev)
 
 	asrc->regmap = devm_regmap_init_mmio(dev, regs,
 					     &tegra186_asrc_regmap_config);
-	if (IS_ERR(asrc->regmap)) {
-		dev_err(dev, "regmap init failed\n");
-		return PTR_ERR(asrc->regmap);
-	}
+	if (IS_ERR(asrc->regmap))
+		return dev_err_probe(dev, PTR_ERR(asrc->regmap),
+				     "regmap init failed\n");
 
 	asrc->soc_data = of_device_get_match_data(&pdev->dev);
 
@@ -1016,10 +1014,9 @@ static int tegra186_asrc_platform_probe(struct platform_device *pdev)
 	err = devm_snd_soc_register_component(dev, &tegra186_asrc_cmpnt,
 					      tegra186_asrc_dais,
 					      ARRAY_SIZE(tegra186_asrc_dais));
-	if (err) {
-		dev_err(dev, "can't register ASRC component, err: %d\n", err);
-		return err;
-	}
+	if (err)
+		return dev_err_probe(dev, err,
+				     "can't register ASRC component\n");
 
 	pm_runtime_enable(dev);
 

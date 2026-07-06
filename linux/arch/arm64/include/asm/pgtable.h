@@ -316,9 +316,11 @@ static inline pte_t pte_mknoncont(pte_t pte)
 	return clear_pte_bit(pte, __pgprot(PTE_CONT));
 }
 
-static inline pte_t pte_mkvalid(pte_t pte)
+static inline pte_t pte_mkvalid_k(pte_t pte)
 {
-	return set_pte_bit(pte, __pgprot(PTE_VALID));
+	pte = clear_pte_bit(pte, __pgprot(PTE_PRESENT_INVALID));
+	pte = set_pte_bit(pte, __pgprot(PTE_PRESENT_VALID_KERNEL));
+	return pte;
 }
 
 static inline pte_t pte_mkinvalid(pte_t pte)
@@ -588,6 +590,7 @@ static inline int pmd_protnone(pmd_t pmd)
 #define pmd_mkclean(pmd)	pte_pmd(pte_mkclean(pmd_pte(pmd)))
 #define pmd_mkdirty(pmd)	pte_pmd(pte_mkdirty(pmd_pte(pmd)))
 #define pmd_mkyoung(pmd)	pte_pmd(pte_mkyoung(pmd_pte(pmd)))
+#define pmd_mkvalid_k(pmd)	pte_pmd(pte_mkvalid_k(pmd_pte(pmd)))
 #define pmd_mkinvalid(pmd)	pte_pmd(pte_mkinvalid(pmd_pte(pmd)))
 #ifdef CONFIG_HAVE_ARCH_USERFAULTFD_WP
 #define pmd_uffd_wp(pmd)	pte_uffd_wp(pmd_pte(pmd))
@@ -629,6 +632,8 @@ static inline pmd_t pmd_mkspecial(pmd_t pmd)
 
 #define pud_young(pud)		pte_young(pud_pte(pud))
 #define pud_mkyoung(pud)	pte_pud(pte_mkyoung(pud_pte(pud)))
+#define pud_mkwrite_novma(pud)	pte_pud(pte_mkwrite_novma(pud_pte(pud)))
+#define pud_mkvalid_k(pud)	pte_pud(pte_mkvalid_k(pud_pte(pud)))
 #define pud_write(pud)		pte_write(pud_pte(pud))
 
 static inline pud_t pud_mkhuge(pud_t pud)
@@ -773,9 +778,13 @@ extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
 
 #define pmd_table(pmd)		((pmd_val(pmd) & PMD_TYPE_MASK) == \
 				 PMD_TYPE_TABLE)
-#define pmd_sect(pmd)		((pmd_val(pmd) & PMD_TYPE_MASK) == \
-				 PMD_TYPE_SECT)
-#define pmd_leaf(pmd)		(pmd_present(pmd) && !pmd_table(pmd))
+
+#define pmd_leaf pmd_leaf
+static inline bool pmd_leaf(pmd_t pmd)
+{
+	return pmd_present(pmd) && !pmd_table(pmd);
+}
+
 #define pmd_bad(pmd)		(!pmd_table(pmd))
 
 #define pmd_leaf_size(pmd)	(pmd_cont(pmd) ? CONT_PMD_SIZE : PMD_SIZE)
@@ -793,11 +802,8 @@ static inline int pmd_trans_huge(pmd_t pmd)
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
 #if defined(CONFIG_ARM64_64K_PAGES) || CONFIG_PGTABLE_LEVELS < 3
-static inline bool pud_sect(pud_t pud) { return false; }
 static inline bool pud_table(pud_t pud) { return true; }
 #else
-#define pud_sect(pud)		((pud_val(pud) & PUD_TYPE_MASK) == \
-				 PUD_TYPE_SECT)
 #define pud_table(pud)		((pud_val(pud) & PUD_TYPE_MASK) == \
 				 PUD_TYPE_TABLE)
 #endif
@@ -867,7 +873,11 @@ static inline unsigned long pmd_page_vaddr(pmd_t pmd)
 				 PUD_TYPE_TABLE)
 #define pud_present(pud)	pte_present(pud_pte(pud))
 #ifndef __PAGETABLE_PMD_FOLDED
-#define pud_leaf(pud)		(pud_present(pud) && !pud_table(pud))
+#define pud_leaf pud_leaf
+static inline bool pud_leaf(pud_t pud)
+{
+	return pud_present(pud) && !pud_table(pud);
+}
 #else
 #define pud_leaf(pud)		false
 #endif
@@ -997,7 +1007,7 @@ static inline pud_t *p4d_pgtable(p4d_t p4d)
 
 static inline phys_addr_t pud_offset_phys(p4d_t *p4dp, unsigned long addr)
 {
-	BUG_ON(!pgtable_l4_enabled());
+	VM_WARN_ON_ONCE(!pgtable_l4_enabled());
 
 	return p4d_page_paddr(READ_ONCE(*p4dp)) + pud_index(addr) * sizeof(pud_t);
 }
@@ -1120,7 +1130,7 @@ static inline p4d_t *pgd_to_folded_p4d(pgd_t *pgdp, unsigned long addr)
 
 static inline phys_addr_t p4d_offset_phys(pgd_t *pgdp, unsigned long addr)
 {
-	BUG_ON(!pgtable_l5_enabled());
+	VM_WARN_ON_ONCE(!pgtable_l5_enabled());
 
 	return pgd_page_paddr(READ_ONCE(*pgdp)) + p4d_index(addr) * sizeof(p4d_t);
 }
@@ -1241,9 +1251,18 @@ static inline pmd_t pmd_modify(pmd_t pmd, pgprot_t newprot)
 	return pte_pmd(pte_modify(pmd_pte(pmd), newprot));
 }
 
-extern int __ptep_set_access_flags(struct vm_area_struct *vma,
-				 unsigned long address, pte_t *ptep,
-				 pte_t entry, int dirty);
+extern int __ptep_set_access_flags_anysz(struct vm_area_struct *vma,
+					 unsigned long address, pte_t *ptep,
+					 pte_t entry, int dirty,
+					 unsigned long pgsize);
+
+static inline int __ptep_set_access_flags(struct vm_area_struct *vma,
+					  unsigned long address, pte_t *ptep,
+					  pte_t entry, int dirty)
+{
+	return __ptep_set_access_flags_anysz(vma, address, ptep, entry, dirty,
+					     PAGE_SIZE);
+}
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 #define __HAVE_ARCH_PMDP_SET_ACCESS_FLAGS
@@ -1251,8 +1270,8 @@ static inline int pmdp_set_access_flags(struct vm_area_struct *vma,
 					unsigned long address, pmd_t *pmdp,
 					pmd_t entry, int dirty)
 {
-	return __ptep_set_access_flags(vma, address, (pte_t *)pmdp,
-							pmd_pte(entry), dirty);
+	return __ptep_set_access_flags_anysz(vma, address, (pte_t *)pmdp,
+					     pmd_pte(entry), dirty, PMD_SIZE);
 }
 #endif
 
@@ -1283,9 +1302,8 @@ static inline void __pte_clear(struct mm_struct *mm,
 	__set_pte(ptep, __pte(0));
 }
 
-static inline int __ptep_test_and_clear_young(struct vm_area_struct *vma,
-					      unsigned long address,
-					      pte_t *ptep)
+static inline bool __ptep_test_and_clear_young(struct vm_area_struct *vma,
+		unsigned long address, pte_t *ptep)
 {
 	pte_t old_pte, pte;
 
@@ -1300,10 +1318,10 @@ static inline int __ptep_test_and_clear_young(struct vm_area_struct *vma,
 	return pte_young(pte);
 }
 
-static inline int __ptep_clear_flush_young(struct vm_area_struct *vma,
-					 unsigned long address, pte_t *ptep)
+static inline bool __ptep_clear_flush_young(struct vm_area_struct *vma,
+		unsigned long address, pte_t *ptep)
 {
-	int young = __ptep_test_and_clear_young(vma, address, ptep);
+	bool young = __ptep_test_and_clear_young(vma, address, ptep);
 
 	if (young) {
 		/*
@@ -1322,9 +1340,8 @@ static inline int __ptep_clear_flush_young(struct vm_area_struct *vma,
 
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) || defined(CONFIG_ARCH_HAS_NONLEAF_PMD_YOUNG)
 #define __HAVE_ARCH_PMDP_TEST_AND_CLEAR_YOUNG
-static inline int pmdp_test_and_clear_young(struct vm_area_struct *vma,
-					    unsigned long address,
-					    pmd_t *pmdp)
+static inline bool pmdp_test_and_clear_young(struct vm_area_struct *vma,
+		unsigned long address, pmd_t *pmdp)
 {
 	/* Operation applies to PMD table entry only if FEAT_HAFT is enabled */
 	VM_WARN_ON(pmd_table(READ_ONCE(*pmdp)) && !system_supports_haft());
@@ -1517,10 +1534,10 @@ static inline pmd_t pmdp_establish(struct vm_area_struct *vma,
 #define __pte_to_swp_entry(pte)	((swp_entry_t) { pte_val(pte) })
 #define __swp_entry_to_pte(swp)	((pte_t) { (swp).val })
 
-#ifdef CONFIG_ARCH_ENABLE_THP_MIGRATION
+#ifdef CONFIG_ARCH_SUPPORTS_PMD_SOFTLEAF
 #define __pmd_to_swp_entry(pmd)		((swp_entry_t) { pmd_val(pmd) })
 #define __swp_entry_to_pmd(swp)		__pmd((swp).val)
-#endif /* CONFIG_ARCH_ENABLE_THP_MIGRATION */
+#endif /* CONFIG_ARCH_SUPPORTS_PMD_SOFTLEAF */
 
 /*
  * Ensure that there are not more swap files than can be encoded in the kernel
@@ -1647,9 +1664,9 @@ extern void contpte_clear_full_ptes(struct mm_struct *mm, unsigned long addr,
 extern pte_t contpte_get_and_clear_full_ptes(struct mm_struct *mm,
 				unsigned long addr, pte_t *ptep,
 				unsigned int nr, int full);
-int contpte_test_and_clear_young_ptes(struct vm_area_struct *vma,
+bool contpte_test_and_clear_young_ptes(struct vm_area_struct *vma,
 				unsigned long addr, pte_t *ptep, unsigned int nr);
-int contpte_clear_flush_young_ptes(struct vm_area_struct *vma,
+bool contpte_clear_flush_young_ptes(struct vm_area_struct *vma,
 				unsigned long addr, pte_t *ptep, unsigned int nr);
 extern void contpte_wrprotect_ptes(struct mm_struct *mm, unsigned long addr,
 				pte_t *ptep, unsigned int nr);
@@ -1813,10 +1830,37 @@ static inline pte_t ptep_get_and_clear(struct mm_struct *mm,
 	return __ptep_get_and_clear(mm, addr, ptep);
 }
 
+static inline bool ptep_try_set(pte_t *ptep, pte_t new_pte)
+{
+	pteval_t old = 0;
+
+	if (!try_cmpxchg(&pte_val(*ptep), &old, pte_val(new_pte)))
+		return false;
+
+	/*
+	 * The store must be complete by the time this returns, but the caller
+	 * may be in lazy MMU mode, where __set_pte_complete() would defer the
+	 * barriers. Issue them directly.
+	 */
+	emit_pte_barriers();
+	return true;
+}
+#define ptep_try_set ptep_try_set
+
+/*
+ * arm64 mandates break-before-make: a cleared kernel PTE must have its TLB
+ * invalidated before a different page is installed in its place. The broadcast
+ * TLBI is an instruction, not an IPI, so this is safe with interrupts disabled.
+ */
+static inline void flush_tlb_before_set(unsigned long addr)
+{
+	flush_tlb_kernel_range(addr, addr + PAGE_SIZE);
+}
+#define flush_tlb_before_set flush_tlb_before_set
+
 #define test_and_clear_young_ptes test_and_clear_young_ptes
-static inline int test_and_clear_young_ptes(struct vm_area_struct *vma,
-					    unsigned long addr, pte_t *ptep,
-					    unsigned int nr)
+static inline bool test_and_clear_young_ptes(struct vm_area_struct *vma,
+		unsigned long addr, pte_t *ptep, unsigned int nr)
 {
 	if (likely(nr == 1 && !pte_cont(__ptep_get(ptep))))
 		return __ptep_test_and_clear_young(vma, addr, ptep);
@@ -1825,15 +1869,15 @@ static inline int test_and_clear_young_ptes(struct vm_area_struct *vma,
 }
 
 #define __HAVE_ARCH_PTEP_TEST_AND_CLEAR_YOUNG
-static inline int ptep_test_and_clear_young(struct vm_area_struct *vma,
-				unsigned long addr, pte_t *ptep)
+static inline bool ptep_test_and_clear_young(struct vm_area_struct *vma,
+		unsigned long addr, pte_t *ptep)
 {
 	return test_and_clear_young_ptes(vma, addr, ptep, 1);
 }
 
 #define __HAVE_ARCH_PTEP_CLEAR_YOUNG_FLUSH
-static inline int ptep_clear_flush_young(struct vm_area_struct *vma,
-				unsigned long addr, pte_t *ptep)
+static inline bool ptep_clear_flush_young(struct vm_area_struct *vma,
+		unsigned long addr, pte_t *ptep)
 {
 	pte_t orig_pte = __ptep_get(ptep);
 
@@ -1844,9 +1888,8 @@ static inline int ptep_clear_flush_young(struct vm_area_struct *vma,
 }
 
 #define clear_flush_young_ptes clear_flush_young_ptes
-static inline int clear_flush_young_ptes(struct vm_area_struct *vma,
-					 unsigned long addr, pte_t *ptep,
-					 unsigned int nr)
+static inline bool clear_flush_young_ptes(struct vm_area_struct *vma,
+		unsigned long addr, pte_t *ptep, unsigned int nr)
 {
 	if (likely(nr == 1 && !pte_cont(__ptep_get(ptep))))
 		return __ptep_clear_flush_young(vma, addr, ptep);

@@ -286,6 +286,10 @@ enum DC_FEATURE_MASK {
 	 * @DC_REPLAY_MASK: (0x200) disabled by default for DCN < 3.1.4
 	 */
 	DC_REPLAY_MASK = (1 << 9),
+	/**
+	 * @DC_FRL_MASK: (0x400) disabled by default
+	 */
+	DC_FRL_MASK = (1 << 10),
 };
 
 /**
@@ -467,10 +471,7 @@ struct amd_ip_funcs {
 	void (*complete)(struct amdgpu_ip_block *ip_block);
 	bool (*is_idle)(struct amdgpu_ip_block *ip_block);
 	int (*wait_for_idle)(struct amdgpu_ip_block *ip_block);
-	bool (*check_soft_reset)(struct amdgpu_ip_block *ip_block);
-	int (*pre_soft_reset)(struct amdgpu_ip_block *ip_block);
 	int (*soft_reset)(struct amdgpu_ip_block *ip_block);
-	int (*post_soft_reset)(struct amdgpu_ip_block *ip_block);
 	int (*set_clockgating_state)(struct amdgpu_ip_block *ip_block,
 				     enum amd_clockgating_state state);
 	int (*set_powergating_state)(struct amdgpu_ip_block *ip_block,

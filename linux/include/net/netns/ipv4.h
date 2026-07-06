@@ -127,6 +127,7 @@ struct netns_ipv4 {
 	atomic_t		fib_num_tclassid_users;
 #endif
 	struct hlist_head	*fib_table_hash;
+	spinlock_t		fib_table_hash_lock;
 	struct sock		*fibnl;
 	struct hlist_head	*fib_info_hash;
 	unsigned int		fib_info_hash_bits;
@@ -275,7 +276,7 @@ struct netns_ipv4 {
 
 #ifdef CONFIG_IP_MROUTE
 #ifndef CONFIG_IP_MROUTE_MULTIPLE_TABLES
-	struct mr_table		*mrt;
+	struct mr_table __rcu	*mrt;
 #else
 	struct list_head	mr_tables;
 	struct fib_rules_ops	*mr_rules_ops;

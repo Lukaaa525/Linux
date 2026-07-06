@@ -50,7 +50,7 @@ __nft_set_do_lookup(const struct net *net, const struct nft_set *set,
 	if (set->ops == &nft_set_rbtree_type.ops)
 		return nft_rbtree_lookup(net, set, key);
 
-	WARN_ON_ONCE(1);
+	DEBUG_NET_WARN_ON_ONCE(1);
 #endif
 	return set->ops->lookup(net, set, key);
 }
@@ -125,8 +125,8 @@ static const struct nla_policy nft_lookup_policy[NFTA_LOOKUP_MAX + 1] = {
 	[NFTA_LOOKUP_SET]	= { .type = NLA_STRING,
 				    .len = NFT_SET_MAXNAMELEN - 1 },
 	[NFTA_LOOKUP_SET_ID]	= { .type = NLA_U32 },
-	[NFTA_LOOKUP_SREG]	= { .type = NLA_U32 },
-	[NFTA_LOOKUP_DREG]	= { .type = NLA_U32 },
+	[NFTA_LOOKUP_SREG]	= NLA_POLICY_MAX(NLA_BE32, NFT_REG32_MAX),
+	[NFTA_LOOKUP_DREG]	= NLA_POLICY_MAX(NLA_BE32, NFT_REG32_MAX),
 	[NFTA_LOOKUP_FLAGS]	=
 		NLA_POLICY_MASK(NLA_BE32, NFT_LOOKUP_F_INV),
 };

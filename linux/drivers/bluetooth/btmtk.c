@@ -112,7 +112,11 @@ static void btmtk_coredump_notify(struct hci_dev *hdev, int state)
 void btmtk_fw_get_filename(char *buf, size_t size, u32 dev_id, u32 fw_ver,
 			   u32 fw_flavor)
 {
-	if (dev_id == 0x7925)
+	if (dev_id == 0x6639)
+		snprintf(buf, size,
+			 "mediatek/mt7927/BT_RAM_CODE_MT%04x_2_%x_hdr.bin",
+			 dev_id & 0xffff, (fw_ver & 0xff) + 1);
+	else if (dev_id == 0x7925)
 		snprintf(buf, size,
 			 "mediatek/mt%04x/BT_RAM_CODE_MT%04x_1_%x_hdr.bin",
 			 dev_id & 0xffff, dev_id & 0xffff, (fw_ver & 0xff) + 1);
@@ -128,7 +132,8 @@ void btmtk_fw_get_filename(char *buf, size_t size, u32 dev_id, u32 fw_ver,
 EXPORT_SYMBOL_GPL(btmtk_fw_get_filename);
 
 int btmtk_setup_firmware_79xx(struct hci_dev *hdev, const char *fwname,
-			      wmt_cmd_sync_func_t wmt_cmd_sync)
+			      wmt_cmd_sync_func_t wmt_cmd_sync,
+			      u32 dev_id)
 {
 	struct btmtk_hci_wmt_params wmt_params;
 	struct btmtk_patch_header *hdr;
@@ -166,6 +171,14 @@ int btmtk_setup_firmware_79xx(struct hci_dev *hdev, const char *fwname,
 		section_offset = le32_to_cpu(sectionmap->secoffset);
 		dl_size = le32_to_cpu(sectionmap->bin_info_spec.dlsize);
 
+		/* MT6639: only download sections where dlmode byte0 == 0x01,
+		 * matching the Windows driver behavior which skips WiFi/other
+		 * sections that would cause the chip to hang.
+		 */
+		if (dev_id == 0x6639 && dl_size > 0 &&
+		    (le32_to_cpu(sectionmap->bin_info_spec.dlmodecrctype) & 0xff) != 0x01)
+			continue;
+
 		if (dl_size > 0) {
 			retry = 20;
 			while (retry > 0) {
@@ -175,7 +188,7 @@ int btmtk_setup_firmware_79xx(struct hci_dev *hdev, const char *fwname,
 				       MTK_FW_ROM_PATCH_GD_SIZE +
 				       MTK_FW_ROM_PATCH_SEC_MAP_SIZE * i +
 				       MTK_SEC_MAP_COMMON_SIZE,
-				       MTK_SEC_MAP_NEED_SEND_SIZE + 1);
+				       MTK_SEC_MAP_NEED_SEND_SIZE);
 
 				wmt_params.op = BTMTK_WMT_PATCH_DWNLD;
 				wmt_params.status = &status;
@@ -454,6 +467,22 @@ int btmtk_process_coredump(struct hci_dev *hdev, struct sk_buff *skb)
 EXPORT_SYMBOL_GPL(btmtk_process_coredump);
 
 #if IS_ENABLED(CONFIG_BT_HCIBTUSB_MTK)
+/* Known MT6639 (MT7927) Bluetooth USB devices.
+ * Used to scope the zero-CHIPID workaround to real MT6639 hardware,
+ * since some boards return 0x0000 from the MMIO chip ID register.
+ */
+static const struct {
+	u16 vendor;
+	u16 product;
+} btmtk_mt6639_devs[] = {
+	{ 0x0489, 0xe13a },	/* ASUS ROG Crosshair X870E Hero */
+	{ 0x0489, 0xe0fa },	/* Lenovo Legion Pro 7 16ARX9 */
+	{ 0x0489, 0xe10f },	/* Gigabyte Z790 AORUS MASTER X */
+	{ 0x0489, 0xe110 },	/* MSI X870E Ace Max */
+	{ 0x0489, 0xe116 },	/* TP-Link Archer TBE550E */
+	{ 0x13d3, 0x3588 },	/* ASUS ROG STRIX X870E-E */
+};
+
 static void btmtk_usb_wmt_recv(struct urb *urb)
 {
 	struct hci_dev *hdev = urb->context;
@@ -508,6 +537,7 @@ static void btmtk_usb_wmt_recv(struct urb *urb)
 		return;
 	} else if (urb->status == -ENOENT) {
 		/* Avoid suspend failed when usb_kill_urb */
+		kfree(urb->setup_packet);
 		return;
 	}
 
@@ -581,6 +611,7 @@ static int btmtk_usb_submit_wmt_recv_urb(struct hci_dev *hdev)
 		if (err != -EPERM && err != -ENODEV)
 			bt_dev_err(hdev, "urb %p submission failed (%d)",
 				   urb, -err);
+		kfree(dr);
 		usb_unanchor_urb(urb);
 	}
 
@@ -666,8 +697,13 @@ static int btmtk_usb_hci_wmt_sync(struct hci_dev *hdev,
 	if (data->evt_skb == NULL)
 		goto err_free_wc;
 
-	/* Parse and handle the return WMT event */
-	wmt_evt = (struct btmtk_hci_wmt_evt *)data->evt_skb->data;
+	wmt_evt = skb_pull_data(data->evt_skb, sizeof(*wmt_evt));
+	if (!wmt_evt) {
+		bt_dev_err(hdev, "WMT event too short (%u bytes)",
+			   data->evt_skb->len);
+		err = -EINVAL;
+		goto err_free_skb;
+	}
 	if (wmt_evt->whdr.op != hdr->op) {
 		bt_dev_err(hdev, "Wrong op received %d expected %d",
 			   wmt_evt->whdr.op, hdr->op);
@@ -683,6 +719,12 @@ static int btmtk_usb_hci_wmt_sync(struct hci_dev *hdev,
 			status = BTMTK_WMT_PATCH_DONE;
 		break;
 	case BTMTK_WMT_FUNC_CTRL:
+		if (!skb_pull_data(data->evt_skb,
+				   sizeof(wmt_evt_funcc->status))) {
+			status = BTMTK_WMT_ON_UNDONE;
+			break;
+		}
+
 		wmt_evt_funcc = (struct btmtk_hci_wmt_evt_funcc *)wmt_evt;
 		if (be16_to_cpu(wmt_evt_funcc->status) == 0x404)
 			status = BTMTK_WMT_ON_DONE;
@@ -852,7 +894,7 @@ int btmtk_usb_subsys_reset(struct hci_dev *hdev, u32 dev_id)
 		if (err < 0)
 			return err;
 		msleep(100);
-	} else if (dev_id == 0x7925) {
+	} else if (dev_id == 0x7925 || dev_id == 0x6639) {
 		err = btmtk_usb_uhw_reg_read(hdev, MTK_BT_RESET_REG_CONNV3, &val);
 		if (err < 0)
 			return err;
@@ -938,7 +980,7 @@ int btmtk_usb_subsys_reset(struct hci_dev *hdev, u32 dev_id)
 	}
 
 	err = btmtk_usb_id_get(hdev, 0x70010200, &val);
-	if (err < 0 || !val)
+	if (err < 0 || (!val && dev_id != 0x6639))
 		bt_dev_err(hdev, "Can't get device id, subsys reset fail.");
 
 	return err;
@@ -995,40 +1037,22 @@ static int __set_mtk_intr_interface(struct hci_dev *hdev)
 {
 	struct btmtk_data *btmtk_data = hci_get_priv(hdev);
 	struct usb_interface *intf = btmtk_data->isopkt_intf;
-	int i, err;
+	int err;
 
 	if (!btmtk_data->isopkt_intf)
 		return -ENODEV;
 
-	err = usb_set_interface(btmtk_data->udev, MTK_ISO_IFNUM, 1);
+	err = usb_set_interface(btmtk_data->udev, MTK_ISO_IFNUM,
+			       (intf->num_altsetting > 1) ? 1 : 0);
 	if (err < 0) {
 		bt_dev_err(hdev, "setting interface failed (%d)", -err);
 		return err;
 	}
 
-	btmtk_data->isopkt_tx_ep = NULL;
-	btmtk_data->isopkt_rx_ep = NULL;
-
-	for (i = 0; i < intf->cur_altsetting->desc.bNumEndpoints; i++) {
-		struct usb_endpoint_descriptor *ep_desc;
-
-		ep_desc = &intf->cur_altsetting->endpoint[i].desc;
-
-		if (!btmtk_data->isopkt_tx_ep &&
-		    usb_endpoint_is_int_out(ep_desc)) {
-			btmtk_data->isopkt_tx_ep = ep_desc;
-			continue;
-		}
-
-		if (!btmtk_data->isopkt_rx_ep &&
-		    usb_endpoint_is_int_in(ep_desc)) {
-			btmtk_data->isopkt_rx_ep = ep_desc;
-			continue;
-		}
-	}
-
-	if (!btmtk_data->isopkt_tx_ep ||
-	    !btmtk_data->isopkt_rx_ep) {
+	err = usb_find_common_endpoints(intf->cur_altsetting, NULL, NULL,
+					&btmtk_data->isopkt_rx_ep,
+					&btmtk_data->isopkt_tx_ep);
+	if (err) {
 		bt_dev_err(hdev, "invalid interrupt descriptors");
 		return -ENODEV;
 	}
@@ -1050,8 +1074,10 @@ struct urb *alloc_mtk_intr_urb(struct hci_dev *hdev, struct sk_buff *skb,
 	if (!urb)
 		return ERR_PTR(-ENOMEM);
 
-	if (btmtk_isopkt_pad(hdev, skb))
+	if (btmtk_isopkt_pad(hdev, skb)) {
+		usb_free_urb(urb);
 		return ERR_PTR(-EINVAL);
+	}
 
 	pipe = usb_sndintpipe(btmtk_data->udev,
 			      btmtk_data->isopkt_tx_ep->bEndpointAddress);
@@ -1322,6 +1348,24 @@ int btmtk_usb_setup(struct hci_dev *hdev)
 		fw_flavor = (fw_flavor & 0x00000080) >> 7;
 	}
 
+	if (!dev_id) {
+		u16 vid = le16_to_cpu(btmtk_data->udev->descriptor.idVendor);
+		u16 pid = le16_to_cpu(btmtk_data->udev->descriptor.idProduct);
+		int i;
+
+		for (i = 0; i < ARRAY_SIZE(btmtk_mt6639_devs); i++) {
+			if (vid == btmtk_mt6639_devs[i].vendor &&
+			    pid == btmtk_mt6639_devs[i].product) {
+				dev_id = 0x6639;
+				break;
+			}
+		}
+
+		if (dev_id)
+			bt_dev_info(hdev, "MT6639: CHIPID=0x0000 with VID=%04x PID=%04x, using 0x6639",
+				    vid, pid);
+	}
+
 	btmtk_data->dev_id = dev_id;
 
 	err = btmtk_register_coredump(hdev, btmtk_data->drv_name, fw_version);
@@ -1337,13 +1381,25 @@ int btmtk_usb_setup(struct hci_dev *hdev)
 		break;
 	case 0x7922:
 	case 0x7925:
+		/*
+		 * A remote wakeup could cause the device completely unresponsive, and
+		 * recovering from such a state needs a power cycle.
+		 *
+		 * Since the remote wakeup capability is super broken, just disable it
+		 * to get rid of the troubles. The device can still be autosuspended
+		 * when the bluetooth interface is closed.
+		 */
+		device_set_wakeup_capable(&btmtk_data->udev->dev, false);
+		fallthrough;
 	case 0x7961:
 	case 0x7902:
+	case 0x6639:
 		btmtk_fw_get_filename(fw_bin_name, sizeof(fw_bin_name), dev_id,
 				      fw_version, fw_flavor);
 
 		err = btmtk_setup_firmware_79xx(hdev, fw_bin_name,
-						btmtk_usb_hci_wmt_sync);
+						btmtk_usb_hci_wmt_sync,
+						dev_id);
 		if (err < 0) {
 			/* retry once if setup firmware error */
 			if (!test_and_set_bit(BTMTK_FIRMWARE_DL_RETRY, &btmtk_data->flags))
@@ -1503,6 +1559,29 @@ int btmtk_usb_shutdown(struct hci_dev *hdev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(btmtk_usb_shutdown);
+
+int btmtk_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct hci_event_hdr *hdr = (void *)skb->data;
+	struct hci_ev_cmd_complete *ec;
+
+	if (hdr->evt == HCI_EV_CMD_COMPLETE &&
+	    skb->len >= HCI_EVENT_HDR_SIZE + sizeof(*ec)) {
+		u16 opcode;
+
+		ec = (void *)(skb->data + HCI_EVENT_HDR_SIZE);
+		opcode = __le16_to_cpu(ec->opcode);
+
+		/* Filter vendor opcode */
+		if (opcode == 0xfc5d) {
+			kfree_skb(skb);
+			return 0;
+		}
+	}
+
+	return hci_recv_frame(hdev, skb);
+}
+EXPORT_SYMBOL_GPL(btmtk_recv_event);
 #endif
 
 MODULE_AUTHOR("Sean Wang <sean.wang@mediatek.com>");
@@ -1516,3 +1595,4 @@ MODULE_FIRMWARE(FIRMWARE_MT7668);
 MODULE_FIRMWARE(FIRMWARE_MT7922);
 MODULE_FIRMWARE(FIRMWARE_MT7961);
 MODULE_FIRMWARE(FIRMWARE_MT7925);
+MODULE_FIRMWARE(FIRMWARE_MT7927);

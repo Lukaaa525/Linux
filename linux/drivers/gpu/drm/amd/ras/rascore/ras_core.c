@@ -69,6 +69,9 @@ int ras_core_convert_timestamp_to_time(struct ras_core_context *ras_core,
 	int seconds_per_minute = 60;
 	int days, remaining_seconds;
 
+	if (!tm)
+		return -EINVAL;
+
 	days = div64_u64_rem(timestamp, seconds_per_day, &remainder);
 	/* remainder will always be less than seconds_per_day. */
 	remaining_seconds = remainder;
@@ -116,6 +119,9 @@ bool ras_core_gpu_in_reset(struct ras_core_context *ras_core)
 {
 	uint32_t status = 0;
 
+	if (!ras_core)
+		return false;
+
 	if (ras_core->sys_fn &&
 		ras_core->sys_fn->check_gpu_status)
 		ras_core->sys_fn->check_gpu_status(ras_core, &status);
@@ -126,6 +132,9 @@ bool ras_core_gpu_in_reset(struct ras_core_context *ras_core)
 bool ras_core_gpu_is_vf(struct ras_core_context *ras_core)
 {
 	uint32_t status = 0;
+
+	if (!ras_core)
+		return false;
 
 	if (ras_core->sys_fn &&
 		ras_core->sys_fn->check_gpu_status)
@@ -140,6 +149,11 @@ bool ras_core_gpu_is_rma(struct ras_core_context *ras_core)
 		return false;
 
 	return ras_core->is_rma;
+}
+
+int ras_core_set_debug_mode(struct ras_core_context *ras_core, bool enable)
+{
+	return ras_mp1_set_debug_mode(ras_core, enable);
 }
 
 static int ras_core_seqno_fifo_write(struct ras_core_context *ras_core,
@@ -187,9 +201,9 @@ uint64_t ras_core_gen_seqno(struct ras_core_context *ras_core,
 {
 	uint64_t seqno = 0;
 
-	if (ras_core->sys_fn &&
-		ras_core->sys_fn->gen_seqno)
-		ras_core->sys_fn->gen_seqno(ras_core, type, &seqno);
+	if (ras_core->sys_fn && ras_core->sys_fn->gen_seqno &&
+	    ras_core->sys_fn->gen_seqno(ras_core, type, &seqno))
+		return 0;
 
 	return seqno;
 }
@@ -270,6 +284,9 @@ struct ras_core_context *ras_core_create(struct ras_core_config *init_config)
 {
 	struct ras_core_context *ras_core;
 	struct ras_core_config *config;
+
+	if (!init_config)
+		return NULL;
 
 	ras_core = kzalloc_obj(*ras_core);
 	if (!ras_core)
@@ -479,6 +496,9 @@ int ras_core_handle_fatal_error(struct ras_core_context *ras_core)
 
 uint32_t ras_core_get_curr_nps_mode(struct ras_core_context *ras_core)
 {
+	if (!ras_core)
+		return 0;
+
 	if (ras_core->ras_nbio.ip_func &&
 	    ras_core->ras_nbio.ip_func->get_memory_partition_mode)
 		return ras_core->ras_nbio.ip_func->get_memory_partition_mode(ras_core);
@@ -562,6 +582,8 @@ bool ras_core_ras_interrupt_detected(struct ras_core_context *ras_core)
 int ras_core_get_gpu_mem(struct ras_core_context *ras_core,
 	enum gpu_mem_type mem_type, struct gpu_mem_block *gpu_mem)
 {
+	if (!ras_core || !gpu_mem)
+		return -EINVAL;
 	if (ras_core->sys_fn && ras_core->sys_fn->get_gpu_mem)
 		return ras_core->sys_fn->get_gpu_mem(ras_core, mem_type, gpu_mem);
 
@@ -572,6 +594,8 @@ int ras_core_get_gpu_mem(struct ras_core_context *ras_core,
 int ras_core_put_gpu_mem(struct ras_core_context *ras_core,
 	enum gpu_mem_type mem_type, struct gpu_mem_block *gpu_mem)
 {
+	if (!ras_core || !gpu_mem)
+		return -EINVAL;
 	if (ras_core->sys_fn && ras_core->sys_fn->put_gpu_mem)
 		return ras_core->sys_fn->put_gpu_mem(ras_core, mem_type, gpu_mem);
 
@@ -625,6 +649,9 @@ int ras_core_event_notify(struct ras_core_context *ras_core,
 int ras_core_get_device_system_info(struct ras_core_context *ras_core,
 		struct device_system_info *dev_info)
 {
+	if (!dev_info)
+		return -EINVAL;
+
 	if (ras_core && ras_core->sys_fn &&
 		ras_core->sys_fn->get_device_system_info)
 		return ras_core->sys_fn->get_device_system_info(ras_core, dev_info);
@@ -653,4 +680,14 @@ int ras_core_convert_soc_pa_to_cur_nps_pages(struct ras_core_context *ras_core,
 				&record, cur_nps_mode, page_pfn, max_pages);
 
 	return count;
+}
+
+int ras_core_check_address_sanity(struct ras_core_context *ras_core,
+		uint64_t addr)
+{
+	if (ras_core && ras_core->sys_fn &&
+		ras_core->sys_fn->check_address_sanity)
+		return ras_core->sys_fn->check_address_sanity(ras_core, addr);
+
+	return 0;
 }

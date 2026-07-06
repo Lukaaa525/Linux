@@ -164,6 +164,7 @@ void optc1_program_timing(
 	const enum signal_type signal,
 	bool use_vbios)
 {
+	(void)use_vbios;
 	struct dc_crtc_timing patched_crtc_timing;
 	uint32_t asic_blank_end;
 	uint32_t asic_blank_start;
@@ -374,7 +375,7 @@ void optc1_set_vtg_params(struct timing_generator *optc,
 	if (REG(OTG_INTERLACE_CONTROL)) {
 		if (patched_crtc_timing.flags.INTERLACE == 1) {
 			v_init = v_init / 2;
-			if ((optc1->vstartup_start/2)*2 > asic_blank_end)
+			if ((uint32_t)((optc1->vstartup_start/2)*2) > asic_blank_end)
 				v_fp2 = v_fp2 / 2;
 		}
 	}
@@ -538,15 +539,10 @@ static bool optc1_enable_crtc(struct timing_generator *optc)
 	REG_UPDATE(CONTROL,
 			VTG0_ENABLE, 1);
 
-	REG_SEQ_START();
-
 	/* Enable CRTC */
 	REG_UPDATE_2(OTG_CONTROL,
 			OTG_DISABLE_POINT_CNTL, 3,
 			OTG_MASTER_EN, 1);
-
-	REG_SEQ_SUBMIT();
-	REG_SEQ_WAIT_DONE();
 
 	return true;
 }
@@ -855,6 +851,8 @@ void optc1_set_early_control(
 	struct timing_generator *optc,
 	uint32_t early_cntl)
 {
+	(void)optc;
+	(void)early_cntl;
 	/* asic design change, do not need this control
 	 * empty for share caller logic
 	 */
@@ -1249,6 +1247,7 @@ void optc1_get_crtc_scanoutpos(
 static void optc1_enable_stereo(struct timing_generator *optc,
 	const struct dc_crtc_timing *timing, struct crtc_stereo_flags *flags)
 {
+	(void)timing;
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 
 	if (flags) {

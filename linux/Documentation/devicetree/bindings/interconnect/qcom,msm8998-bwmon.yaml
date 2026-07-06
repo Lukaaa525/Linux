@@ -13,7 +13,7 @@ description: |
   Bandwidth Monitor measures current throughput on buses between various NoC
   fabrics and provides information when it crosses configured thresholds.
 
-  Certain SoCs might have more than one Bandwidth Monitors, for example on SDM845::
+  Certain SoCs might have more than one Bandwidth Monitors, for example on SDM845:
    - Measuring the bandwidth between CPUs and Last Level Cache Controller -
      called just BWMON,
    - Measuring the bandwidth between Last Level Cache Controller and memory
@@ -26,6 +26,7 @@ properties:
       - items:
           - enum:
               - qcom,glymur-cpu-bwmon
+              - qcom,hawi-cpu-bwmon
               - qcom,kaanapali-cpu-bwmon
               - qcom,qcm2290-cpu-bwmon
               - qcom,qcs615-cpu-bwmon
@@ -45,6 +46,7 @@ properties:
           - const: qcom,sdm845-bwmon    # BWMON v4, unified register space
       - items:
           - enum:
+              - qcom,hawi-llcc-bwmon
               - qcom,qcs615-llcc-bwmon
               - qcom,qcs8300-llcc-bwmon
               - qcom,sa8775p-llcc-bwmon

@@ -456,6 +456,8 @@
 		SRI_ARR(OTG_V_SYNC_A, OTG, inst), \
 		SRI_ARR(OTG_V_SYNC_A_CNTL, OTG, inst), \
 		SRI_ARR(OTG_CONTROL, OTG, inst), \
+		SRI_ARR(OTG_MASTER_EN, OTG, inst), \
+		SRI_ARR(OTG_LONG_VBLANK_STATUS, OTG, inst), \
 		SRI_ARR(OTG_STEREO_CONTROL, OTG, inst), \
 		SRI_ARR(OTG_3D_STRUCTURE_CONTROL, OTG, inst),                            \
 		SRI_ARR(OTG_STEREO_STATUS, OTG, inst),                                   \
@@ -472,6 +474,11 @@
 		SRI_ARR(OTG_M_CONST_DTO0, OTG, inst),                                    \
 		SRI_ARR(OTG_M_CONST_DTO1, OTG, inst),                                    \
 		SRI_ARR(OTG_CLOCK_CONTROL, OTG, inst),                                   \
+		SRI_ARR(OTG_COUNT_CONTROL, OTG, inst),                                   \
+		SRI_ARR(OTG_COUNT_RESET, OTG, inst),                                   \
+		SRI_ARR(OTG_CRC_SIG_BLUE_CONTROL_MASK, OTG, inst),                      \
+		SRI_ARR(OTG_CRC_SIG_RED_GREEN_MASK, OTG, inst),                      \
+		SRI_ARR(OTG_DRR_TIMING_INT_STATUS, OTG, inst),                      \
 		SRI_ARR(OTG_VERTICAL_INTERRUPT0_CONTROL, OTG, inst),                     \
 		SRI_ARR(OTG_VERTICAL_INTERRUPT0_POSITION, OTG, inst),                    \
 		SRI_ARR(OTG_VERTICAL_INTERRUPT1_CONTROL, OTG, inst),                     \
@@ -481,6 +488,8 @@
 		SRI_ARR(OPTC_INPUT_CLOCK_CONTROL, ODM, inst),                            \
 		SRI_ARR(OPTC_DATA_SOURCE_SELECT, ODM, inst),                             \
 		SRI_ARR(OPTC_INPUT_GLOBAL_CONTROL, ODM, inst),                           \
+		SRI_ARR(OPTC_RSMU_UNDERFLOW, ODM, inst),                                 \
+		SRI_ARR(OPTC_UNDERFLOW_THRESHOLD, ODM, inst),                            \
 		SRI_ARR(CONTROL, VTG, inst), \
 		SRI_ARR(OTG_VERT_SYNC_CONTROL, OTG, inst),  \
 		SRI_ARR(OTG_GSL_CONTROL, OTG, inst), \
@@ -541,7 +550,8 @@
 		SRII_ARR_2(PIXEL_RATE_CNTL, OTG, 0, index),             \
 		SRII_ARR_2(PIXEL_RATE_CNTL, OTG, 1, index),             \
 		SRII_ARR_2(PIXEL_RATE_CNTL, OTG, 2, index),             \
-		SRII_ARR_2(PIXEL_RATE_CNTL, OTG, 3, index)
+		SRII_ARR_2(PIXEL_RATE_CNTL, OTG, 3, index),             \
+		SR_ARR(OTG_PIXEL_RATE_DIV, index)
 
 /* ABM */
 #define ABM_DCN42_REG_LIST_RI(id)                               \
@@ -584,5 +594,6 @@ enum dc_status dcn42_validate_bandwidth(struct dc *dc,
 							  enum dc_validate_mode validate_mode);
 
 void dcn42_prepare_mcache_programming(struct dc *dc, struct dc_state *context);
+int dcn42_get_power_profile(const struct dc_state *context);
 
 #endif /* _DCN42_RESOURCE_H_ */

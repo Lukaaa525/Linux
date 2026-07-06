@@ -168,7 +168,7 @@ static void ext4_release_io_end(ext4_io_end_t *io_end)
  * written. On IO failure, check if journal abort is needed. Note that
  * we are protected from truncate touching same part of extent tree by the
  * fact that truncate code waits for all DIO to finish (thus exclusion from
- * direct IO is achieved) and also waits for PageWriteback bits. Thus we
+ * direct IO is achieved) and also waits for writeback to complete. Thus we
  * cannot get to ext4_ext_truncate() before all IOs overlapping that range are
  * completed (happens from ext4_free_ioend()).
  */
@@ -537,9 +537,15 @@ int ext4_bio_write_folio(struct ext4_io_submit *io, struct folio *folio,
 		nr_to_submit++;
 	} while ((bh = bh->b_this_page) != head);
 
-	/* Nothing to submit? Just unlock the folio... */
-	if (!nr_to_submit)
+	if (!nr_to_submit) {
+		/*
+		 * We have nothing to submit. Just cycle the folio through
+		 * writeback state to properly update xarray tags.
+		 */
+		__folio_start_writeback(folio, keep_towrite);
+		folio_end_writeback(folio);
 		return 0;
+	}
 
 	bh = head = folio_buffers(folio);
 

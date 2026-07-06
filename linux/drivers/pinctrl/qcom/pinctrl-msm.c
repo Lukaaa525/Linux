@@ -98,7 +98,22 @@ MSM_ACCESSOR(ctl)
 MSM_ACCESSOR(io)
 MSM_ACCESSOR(intr_cfg)
 MSM_ACCESSOR(intr_status)
-MSM_ACCESSOR(intr_target)
+
+static u32 msm_readl_intr_target(struct msm_pinctrl *pctrl,
+				 const struct msm_pingroup *g)
+{
+	u32 reg = g->intr_target_reg ? g->intr_target_reg : g->intr_cfg_reg;
+
+	return readl(pctrl->regs[g->tile] + reg);
+}
+
+static void msm_writel_intr_target(u32 val, struct msm_pinctrl *pctrl,
+				   const struct msm_pingroup *g)
+{
+	u32 reg = g->intr_target_reg ? g->intr_target_reg : g->intr_cfg_reg;
+
+	writel(val, pctrl->regs[g->tile] + reg);
+}
 
 static void msm_ack_intr_status(struct msm_pinctrl *pctrl,
 				const struct msm_pingroup *g)
@@ -795,8 +810,7 @@ static const struct gpio_chip msm_gpio_template = {
  * Algorithm comes from Google's msmgpio driver.
  */
 static void msm_gpio_update_dual_edge_pos(struct msm_pinctrl *pctrl,
-					  const struct msm_pingroup *g,
-					  struct irq_data *d)
+					  const struct msm_pingroup *g)
 {
 	int loop_limit = 100;
 	unsigned val, val2, intstat;
@@ -990,17 +1004,15 @@ static void msm_gpio_irq_ack(struct irq_data *d)
 	msm_ack_intr_status(pctrl, g);
 
 	if (test_bit(d->hwirq, pctrl->dual_edge_irqs))
-		msm_gpio_update_dual_edge_pos(pctrl, g, d);
+		msm_gpio_update_dual_edge_pos(pctrl, g);
 
 	raw_spin_unlock_irqrestore(&pctrl->lock, flags);
 }
 
 static void msm_gpio_irq_eoi(struct irq_data *d)
 {
-	d = d->parent_data;
-
-	if (d)
-		d->chip->irq_eoi(d);
+	if (d->parent_data)
+		irq_chip_eoi_parent(d);
 }
 
 static bool msm_gpio_needs_dual_edge_parent_workaround(struct irq_data *d,
@@ -1021,8 +1033,6 @@ static void msm_gpio_irq_init_valid_mask(struct gpio_chip *gc,
 	struct msm_pinctrl *pctrl = gpiochip_get_data(gc);
 	const struct msm_pingroup *g;
 	int i;
-
-	bitmap_fill(valid_mask, ngpios);
 
 	for (i = 0; i < ngpios; i++) {
 		g = &pctrl->soc->groups[i];
@@ -1078,7 +1088,8 @@ static int msm_gpio_irq_set_type(struct irq_data *d, unsigned int type)
 		intr_target_mask = GENMASK(g->intr_target_width - 1, 0);
 
 	if (pctrl->intr_target_use_scm) {
-		u32 addr = pctrl->phys_base[0] + g->intr_target_reg;
+		u32 reg = g->intr_target_reg ? g->intr_target_reg : g->intr_cfg_reg;
+		u32 addr = pctrl->phys_base[0] + reg;
 		int ret;
 
 		qcom_scm_io_readl(addr, &val);
@@ -1163,7 +1174,7 @@ static int msm_gpio_irq_set_type(struct irq_data *d, unsigned int type)
 		msm_ack_intr_status(pctrl, g);
 
 	if (test_bit(d->hwirq, pctrl->dual_edge_irqs))
-		msm_gpio_update_dual_edge_pos(pctrl, g, d);
+		msm_gpio_update_dual_edge_pos(pctrl, g);
 
 	raw_spin_unlock_irqrestore(&pctrl->lock, flags);
 
@@ -1226,12 +1237,12 @@ static int msm_gpio_irq_reqres(struct irq_data *d)
 	/*
 	 * If the wakeup_enable bit is present and marked as available for the
 	 * requested GPIO, it should be enabled when the GPIO is marked as
-	 * wake irq in order to allow the interrupt event to be transfered to
-	 * the PDC HW.
+	 * wake irq in order to allow the interrupt event to be transferred to
+	 * the PDC/MPM HW.
 	 * While the name implies only the wakeup event, it's also required for
 	 * the interrupt event.
 	 */
-	if (test_bit(d->hwirq, pctrl->skip_wake_irqs) && g->intr_wakeup_present_bit) {
+	if (g->intr_wakeup_present_bit) {
 		u32 intr_cfg;
 
 		raw_spin_lock_irqsave(&pctrl->lock, flags);
@@ -1259,7 +1270,7 @@ static void msm_gpio_irq_relres(struct irq_data *d)
 	unsigned long flags;
 
 	/* Disable the wakeup_enable bit if it has been set in msm_gpio_irq_reqres() */
-	if (test_bit(d->hwirq, pctrl->skip_wake_irqs) && g->intr_wakeup_present_bit) {
+	if (g->intr_wakeup_present_bit) {
 		u32 intr_cfg;
 
 		raw_spin_lock_irqsave(&pctrl->lock, flags);
@@ -1577,11 +1588,11 @@ int msm_pinctrl_probe(struct platform_device *pdev,
 	pctrl->desc.pins = pctrl->soc->pins;
 	pctrl->desc.npins = pctrl->soc->npins;
 
-	pctrl->pctrl = devm_pinctrl_register(&pdev->dev, &pctrl->desc, pctrl);
-	if (IS_ERR(pctrl->pctrl)) {
-		dev_err(&pdev->dev, "Couldn't register pinctrl driver\n");
-		return PTR_ERR(pctrl->pctrl);
-	}
+	ret = devm_pinctrl_register_and_init(&pdev->dev, &pctrl->desc,
+					     pctrl, &pctrl->pctrl);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Couldn't register pinctrl driver\n");
 
 	for (i = 0; i < soc_data->nfunctions; i++) {
 		func = &soc_data->functions[i];
@@ -1590,6 +1601,11 @@ int msm_pinctrl_probe(struct platform_device *pdev,
 		if (ret < 0)
 			return ret;
 	}
+
+	ret = pinctrl_enable(pctrl->pctrl);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "Couldn't enable pinctrl driver\n");
 
 	ret = msm_gpio_init(pctrl);
 	if (ret)

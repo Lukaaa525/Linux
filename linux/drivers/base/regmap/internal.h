@@ -84,6 +84,7 @@ struct regmap {
 	bool debugfs_disable;
 	struct dentry *debugfs;
 	const char *debugfs_name;
+	int debugfs_dummy_id;
 
 	unsigned int debugfs_reg_len;
 	unsigned int debugfs_val_len;
@@ -188,7 +189,7 @@ struct regcache_ops {
 	const char *name;
 	enum regcache_type type;
 	int (*init)(struct regmap *map);
-	int (*exit)(struct regmap *map);
+	void (*exit)(struct regmap *map);
 	int (*populate)(struct regmap *map);
 #ifdef CONFIG_DEBUG_FS
 	void (*debugfs_init)(struct regmap *map);

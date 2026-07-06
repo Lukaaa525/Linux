@@ -2,12 +2,13 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
-#ifndef PAGE_SIZE
-#define PAGE_SIZE 4096
+#ifndef BUF_SIZE
+#define BUF_SIZE 4096
 #endif
 
 #define MB(x) (x << 20)
 
+#define NSEC_PER_USEC	1000L
 #define USEC_PER_SEC	1000000L
 #define NSEC_PER_SEC	1000000000L
 
@@ -61,6 +62,8 @@ extern int cg_read(const char *cgroup, const char *control,
 		   char *buf, size_t len);
 extern int cg_read_strcmp(const char *cgroup, const char *control,
 			  const char *expected);
+extern int cg_read_strcmp_wait(const char *cgroup, const char *control,
+				   const char *expected);
 extern int cg_read_strstr(const char *cgroup, const char *control,
 			  const char *needle);
 extern long cg_read_long(const char *cgroup, const char *control);

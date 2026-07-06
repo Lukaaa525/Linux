@@ -83,6 +83,21 @@ int f2fs_update_extension_list(struct f2fs_sb_info *sbi, const char *name,
 	if (set) {
 		if (total_count == F2FS_MAX_EXTENSION)
 			return -EINVAL;
+
+		if (hot) {
+			start = 0;
+			count = cold_count;
+		} else {
+			start = cold_count;
+			count = total_count;
+		}
+		for (i = start; i < count; i++) {
+			if (!strcmp(name, extlist[i])) {
+				f2fs_warn(sbi, "extension '%s' already exists in %s list",
+					  name, hot ? "cold" : "hot");
+				return -EINVAL;
+			}
+		}
 	} else {
 		if (!hot && !cold_count)
 			return -EINVAL;
@@ -351,7 +366,7 @@ fail_drop:
 }
 
 static int f2fs_create(struct mnt_idmap *idmap, struct inode *dir,
-		       struct dentry *dentry, umode_t mode, bool excl)
+		       struct dentry *dentry, umode_t mode)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dir);
 	struct f2fs_lock_context lc;
@@ -727,7 +742,7 @@ static struct dentry *f2fs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	if (err)
 		return ERR_PTR(err);
 
-	inode = f2fs_new_inode(idmap, dir, S_IFDIR | mode, NULL);
+	inode = f2fs_new_inode(idmap, dir, mode, NULL);
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
 

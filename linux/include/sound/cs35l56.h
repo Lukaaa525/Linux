@@ -286,6 +286,8 @@ struct snd_ctl_elem_value;
 #define CS35L56_MBOX_TIMEOUT_US				5000
 #define CS35L56_MBOX_POLL_US				250
 
+#define CS35L56_FW_REQ_ACTIVE_TIMEOUT_MS		250
+
 #define CS35L56_PS0_POLL_US				500
 #define CS35L56_PS0_TIMEOUT_US				50000
 #define CS35L56_PS3_POLL_US				500
@@ -435,6 +437,7 @@ ssize_t cs35l56_cal_data_debugfs_read(struct cs35l56_base *cs35l56_base,
 ssize_t cs35l56_cal_data_debugfs_write(struct cs35l56_base *cs35l56_base,
 				       const char __user *from, size_t count,
 				       loff_t *ppos);
+int cs35l56_factory_calibrate(struct cs35l56_base *cs35l56_base);
 void cs35l56_create_cal_debugfs(struct cs35l56_base *cs35l56_base,
 				const struct cs35l56_cal_debugfs_fops *fops);
 void cs35l56_remove_cal_debugfs(struct cs35l56_base *cs35l56_base);

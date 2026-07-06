@@ -99,6 +99,12 @@ enum {
 	OVL_VERITY_REQUIRE,
 };
 
+enum {
+	OVL_FSYNC_VOLATILE,
+	OVL_FSYNC_AUTO,
+	OVL_FSYNC_STRICT,
+};
+
 /*
  * The tuple (fh,uuid) is a universal unique identifier for a copy up origin,
  * where:
@@ -314,6 +320,7 @@ static inline int ovl_do_setxattr(struct ovl_fs *ofs, struct dentry *dentry,
 				  const char *name, const void *value,
 				  size_t size, int flags)
 {
+	/* Use vfs_setxattr(), not __vfs_setxattr(): it idmaps the security.capability rootid. */
 	int err = vfs_setxattr(ovl_upper_mnt_idmap(ofs), dentry, name,
 			       value, size, flags);
 
@@ -645,6 +652,21 @@ static inline bool ovl_has_fsid(struct ovl_fs *ofs)
 static inline bool ovl_xino_warn(struct ovl_fs *ofs)
 {
 	return ofs->config.xino == OVL_XINO_ON;
+}
+
+static inline bool ovl_should_sync(struct ovl_fs *ofs)
+{
+	return ofs->config.fsync_mode != OVL_FSYNC_VOLATILE;
+}
+
+static inline bool ovl_should_sync_metadata(struct ovl_fs *ofs)
+{
+	return ofs->config.fsync_mode == OVL_FSYNC_STRICT;
+}
+
+static inline bool ovl_is_volatile(struct ovl_config *config)
+{
+	return config->fsync_mode == OVL_FSYNC_VOLATILE;
 }
 
 /*

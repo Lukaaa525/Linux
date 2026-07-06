@@ -520,43 +520,36 @@ int __sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 }
 EXPORT_SYMBOL(__sock_queue_rcv_skb);
 
-int sock_queue_rcv_skb_reason(struct sock *sk, struct sk_buff *skb,
-			      enum skb_drop_reason *reason)
+enum skb_drop_reason
+sock_queue_rcv_skb_reason(struct sock *sk, struct sk_buff *skb)
 {
 	enum skb_drop_reason drop_reason;
 	int err;
 
-	err = sk_filter_reason(sk, skb, &drop_reason);
-	if (err)
-		goto out;
+	drop_reason = sk_filter_reason(sk, skb);
+	if (drop_reason)
+		return drop_reason;
 
 	err = __sock_queue_rcv_skb(sk, skb);
 	switch (err) {
 	case -ENOMEM:
-		drop_reason = SKB_DROP_REASON_SOCKET_RCVBUFF;
-		break;
+		return SKB_DROP_REASON_SOCKET_RCVBUFF;
 	case -ENOBUFS:
-		drop_reason = SKB_DROP_REASON_PROTO_MEM;
-		break;
-	default:
-		drop_reason = SKB_NOT_DROPPED_YET;
-		break;
+		return SKB_DROP_REASON_PROTO_MEM;
 	}
-out:
-	if (reason)
-		*reason = drop_reason;
-	return err;
+	return SKB_NOT_DROPPED_YET;
 }
 EXPORT_SYMBOL(sock_queue_rcv_skb_reason);
 
 int __sk_receive_skb(struct sock *sk, struct sk_buff *skb,
 		     const int nested, unsigned int trim_cap, bool refcounted)
 {
-	enum skb_drop_reason reason = SKB_DROP_REASON_NOT_SPECIFIED;
+	enum skb_drop_reason reason;
 	int rc = NET_RX_SUCCESS;
 	int err;
 
-	if (sk_filter_trim_cap(sk, skb, trim_cap, &reason))
+	reason = sk_filter_trim_cap(sk, skb, trim_cap);
+	if (reason)
 		goto discard_and_relse;
 
 	skb->dev = NULL;
@@ -973,6 +966,8 @@ EXPORT_SYMBOL(sock_set_keepalive);
 
 static void __sock_set_rcvbuf(struct sock *sk, int val)
 {
+	struct socket *sock = sk->sk_socket;
+
 	/* Ensure val * 2 fits into an int, to prevent max_t() from treating it
 	 * as a negative value.
 	 */
@@ -990,6 +985,13 @@ static void __sock_set_rcvbuf(struct sock *sk, int val)
 	 * we actually used in getsockopt is the most desirable behavior.
 	 */
 	WRITE_ONCE(sk->sk_rcvbuf, max_t(int, val * 2, SOCK_MIN_RCVBUF));
+
+	if (sock) {
+		const struct proto_ops *ops = READ_ONCE(sock->ops);
+
+		if (ops->set_rcvbuf)
+			ops->set_rcvbuf(sk, sk->sk_rcvbuf);
+	}
 }
 
 void sock_set_rcvbuf(struct sock *sk, int val)
@@ -1463,6 +1465,11 @@ set_sndbuf:
 	case SO_ATTACH_FILTER: {
 		struct sock_fprog fprog;
 
+		if (sk_is_tcp(sk) &&
+		    !sockopt_ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN)) {
+			ret = -EPERM;
+			break;
+		}
 		ret = copy_bpf_fprog_from_user(&fprog, optval, optlen);
 		if (!ret)
 			ret = sk_attach_filter(&fprog, sk);
@@ -2583,6 +2590,7 @@ struct sock *sk_clone(const struct sock *sk, const gfp_t priority,
 
 	sk_set_socket(newsk, NULL);
 	sk_tx_queue_clear(newsk);
+	sk_rx_queue_clear(newsk);
 	RCU_INIT_POINTER(newsk->sk_wq, NULL);
 
 	if (newsk->sk_prot->sockets_allocated)
@@ -2673,8 +2681,12 @@ void sock_wfree(struct sk_buff *skb)
 	int old;
 
 	if (!sock_flag(sk, SOCK_USE_WRITE_QUEUE)) {
+		void (*sk_write_space)(struct sock *sk);
+
+		sk_write_space = READ_ONCE(sk->sk_write_space);
+
 		if (sock_flag(sk, SOCK_RCU_FREE) &&
-		    sk->sk_write_space == sock_def_write_space) {
+		    sk_write_space == sock_def_write_space) {
 			rcu_read_lock();
 			free = __refcount_sub_and_test(len, &sk->sk_wmem_alloc,
 						       &old);
@@ -2690,7 +2702,7 @@ void sock_wfree(struct sk_buff *skb)
 		 * after sk_write_space() call
 		 */
 		WARN_ON(refcount_sub_and_test(len - 1, &sk->sk_wmem_alloc));
-		sk->sk_write_space(sk);
+		sk_write_space(sk);
 		len = 1;
 	}
 	/*
@@ -2705,6 +2717,7 @@ EXPORT_SYMBOL(sock_wfree);
 /* This variant of sock_wfree() is used by TCP,
  * since it sets SOCK_USE_WRITE_QUEUE.
  */
+#ifdef CONFIG_INET
 void __sock_wfree(struct sk_buff *skb)
 {
 	struct sock *sk = skb->sk;
@@ -2712,6 +2725,8 @@ void __sock_wfree(struct sk_buff *skb)
 	if (refcount_sub_and_test(skb->truesize, &sk->sk_wmem_alloc))
 		__sk_free(sk);
 }
+EXPORT_SYMBOL_GPL(__sock_wfree);
+#endif
 
 void skb_set_owner_w(struct sk_buff *skb, struct sock *sk)
 {
@@ -3035,12 +3050,42 @@ int __sock_cmsg_send(struct sock *sk, struct cmsghdr *cmsg,
 		sockc->tsflags |= tsflags;
 		break;
 	case SCM_TXTIME:
+	{
+		ktime_t tmin;
+		u64 txtime;
+
 		if (!sock_flag(sk, SOCK_TXTIME))
 			return -EINVAL;
 		if (cmsg->cmsg_len != CMSG_LEN(sizeof(u64)))
 			return -EINVAL;
-		sockc->transmit_time = get_unaligned((u64 *)CMSG_DATA(cmsg));
+
+		txtime = get_unaligned((u64 *)CMSG_DATA(cmsg));
+
+		/* Allow sending without a delivery time: zero special case */
+		if (!txtime) {
+			sockc->transmit_time = 0;
+			break;
+		}
+
+		switch (sk->sk_clockid) {
+		case CLOCK_MONOTONIC:
+			tmin = 1;
+			break;
+		case CLOCK_REALTIME:
+			tmin = max(ktime_mono_to_real(0), 1);
+			break;
+		case CLOCK_TAI:
+			tmin = max(ktime_mono_to_any(0, TK_OFFS_TAI), 1);
+			break;
+		default:
+			tmin = 1;
+			WARN_ON_ONCE(1);
+			break;
+		}
+
+		sockc->transmit_time = max_t(ktime_t, txtime, tmin);
 		break;
+	}
 	case SCM_TS_OPT_ID:
 		if (sk_is_tcp(sk))
 			return -EINVAL;

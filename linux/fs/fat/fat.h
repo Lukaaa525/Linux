@@ -10,6 +10,8 @@
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 
+struct file_kattr;
+
 /*
  * vfat shortname flags
  */
@@ -130,6 +132,7 @@ struct msdos_inode_info {
 	struct hlist_node i_dir_hash;	/* hash by i_logstart */
 	struct rw_semaphore truncate_lock; /* protect bmap against truncate */
 	struct timespec64 i_crtime;	/* File creation (birth) time */
+	struct mapping_metadata_bhs i_metadata_bhs;
 	struct inode vfs_inode;
 };
 
@@ -246,13 +249,13 @@ static inline unsigned char fat_checksum(const __u8 *name)
 	return s;
 }
 
-static inline sector_t fat_clus_to_blknr(struct msdos_sb_info *sbi, int clus)
+static inline sector_t fat_clus_to_blknr(const struct msdos_sb_info *sbi, int clus)
 {
 	return ((sector_t)clus - FAT_START_ENT) * sbi->sec_per_clus
 		+ sbi->data_start;
 }
 
-static inline void fat_get_blknr_offset(struct msdos_sb_info *sbi,
+static inline void fat_get_blknr_offset(const struct msdos_sb_info *sbi,
 				loff_t i_pos, sector_t *blknr, int *offset)
 {
 	*blknr = i_pos >> sbi->dir_per_block_bits;
@@ -407,6 +410,7 @@ extern void fat_truncate_blocks(struct inode *inode, loff_t offset);
 extern int fat_getattr(struct mnt_idmap *idmap,
 		       const struct path *path, struct kstat *stat,
 		       u32 request_mask, unsigned int flags);
+int fat_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
 extern int fat_file_fsync(struct file *file, loff_t start, loff_t end,
 			  int datasync);
 
